@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "BASS - Booking Assistant",
+  "version": "5.3",
+  "description": "Your all-in-one booking assistant for Reservation Operations.",
+  "permissions": ["sidePanel", "storage", "activeTab", "identity", "tabs"],
+  "host_permissions": [
+    "https://script.google.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "action": {
+    "default_title": "Open RO Booking Assistant"
+  }
+}
