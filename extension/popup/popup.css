@@ -12,6 +12,9 @@
   --font:       'Inter', system-ui, sans-serif;
 }
 
+/* Ensure [hidden] always wins over element-specific display rules (e.g. display:flex) */
+[hidden] { display: none !important; }
+
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
 body {
