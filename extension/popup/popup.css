@@ -66,6 +66,24 @@ header {
 }
 .banner--warn a { color: var(--warn); }
 
+/* ── Re-check button ────────────────────────── */
+.recheck-btn {
+  display: block;
+  width: calc(100% - 28px);
+  margin: 8px 14px 0;
+  padding: 7px 14px;
+  background: rgba(251,191,36,0.15);
+  border: 1px solid rgba(251,191,36,0.35);
+  border-radius: var(--radius);
+  color: var(--warn);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  text-align: center;
+  transition: background 0.15s;
+}
+.recheck-btn:hover { background: rgba(251,191,36,0.25); }
+
 /* ── Search ─────────────────────────────────── */
 #search-section { padding: 12px 14px 0; }
 .search-row {
