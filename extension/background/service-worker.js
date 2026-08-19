@@ -4,67 +4,49 @@ chrome.runtime.onInstalled.addListener(() => {
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
 });
 
-// ── Content-script relay ─────────────────────────────────────────────────────
-// All BMS API calls go through the content script in the Box Office tab.
-// Content script runs in BMS's own origin so session cookies attach automatically.
+// ── BMS API calls via executeScript ──────────────────────────────────────────
+// We inject an inline async function into the BMS tab instead of using a
+// persistent content script + message passing. This avoids all timing issues:
+// - No need to wait for document_idle to register a listener
+// - No stale listeners after extension reload
+// - Works immediately on any already-open BMS tab
+// The injected function runs in the tab's isolated world with the page's
+// origin, so session cookies are included automatically (same-origin fetch).
 
 async function findBmsTab() {
   const tabs = await chrome.tabs.query({ url: 'https://box-office.headout.com/*' });
   return tabs[0] || null;
 }
 
-// Send a message to the content script with a 20-second hard timeout.
-// If the script hasn't registered yet (tab just refreshed), inject it
-// programmatically and retry once. A `settled` guard ensures the Promise
-// resolves or rejects exactly once even across the inject-and-retry path.
-function sendToContentScript(tabId, msg) {
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const settle = (fn, val) => {
-      if (settled) return;
-      settled = true;
-      fn(val);
+// The fetch function injected into the BMS tab.
+// Must be a self-contained function (no closures over external vars).
+async function bmsTabFetch(fetchUrl) {
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15000);
+    const res = await fetch(fetchUrl, {
+      method: 'GET',
+      credentials: 'include',
+      signal: controller.signal,
+      headers: { 'x-platform': 'lego' },
+    });
+    clearTimeout(timer);
+    let data = null;
+    let error = null;
+    try {
+      data = await res.json();
+      if (!res.ok) {
+        error = data?.error || data?.message || data?.errorMessage
+          || data?.errors?.[0]?.message || null;
+      }
+    } catch (_) {}
+    return { ok: res.ok, status: res.status, data, error };
+  } catch (err) {
+    return {
+      ok: false, status: 0, data: null,
+      error: err.name === 'AbortError' ? 'Request timed out (15 s)' : err.message,
     };
-
-    const doSend = (allowInject) => {
-      const timer = setTimeout(() => {
-        settle(reject, { type: 'TIMEOUT', message: 'Content script did not respond within 20 s.' });
-      }, 20000);
-
-      chrome.tabs.sendMessage(tabId, msg, response => {
-        clearTimeout(timer);
-        if (settled) return;
-
-        if (chrome.runtime.lastError) {
-          const err = chrome.runtime.lastError.message || '';
-          const notReady =
-            err.includes('Receiving end does not exist') ||
-            err.includes('Could not establish connection');
-
-          if (allowInject && notReady) {
-            // Inject the content script programmatically and retry once
-            chrome.scripting.executeScript(
-              { target: { tabId }, files: ['content/content.js'] },
-              () => {
-                if (chrome.runtime.lastError) {
-                  settle(reject, { type: 'CONTENT_SCRIPT_ERROR', message: chrome.runtime.lastError.message });
-                } else {
-                  setTimeout(() => doSend(false), 150);
-                }
-              }
-            );
-          } else {
-            settle(reject, { type: 'CONTENT_SCRIPT_ERROR', message: err });
-          }
-          return;
-        }
-
-        settle(resolve, response);
-      });
-    };
-
-    doSend(true);
-  });
+  }
 }
 
 async function bmsApiCall(url) {
@@ -73,33 +55,37 @@ async function bmsApiCall(url) {
     return { ok: false, status: null, type: 'NO_BMS_TAB',
       error: 'Open box-office.headout.com in a Chrome tab first.' };
   }
+
+  let results;
   try {
-    const result = await sendToContentScript(tab.id, { action: 'BMS_FETCH', url });
-    if (!result) {
-      return { ok: false, status: null, type: 'NO_RESPONSE',
-        error: 'No response from content script — refresh the Box Office tab.' };
-    }
-    // status:0 = network failure or AbortController timeout inside content script
-    if (!result.ok && result.status === 0) {
-      return { ...result, type: 'FETCH_ERROR' };
-    }
-    // Map HTTP auth errors to named types so popup can trigger the right recovery
-    if (result.status === 401) {
-      return { ...result, type: 'NOT_AUTHENTICATED',
-        error: result.error || 'Not authenticated — log into Box Office and try again.' };
-    }
-    if (result.status === 403) {
-      return { ...result, type: 'SESSION_EXPIRED',
-        error: result.error || 'Session expired — log into Box Office and try again.' };
-    }
-    return result;
+    results = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: bmsTabFetch,
+      args: [url],
+    });
   } catch (err) {
-    if (err.type === 'TIMEOUT') {
-      return { ok: false, status: null, type: 'TIMEOUT', error: err.message };
-    }
     return { ok: false, status: null, type: 'REFRESH_BMS_TAB',
-      error: 'Refresh the Box Office tab and try again.' };
+      error: 'Could not run in Box Office tab — refresh it and try again. (' + err.message + ')' };
   }
+
+  const result = results?.[0]?.result;
+  if (!result) {
+    return { ok: false, status: null, type: 'NO_RESPONSE',
+      error: 'No response from Box Office tab — refresh it and try again.' };
+  }
+
+  if (!result.ok && result.status === 0) {
+    return { ...result, type: 'FETCH_ERROR' };
+  }
+  if (result.status === 401) {
+    return { ...result, type: 'NOT_AUTHENTICATED',
+      error: result.error || 'Not authenticated — log into Box Office.' };
+  }
+  if (result.status === 403) {
+    return { ...result, type: 'SESSION_EXPIRED',
+      error: result.error || 'Session expired — log into Box Office again.' };
+  }
+  return result;
 }
 
 // ── Auth check ───────────────────────────────────────────────────────────────
@@ -110,19 +96,16 @@ async function testAuthentication() {
 
   const result = await bmsApiCall(ENDPOINTS.booking('00000000'));
 
-  // Connection / injection errors
-  if (result.type === 'NO_BMS_TAB')      return 'NO_BMS_TAB';
-  if (result.type === 'REFRESH_BMS_TAB') return 'REFRESH_BMS_TAB';
-  if (result.type === 'NO_RESPONSE')     return 'REFRESH_BMS_TAB';
-  if (result.type === 'TIMEOUT')         return 'TIMEOUT';
-  if (result.type === 'FETCH_ERROR')     return 'TIMEOUT';
-
-  // HTTP-level auth failures (already mapped to named types by bmsApiCall)
+  if (result.type === 'NO_BMS_TAB')        return 'NO_BMS_TAB';
+  if (result.type === 'REFRESH_BMS_TAB')   return 'REFRESH_BMS_TAB';
+  if (result.type === 'NO_RESPONSE')       return 'REFRESH_BMS_TAB';
+  if (result.type === 'TIMEOUT')           return 'TIMEOUT';
+  if (result.type === 'FETCH_ERROR')       return 'TIMEOUT';
   if (result.type === 'NOT_AUTHENTICATED') return 'NOT_AUTHENTICATED';
   if (result.type === 'SESSION_EXPIRED')   return 'SESSION_EXPIRED';
 
-  // Any real HTTP response (200, 400, 404, 422, 500…) = connected & session valid
-  if (result.status > 0 || result.ok)   return 'AUTHENTICATED';
+  // Any real HTTP response = content script working + session valid
+  if (result.status > 0 || result.ok)     return 'AUTHENTICATED';
 
   return 'REFRESH_BMS_TAB';
 }
