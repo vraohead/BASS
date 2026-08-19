@@ -7,6 +7,13 @@
   "host_permissions": [
     "https://box-office.headout.com/*"
   ],
+  "content_scripts": [
+    {
+      "matches": ["https://box-office.headout.com/*"],
+      "js": ["content/content.js"],
+      "run_at": "document_idle"
+    }
+  ],
   "background": {
     "service_worker": "background/service-worker.js",
     "type": "module"

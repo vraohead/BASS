@@ -33,30 +33,43 @@ async function checkAuth() {
   const status = await sendMessage({ action: 'TEST_AUTH' });
 
   badge.className = 'badge';
+  warning.hidden  = true;
+
   if (status === 'AUTHENTICATED') {
     badge.textContent = '✓ Box Office session active';
     badge.classList.add('badge--ok');
     input.disabled = false;
     btn.disabled   = false;
+  } else if (status === 'NO_BMS_TAB') {
+    badge.textContent = '⚠ No Box Office tab open';
+    badge.classList.add('badge--warn');
+    warning.textContent = 'Open box-office.headout.com in a Chrome tab and log in, then reload BASS.';
+    warning.hidden = false;
+    input.disabled = true;
+    btn.disabled   = true;
+  } else if (status === 'REFRESH_BMS_TAB') {
+    badge.textContent = '⚠ Refresh Box Office tab';
+    badge.classList.add('badge--warn');
+    warning.textContent = 'Refresh your Box Office tab (F5), then reload BASS.';
+    warning.hidden = false;
+    input.disabled = true;
+    btn.disabled   = true;
   } else if (status === 'NOT_AUTHENTICATED') {
     badge.textContent = '⚠ Not logged in';
     badge.classList.add('badge--warn');
+    warning.textContent = 'Log into Box Office, then reload BASS.';
     warning.hidden = false;
     input.disabled = true;
     btn.disabled   = true;
   } else if (status === 'SESSION_EXPIRED') {
     badge.textContent = '⚠ Session expired';
     badge.classList.add('badge--warn');
+    warning.textContent = 'Your Box Office session has expired — log in again, then reload BASS.';
     warning.hidden = false;
     input.disabled = true;
     btn.disabled   = true;
-  } else if (status === 'REQUEST_BLOCKED') {
-    badge.textContent = '✕ Cannot reach Box Office';
-    badge.classList.add('badge--error');
-    input.disabled = true;
-    btn.disabled   = true;
   } else {
-    badge.textContent = '? Unknown session state';
+    badge.textContent = '? Unknown — try refreshing Box Office tab';
     badge.classList.add('badge--warn');
   }
 }
