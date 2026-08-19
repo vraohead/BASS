@@ -15,7 +15,8 @@ async function findBmsTab() {
 
 // Send a message to the content script with a 20-second hard timeout.
 // If the script hasn't registered yet (tab just refreshed), inject it
-// programmatically via chrome.scripting and retry once.
+// programmatically and retry once. A `settled` guard ensures the Promise
+// resolves or rejects exactly once even across the inject-and-retry path.
 function sendToContentScript(tabId, msg) {
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -32,7 +33,7 @@ function sendToContentScript(tabId, msg) {
 
       chrome.tabs.sendMessage(tabId, msg, response => {
         clearTimeout(timer);
-        if (settled) return; // timer already fired
+        if (settled) return;
 
         if (chrome.runtime.lastError) {
           const err = chrome.runtime.lastError.message || '';
@@ -41,7 +42,7 @@ function sendToContentScript(tabId, msg) {
             err.includes('Could not establish connection');
 
           if (allowInject && notReady) {
-            // Inject the content script and retry once
+            // Inject the content script programmatically and retry once
             chrome.scripting.executeScript(
               { target: { tabId }, files: ['content/content.js'] },
               () => {
@@ -78,9 +79,18 @@ async function bmsApiCall(url) {
       return { ok: false, status: null, type: 'NO_RESPONSE',
         error: 'No response from content script — refresh the Box Office tab.' };
     }
-    // Tag status:0 responses (fetch timeout or network error inside content script)
+    // status:0 = network failure or AbortController timeout inside content script
     if (!result.ok && result.status === 0) {
       return { ...result, type: 'FETCH_ERROR' };
+    }
+    // Map HTTP auth errors to named types so popup can trigger the right recovery
+    if (result.status === 401) {
+      return { ...result, type: 'NOT_AUTHENTICATED',
+        error: result.error || 'Not authenticated — log into Box Office and try again.' };
+    }
+    if (result.status === 403) {
+      return { ...result, type: 'SESSION_EXPIRED',
+        error: result.error || 'Session expired — log into Box Office and try again.' };
     }
     return result;
   } catch (err) {
@@ -100,21 +110,18 @@ async function testAuthentication() {
 
   const result = await bmsApiCall(ENDPOINTS.booking('00000000'));
 
-  // Connection/injection errors first
+  // Connection / injection errors
   if (result.type === 'NO_BMS_TAB')      return 'NO_BMS_TAB';
   if (result.type === 'REFRESH_BMS_TAB') return 'REFRESH_BMS_TAB';
   if (result.type === 'NO_RESPONSE')     return 'REFRESH_BMS_TAB';
   if (result.type === 'TIMEOUT')         return 'TIMEOUT';
-  if (result.type === 'FETCH_ERROR')     return 'TIMEOUT'; // content script fetch timed out
+  if (result.type === 'FETCH_ERROR')     return 'TIMEOUT';
 
-  // HTTP-level auth failures
-  if (result.status === 401)             return 'NOT_AUTHENTICATED';
-  if (result.status === 403)             return 'SESSION_EXPIRED';
+  // HTTP-level auth failures (already mapped to named types by bmsApiCall)
+  if (result.type === 'NOT_AUTHENTICATED') return 'NOT_AUTHENTICATED';
+  if (result.type === 'SESSION_EXPIRED')   return 'SESSION_EXPIRED';
 
-  // Any real HTTP response (200, 400, 404, 422, 500 …) means:
-  // - the content script is working
-  // - the BMS server responded
-  // - the session cookie was accepted (otherwise we'd get 401/403)
+  // Any real HTTP response (200, 400, 404, 422, 500…) = connected & session valid
   if (result.status > 0 || result.ok)   return 'AUTHENTICATED';
 
   return 'REFRESH_BMS_TAB';

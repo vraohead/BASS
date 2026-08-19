@@ -1,5 +1,9 @@
 // Injected into https://box-office.headout.com/* pages.
 // Runs in the page's own origin context so session cookies attach automatically.
+//
+// NOTE: content scripts don't support ES module imports, so BMS_HEADERS is
+// duplicated here. Keep it in sync with src/api/bms.js DEFAULT_HEADERS.
+const BMS_HEADERS = { 'x-platform': 'lego' };
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (!msg || msg.action !== 'BMS_FETCH') return;
@@ -11,21 +15,29 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     method: msg.method || 'GET',
     credentials: 'include',
     signal: controller.signal,
-    headers: { 'x-platform': 'lego', ...(msg.headers || {}) },
+    headers: { ...BMS_HEADERS, ...(msg.headers || {}) },
   })
   .then(async res => {
     clearTimeout(timer);
     let data = null;
-    try { data = await res.json(); } catch (_) {}
-    sendResponse({ ok: res.ok, status: res.status, data });
+    let error = null;
+    try {
+      data = await res.json();
+      // Try to surface a human-readable error from the response body
+      if (!res.ok) {
+        error = data?.error || data?.message || data?.errorMessage
+          || data?.errors?.[0]?.message || null;
+      }
+    } catch (_) {}
+    sendResponse({ ok: res.ok, status: res.status, data, error });
   })
   .catch(err => {
     clearTimeout(timer);
     sendResponse({
-      ok: false, status: 0,
-      error: err.name === 'AbortError' ? 'Request timed out (15s)' : err.message,
+      ok: false, status: 0, data: null,
+      error: err.name === 'AbortError' ? 'Request timed out (15 s)' : err.message,
     });
   });
 
-  return true; // keep channel open for async response
+  return true; // keep message channel open for async response
 });
