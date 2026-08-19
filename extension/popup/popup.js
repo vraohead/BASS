@@ -110,7 +110,7 @@ async function doSearch() {
     if (errType === 'NOT_AUTHENTICATED' || errType === 'SESSION_EXPIRED') {
       setError('Your Box Office session has expired — log in and try again.');
       await checkAuth();
-    } else if (errType === 'TIMEOUT') {
+    } else if (errType === 'TIMEOUT' || errType === 'FETCH_ERROR') {
       setError('Request timed out. Check the Box Office tab is loaded, then try again.');
     } else if (errType === 'NO_BMS_TAB' || errType === 'REFRESH_BMS_TAB') {
       setError(result.error || 'Box Office tab not ready. Refresh it and try again.');

@@ -6,56 +6,63 @@ chrome.runtime.onInstalled.addListener(() => {
 
 // ── Content-script relay ─────────────────────────────────────────────────────
 // All BMS API calls go through the content script in the Box Office tab.
-// The content script runs in BMS's own origin so session cookies attach automatically.
+// Content script runs in BMS's own origin so session cookies attach automatically.
 
 async function findBmsTab() {
   const tabs = await chrome.tabs.query({ url: 'https://box-office.headout.com/*' });
   return tabs[0] || null;
 }
 
-// Send a message to the content script. If the script isn't registered yet
-// (tab just refreshed), inject it programmatically and retry once.
+// Send a message to the content script with a 20-second hard timeout.
+// If the script hasn't registered yet (tab just refreshed), inject it
+// programmatically via chrome.scripting and retry once.
 function sendToContentScript(tabId, msg) {
   return new Promise((resolve, reject) => {
-    trySend(tabId, msg, resolve, reject, /* allowInject */ true);
-  });
-}
+    let settled = false;
+    const settle = (fn, val) => {
+      if (settled) return;
+      settled = true;
+      fn(val);
+    };
 
-function trySend(tabId, msg, resolve, reject, allowInject) {
-  // Overall 20-second hard timeout (covers network latency in content script fetch)
-  const timer = setTimeout(() => {
-    reject({ type: 'TIMEOUT', message: 'Content script did not respond within 20 s.' });
-  }, 20000);
+    const doSend = (allowInject) => {
+      const timer = setTimeout(() => {
+        settle(reject, { type: 'TIMEOUT', message: 'Content script did not respond within 20 s.' });
+      }, 20000);
 
-  chrome.tabs.sendMessage(tabId, msg, response => {
-    clearTimeout(timer);
+      chrome.tabs.sendMessage(tabId, msg, response => {
+        clearTimeout(timer);
+        if (settled) return; // timer already fired
 
-    if (chrome.runtime.lastError) {
-      const err = chrome.runtime.lastError.message || '';
-      const notReady =
-        err.includes('Receiving end does not exist') ||
-        err.includes('Could not establish connection');
+        if (chrome.runtime.lastError) {
+          const err = chrome.runtime.lastError.message || '';
+          const notReady =
+            err.includes('Receiving end does not exist') ||
+            err.includes('Could not establish connection');
 
-      if (allowInject && notReady) {
-        // Content script hasn't registered yet — inject it then retry
-        chrome.scripting.executeScript(
-          { target: { tabId }, files: ['content/content.js'] },
-          () => {
-            if (chrome.runtime.lastError) {
-              reject({ type: 'CONTENT_SCRIPT_ERROR', message: chrome.runtime.lastError.message });
-            } else {
-              // Brief pause for the listener to register before retrying
-              setTimeout(() => trySend(tabId, msg, resolve, reject, false), 150);
-            }
+          if (allowInject && notReady) {
+            // Inject the content script and retry once
+            chrome.scripting.executeScript(
+              { target: { tabId }, files: ['content/content.js'] },
+              () => {
+                if (chrome.runtime.lastError) {
+                  settle(reject, { type: 'CONTENT_SCRIPT_ERROR', message: chrome.runtime.lastError.message });
+                } else {
+                  setTimeout(() => doSend(false), 150);
+                }
+              }
+            );
+          } else {
+            settle(reject, { type: 'CONTENT_SCRIPT_ERROR', message: err });
           }
-        );
-      } else {
-        reject({ type: 'CONTENT_SCRIPT_ERROR', message: err });
-      }
-      return;
-    }
+          return;
+        }
 
-    resolve(response);
+        settle(resolve, response);
+      });
+    };
+
+    doSend(true);
   });
 }
 
@@ -67,8 +74,15 @@ async function bmsApiCall(url) {
   }
   try {
     const result = await sendToContentScript(tab.id, { action: 'BMS_FETCH', url });
-    return result || { ok: false, status: null, type: 'NO_RESPONSE',
-      error: 'No response from content script — refresh the Box Office tab.' };
+    if (!result) {
+      return { ok: false, status: null, type: 'NO_RESPONSE',
+        error: 'No response from content script — refresh the Box Office tab.' };
+    }
+    // Tag status:0 responses (fetch timeout or network error inside content script)
+    if (!result.ok && result.status === 0) {
+      return { ...result, type: 'FETCH_ERROR' };
+    }
+    return result;
   } catch (err) {
     if (err.type === 'TIMEOUT') {
       return { ok: false, status: null, type: 'TIMEOUT', error: err.message };
@@ -84,14 +98,25 @@ async function testAuthentication() {
   const tab = await findBmsTab();
   if (!tab) return 'NO_BMS_TAB';
 
-  // 404 = endpoint reached (booking not found is fine), confirms session is valid.
-  // 401/403 = not authenticated / session expired.
   const result = await bmsApiCall(ENDPOINTS.booking('00000000'));
-  if (result.ok || result.status === 404) return 'AUTHENTICATED';
-  if (result.status === 401)              return 'NOT_AUTHENTICATED';
-  if (result.status === 403)              return 'SESSION_EXPIRED';
-  if (result.type === 'NO_BMS_TAB')       return 'NO_BMS_TAB';
-  if (result.type === 'TIMEOUT')          return 'TIMEOUT';
+
+  // Connection/injection errors first
+  if (result.type === 'NO_BMS_TAB')      return 'NO_BMS_TAB';
+  if (result.type === 'REFRESH_BMS_TAB') return 'REFRESH_BMS_TAB';
+  if (result.type === 'NO_RESPONSE')     return 'REFRESH_BMS_TAB';
+  if (result.type === 'TIMEOUT')         return 'TIMEOUT';
+  if (result.type === 'FETCH_ERROR')     return 'TIMEOUT'; // content script fetch timed out
+
+  // HTTP-level auth failures
+  if (result.status === 401)             return 'NOT_AUTHENTICATED';
+  if (result.status === 403)             return 'SESSION_EXPIRED';
+
+  // Any real HTTP response (200, 400, 404, 422, 500 …) means:
+  // - the content script is working
+  // - the BMS server responded
+  // - the session cookie was accepted (otherwise we'd get 401/403)
+  if (result.status > 0 || result.ok)   return 'AUTHENTICATED';
+
   return 'REFRESH_BMS_TAB';
 }
 
