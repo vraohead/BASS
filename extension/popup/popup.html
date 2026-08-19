@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>BASS</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <header>
+    <span class="logo">BASS</span>
+    <span id="auth-badge" class="badge badge--checking">checking session…</span>
+  </header>
+
+  <div id="auth-warning" class="banner banner--warn" hidden>
+    <strong>Not logged into Box Office.</strong>
+    Open <a href="https://box-office.headout.com" target="_blank">box-office.headout.com</a>
+    and log in, then reload BASS.
+  </div>
+
+  <section id="search-section">
+    <div class="search-row">
+      <input
+        id="booking-id"
+        type="text"
+        inputmode="numeric"
+        placeholder="Booking ID"
+        autocomplete="off"
+        spellcheck="false"
+      />
+      <button id="search-btn">Search</button>
+    </div>
+    <p id="search-error" class="error" hidden></p>
+  </section>
+
+  <section id="result-section" hidden>
+    <div id="result-header">
+      <span class="result-label">Booking</span>
+      <span id="result-booking-id" class="result-id"></span>
+    </div>
+    <div id="result-fields"></div>
+
+    <details id="raw-details">
+      <summary>Raw API response</summary>
+      <pre id="raw-json"></pre>
+    </details>
+  </section>
+
+  <section id="loading-section" hidden>
+    <div class="spinner"></div>
+    <p>Fetching from Box Office…</p>
+  </section>
+
+  <script type="module" src="popup.js"></script>
+</body>
+</html>
