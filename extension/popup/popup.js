@@ -33,7 +33,7 @@ async function checkAuth() {
   warning.hidden    = true;
   recheck.hidden    = true;
 
-  const status = await sendMessage({ action: 'TEST_AUTH' });
+  const status = await sendMessage({ action: 'TEST_AUTH' }) ?? 'UNKNOWN';
 
   badge.className = 'badge';
 
@@ -71,6 +71,8 @@ async function checkAuth() {
     badge.classList.add('badge--warn');
     recheck.hidden  = false;
   }
+
+  return status;
 }
 
 // ── Search ───────────────────────────────────────────────────────────────────
@@ -180,9 +182,27 @@ function sendMessage(msg) {
   });
 }
 
+// ── Auto-detect booking from current tab URL ─────────────────────────────────
+
+async function autoDetect() {
+  try {
+    const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    const url = tabs[0]?.url || '';
+    if (!url.startsWith('https://box-office.headout.com/')) return;
+    const match = url.match(/\/(\d{6,})/);
+    if (!match) return;
+    $('booking-id').value = match[1];
+    doSearch();
+  } catch (_) {}
+}
+
 // ── Init ─────────────────────────────────────────────────────────────────────
 
 $('booking-id').disabled = true;
 $('search-btn').disabled = true;
 showSection('search');
-checkAuth();
+
+(async () => {
+  const status = await checkAuth();
+  if (status === 'AUTHENTICATED') await autoDetect();
+})();
