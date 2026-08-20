@@ -206,7 +206,16 @@ body > * { position: relative; z-index: 1; }
 
 /* ── Warnings ────────────────────────────────────────────────────────── */
 .bms-warning { padding: 6px 12px; font-size: 11px; line-height: 1.5; font-weight: 600; flex: 0 0 auto; }
-.bms-warning { background: rgba(251,191,36,0.06); border-bottom: 2px solid var(--amber); color: var(--amber); }
+.bms-warning { background: rgba(251,191,36,0.06); border-bottom: 2px solid var(--amber); color: var(--amber); display: flex; align-items: center; gap: 8px; }
+/* [hidden] beats flex override at higher specificity */
+.bms-warning[hidden] { display: none !important; }
+.recheck-inline-btn {
+  flex-shrink: 0; padding: 2px 8px; background: transparent;
+  border: 1px solid currentColor; border-radius: 4px; font-size: 10px;
+  font-weight: 700; cursor: pointer; color: inherit; font-family: 'Inter', system-ui, sans-serif;
+  transition: opacity 0.12s;
+}
+.recheck-inline-btn:hover { opacity: 0.75; }
 
 /* ── Booking Summary Bar ─────────────────────────────────────────────── */
 .booking-summary-bar {
@@ -395,6 +404,44 @@ body > * { position: relative; z-index: 1; }
 
 /* ── Empty state ─────────────────────────────────────────────────────── */
 .instruction-empty { color: var(--muted); font-size: 11px; padding: 6px 0; font-style: italic; }
+
+/* ── Welcome placeholder ─────────────────────────────────────────────── */
+.welcome-placeholder {
+  display: flex; align-items: center; justify-content: center;
+  height: 100%; min-height: 120px;
+}
+.welcome-placeholder p { color: var(--muted); font-size: 12px; text-align: center; padding: 16px; font-weight: 500; }
+
+/* ── Plain-text instruction paragraphs ───────────────────────────────── */
+.instruction-text { display: flex; flex-direction: column; gap: 7px; }
+.instruction-para { font-size: 12.5px; line-height: 1.65; color: var(--text); overflow-wrap: anywhere; }
+
+/* ── Status badges ───────────────────────────────────────────────────── */
+.status-badge {
+  display: inline-flex; align-items: center;
+  padding: 1px 7px; border-radius: 10px;
+  font-size: 10px; font-weight: 700; letter-spacing: 0.04em;
+}
+.status-badge.yes { background: rgba(26,157,110,0.10); color: var(--green); border: 1px solid rgba(26,157,110,0.2); }
+.status-badge.no  { background: rgba(229,72,77,0.10); color: var(--red); border: 1px solid rgba(229,72,77,0.2); }
+.status-badge.na  { background: var(--surface2); color: var(--muted); border: 1px solid var(--border); }
+
+/* ── Booking-ID badge ────────────────────────────────────────────────── */
+.booking-id-badge {
+  display: inline-block;
+  background: linear-gradient(135deg, rgba(124,47,240,0.08), rgba(148,80,255,0.08));
+  border: 1px solid var(--accent); color: var(--accent);
+  border-radius: 6px; padding: 2px 8px;
+  font-family: 'JetBrains Mono', monospace; font-size: 11px;
+  font-weight: 700; letter-spacing: 0.5px;
+}
+
+/* ── Instruction block ────────────────────────────────────────────────── */
+.instr-block--booking { border-left: 3px solid var(--accent); }
+.instr-block--booking .instr-block__header { background: rgba(124,47,240,0.04); color: var(--accent); }
+
+/* ── Section title colour for raw ───────────────────────────────────── */
+[data-section-id="raw"] .section-title { color: var(--muted); }
 
 /* ── Footer ──────────────────────────────────────────────────────────── */
 .app-footer {

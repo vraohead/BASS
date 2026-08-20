@@ -26,23 +26,25 @@
       </div>
     </div>
     <div class="header-actions">
-      <span id="auth-pill" class="auth-pill auth-pill--checking">checking…</span>
-      <button id="recheck-btn" class="theme-toggle hidden" title="Re-check session">&#8635;</button>
+      <span id="auth-status" class="auth-pill auth-pill--checking">checking…</span>
       <button id="theme-toggle" class="theme-toggle" title="Toggle light/dark mode">&#9728;&#65039;</button>
     </div>
   </header>
 
   <!-- Search Bar -->
   <div class="search-bar">
-    <input type="text" id="ticket-input" placeholder="Enter Booking ID&hellip;" autocomplete="off" spellcheck="false" />
+    <input type="text" id="booking-id" placeholder="Booking ID&hellip;" inputmode="numeric" autocomplete="off" spellcheck="false" disabled />
     <div class="btn-row">
-      <button id="fetch-ticket" class="btn btn-primary" disabled>&#10227; Fetch</button>
-      <button id="clear-ticket" class="btn btn-danger">&#10005; Clear</button>
+      <button id="search-btn" class="btn btn-primary" disabled>&#10227; Fetch</button>
+      <button id="clear-btn" class="btn btn-danger">&#10005; Clear</button>
     </div>
   </div>
 
   <!-- Auth warning banner -->
-  <div id="auth-warning" class="bms-warning hidden"></div>
+  <div id="auth-warning" class="bms-warning" hidden>
+    <span id="auth-warning-text"></span>
+    <button id="recheck-btn" class="recheck-inline-btn">Re-check</button>
+  </div>
 
   <!-- Loading -->
   <div id="loading-spinner" class="spinner-wrap hidden">
@@ -54,7 +56,7 @@
   <div id="error-message" class="error-box hidden"></div>
 
   <!-- Booking Summary -->
-  <div id="booking-summary" class="booking-summary-bar hidden">
+  <div id="booking-summary" class="booking-summary-bar" hidden>
     <div id="bs-tour" class="bs-tour na">&mdash;</div>
     <div class="bs-facts">
       <div class="bs-fact">
@@ -77,11 +79,11 @@
   </div>
 
   <!-- Tab Nav -->
-  <nav id="tab-nav" class="tab-nav hidden">
-    <button class="tab-pill active" data-tab="booking">&#128203; Booking</button>
+  <nav id="tab-nav" class="tab-nav" hidden>
+    <button class="tab-pill active" data-tab="full-booking">&#128203; Booking</button>
     <button class="tab-pill" data-tab="instructions">&#128204; Instructions</button>
-    <button class="tab-pill" data-tab="customer">&#128100; Customer</button>
-    <button class="tab-pill" data-tab="vendors">&#127970; Vendors</button>
+    <button class="tab-pill" data-tab="customer-details">&#128100; Customer</button>
+    <button class="tab-pill" data-tab="important-links">&#127970; Vendors</button>
     <button class="tab-pill" data-tab="raw">{ } Raw</button>
   </nav>
 
@@ -89,7 +91,7 @@
   <div id="ticket-details"></div>
 
   <!-- Footer -->
-  <footer class="app-footer">
+  <footer id="app-footer" class="app-footer">
     <p class="footer-text">
       Have suggestions? Fill this <a href="https://docs.google.com/forms/d/e/1FAIpQLSdzGd6m2PnxfMxuD34dEH4WOY9HQSJSAilaZX4PXeA325RmqA/viewform?usp=header" target="_blank" rel="noopener noreferrer" class="footer-link">form</a>.
     </p>

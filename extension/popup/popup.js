@@ -1,9 +1,14 @@
-// ── Helpers ───────────────────────────────────────────────────────────────────
-const $ = (id) => document.getElementById(id);
+// popup.js — BASS v10.0  (ES module, type="module")
+// Communicates with background/service-worker.js via chrome.runtime.sendMessage.
+// Handlers: TEST_AUTH → status string, FETCH_BOOKING → { ok, data } | { ok:false, ... }
+
+const $ = id => document.getElementById(id);
+
+// ── Utilities ─────────────────────────────────────────────────────────────────
 
 function sendMessage(msg) {
-  return new Promise((resolve) => {
-    chrome.runtime.sendMessage(msg, (response) => {
+  return new Promise(resolve => {
+    chrome.runtime.sendMessage(msg, response => {
       if (chrome.runtime.lastError) resolve(null);
       else resolve(response);
     });
@@ -11,316 +16,356 @@ function sendMessage(msg) {
 }
 
 function escHtml(str) {
+  if (str == null) return '';
   return String(str)
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function isHtmlContent(str) {
+  return /<[a-z][\s\S]*>/i.test(str);
 }
 
 function humanise(key) {
   return key.replace(/([A-Z])/g, ' $1').replace(/^./, s => s.toUpperCase()).trim();
 }
 
-function isHtml(str) {
-  return /<[a-z][\s\S]*>/i.test(str);
+// ── Theme ─────────────────────────────────────────────────────────────────────
+
+async function initTheme() {
+  try {
+    const { theme } = await chrome.storage.local.get('theme');
+    applyTheme(theme || 'light');
+  } catch (_) {
+    applyTheme('light');
+  }
 }
 
-// ── Theme ──────────────────────────────────────────────────────────────────────
-const themeBtn = $('theme-toggle');
-
-async function loadTheme() {
-  const { theme } = await chrome.storage.local.get('theme');
-  applyTheme(theme || 'light');
+function applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  $('theme-toggle').textContent = theme === 'dark' ? '☀️' : '🌙';
 }
 
-function applyTheme(t) {
-  document.documentElement.setAttribute('data-theme', t);
-  themeBtn.textContent = t === 'dark' ? '☀️' : '🌙';
-}
-
-themeBtn.addEventListener('click', async () => {
+$('theme-toggle').addEventListener('click', async () => {
   const current = document.documentElement.getAttribute('data-theme') || 'light';
   const next = current === 'dark' ? 'light' : 'dark';
   applyTheme(next);
-  await chrome.storage.local.set({ theme: next });
+  try { await chrome.storage.local.set({ theme: next }); } catch (_) {}
 });
 
-// ── Auth ───────────────────────────────────────────────────────────────────────
+// ── Auth ──────────────────────────────────────────────────────────────────────
+
 async function checkAuth() {
-  const pill     = $('auth-pill');
-  const warning  = $('auth-warning');
-  const recheck  = $('recheck-btn');
-  const fetchBtn = $('fetch-ticket');
+  const pill    = $('auth-status');
+  const warning = $('auth-warning');
+  const warnTxt = $('auth-warning-text');
+  const input   = $('booking-id');
+  const btn     = $('search-btn');
 
   pill.className   = 'auth-pill auth-pill--checking';
-  pill.textContent = 'checking…';
-  warning.classList.add('hidden');
-  recheck.classList.add('hidden');
+  pill.textContent = '● checking…';
+  warning.hidden   = true;
 
   const status = await sendMessage({ action: 'TEST_AUTH' }) ?? 'UNKNOWN';
 
   if (status === 'AUTHENTICATED') {
     pill.className   = 'auth-pill auth-pill--ok';
-    pill.textContent = '✓ Active';
-    fetchBtn.disabled = false;
+    pill.textContent = '✓ BMS active';
+    warning.hidden   = true;
+    input.disabled   = false;
+    btn.disabled     = false;
   } else {
     pill.className   = 'auth-pill auth-pill--warn';
-    fetchBtn.disabled = true;
-    recheck.classList.remove('hidden');
-
-    const messages = {
-      TIMEOUT:           ['⚠ Timeout',      'Box Office did not respond. Check your connection, then click ↺.'],
-      NOT_AUTHENTICATED: ['⚠ Not logged in', 'Log into Box Office, then click ↺ to re-check.'],
-      SESSION_EXPIRED:   ['⚠ Expired',       'Your Box Office session expired — log in again, then click ↺.'],
+    pill.textContent = '⚠ Not authenticated';
+    const msgs = {
+      NOT_AUTHENTICATED: 'Not logged in to Box Office — open box-office.headout.com and log in, then Re-check.',
+      SESSION_EXPIRED:   'Box Office session expired — log in again, then Re-check.',
+      TIMEOUT:           'Box Office did not respond. Check your connection, then Re-check.',
     };
-    const [label, msg] = messages[status] || ['? Unknown', 'Refresh Box Office, then click ↺ to re-check.'];
-    pill.textContent      = label;
-    warning.textContent   = msg;
-    warning.classList.remove('hidden');
+    warnTxt.textContent = msgs[status] || 'Could not verify Box Office session. Try Re-check.';
+    warning.hidden   = false;
+    input.disabled   = true;
+    btn.disabled     = true;
   }
 
   return status;
 }
 
-$('recheck-btn').addEventListener('click', () => checkAuth());
+$('recheck-btn').addEventListener('click', async () => {
+  const status = await checkAuth();
+  if (status === 'AUTHENTICATED') await autoDetect();
+});
 
-// ── Search ─────────────────────────────────────────────────────────────────────
-$('fetch-ticket').addEventListener('click', doSearch);
-$('ticket-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') doSearch(); });
-$('clear-ticket').addEventListener('click', clearResult);
+// ── Search ────────────────────────────────────────────────────────────────────
+
+$('search-btn').addEventListener('click', doSearch);
+$('booking-id').addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
+$('clear-btn').addEventListener('click', clearResults);
+
+function clearResults() {
+  $('booking-id').value = '';
+  $('error-message').hidden = true;
+  $('booking-summary').hidden = true;
+  $('tab-nav').hidden = true;
+  $('ticket-details').innerHTML =
+    '<div class="welcome-placeholder"><p>Search for a booking above to get started.</p></div>';
+  $('booking-id').focus();
+}
 
 async function doSearch() {
-  const id = $('ticket-input').value.trim();
+  const id = $('booking-id').value.trim();
   if (!id) return;
 
-  setError('');
-  showLoading(true);
+  $('error-message').hidden   = true;
+  $('loading-spinner').hidden = false;
+  $('booking-summary').hidden = true;
+  $('tab-nav').hidden         = true;
+  $('ticket-details').innerHTML = '';
 
   const result = await sendMessage({ action: 'FETCH_BOOKING', bookingId: id });
-  showLoading(false);
+
+  $('loading-spinner').hidden = true;
 
   if (!result || !result.ok) {
     const errType = result?.errorType;
+    let msg;
     if (errType === 'NOT_AUTHENTICATED' || errType === 'SESSION_EXPIRED') {
-      setError('Your Box Office session has expired — log in and try again.');
+      msg = 'Your Box Office session has expired — log in and try again.';
       await checkAuth();
     } else if (errType === 'TIMEOUT' || errType === 'FETCH_ERROR') {
-      setError('Request timed out. Check the Box Office tab is loaded, then try again.');
+      msg = 'Request timed out. Check Box Office is reachable, then try again.';
     } else {
-      setError(`Error ${result?.status || ''}: ${result?.error || 'Unexpected error'}`);
+      const code = result?.status || '';
+      msg = `Error${code ? ' ' + code : ''}: ${result?.error || 'Unexpected error'}`;
     }
+    const errEl = $('error-message');
+    errEl.textContent = msg;
+    errEl.hidden = false;
     return;
   }
 
-  renderResult(id, result.data);
+  renderBooking(id, result.data);
 }
 
-function clearResult() {
-  $('ticket-input').value = '';
-  setError('');
-  $('booking-summary').classList.add('hidden');
-  $('tab-nav').classList.add('hidden');
-  $('ticket-details').innerHTML = '';
-}
+// ── Render booking ────────────────────────────────────────────────────────────
 
-// ── Rendering ──────────────────────────────────────────────────────────────────
-let currentTab = 'booking';
-
-function renderResult(bookingId, data) {
+function renderBooking(id, data) {
   const flat    = data.booking || data.fulfillmentDetails || data;
-  const vendors = flat.vendorsInfo || data.vendorsInfo || [];
+  const vendors = data.vendorsInfo || flat.vendorsInfo || [];
 
-  renderSummary(bookingId, flat);
-  renderTabs(flat, vendors, data);
+  renderSummaryBar(id, flat);
 
-  $('booking-summary').classList.remove('hidden');
-  $('tab-nav').classList.remove('hidden');
-  switchTab(currentTab);
-}
-
-function renderSummary(bookingId, flat) {
-  const setFact = (id, val) => {
-    const el = $(id);
-    if (val != null && val !== '') { el.textContent = String(val); el.classList.remove('na'); }
-    else                           { el.textContent = '—';         el.classList.add('na'); }
-  };
-
-  const tourEl = $('bs-tour');
-  const product = flat.productName || flat.variantName;
-  if (product) { tourEl.textContent = product; tourEl.classList.remove('na'); }
-  else         { tourEl.textContent = '—';     tourEl.classList.add('na'); }
-
-  setFact('bs-id',     flat.bookingId || bookingId);
-  setFact('bs-status', flat.status);
-  setFact('bs-date',   flat.inventoryDate || flat.inventoryTime);
-  setFact('bs-pax',    flat.totalPax != null ? String(flat.totalPax) : null);
-}
-
-function renderTabs(flat, vendors, rawData) {
   const details = $('ticket-details');
   details.innerHTML = '';
+  details.appendChild(buildBookingSection(flat));
+  details.appendChild(buildInstructionsSection(vendors));
+  details.appendChild(buildCustomerSection(flat));
+  details.appendChild(buildVendorsSection(vendors));
+  details.appendChild(buildRawSection(data));
 
-  // ── Booking ──
-  const bookSection = makeSection('full-booking', '📋', 'Booking Details', 'booking');
-  const bookBody    = bookSection.querySelector('.section-body');
-  const FIELDS = [
-    ['Booking ID',        flat.bookingId],
-    ['Status',            flat.status],
-    ['Fulfilment Type',   flat.fulfilmentType],
-    ['Fulfilment Status', flat.fulfilmentStatus],
-    ['Product',           flat.productName],
-    ['Variant',           flat.variantName],
-    ['Inventory Date',    flat.inventoryDate],
-    ['Inventory Time',    flat.inventoryTime],
-    ['Ticket Type',       flat.ticketType],
-    ['Total Pax',         flat.totalPax != null ? String(flat.totalPax) : null],
-    ['Net Price',         flat.netPrice  != null ? String(flat.netPrice)  : null],
-    ['Currency',          flat.currency],
-    ['Created At',        flat.createdAt],
-    ['Updated At',        flat.updatedAt],
-  ];
-  const knownKeys = new Set(['bookingId','status','fulfilmentType','fulfilmentStatus','productName','variantName','inventoryDate','inventoryTime','ticketType','totalPax','netPrice','currency','guestName','guestEmail','createdAt','updatedAt','vendorsInfo']);
-  FIELDS.forEach(([label, val]) => { if (val != null && val !== '') bookBody.appendChild(makeFieldRow(label, val)); });
-  for (const [k, v] of Object.entries(flat)) {
-    if (!knownKeys.has(k) && v != null && typeof v !== 'object') bookBody.appendChild(makeFieldRow(humanise(k), String(v)));
-  }
-  details.appendChild(bookSection);
+  // Wire up tab pills (re-added each render)
+  document.querySelectorAll('#tab-nav .tab-pill').forEach(pill => {
+    pill.addEventListener('click', () => switchTab(pill.dataset.tab));
+  });
 
-  // ── Instructions ──
-  const instrSection = makeSection('instructions', '📌', 'Booking Instructions', 'instructions');
-  const instrBody    = instrSection.querySelector('.section-body');
-  if (vendors.length === 0) {
-    instrBody.innerHTML = '<p class="instruction-empty">No booking instructions available.</p>';
-  } else {
-    vendors.forEach((v, i) => {
-      const label = vendors.length > 1 ? `Vendor ${i + 1}: ${v.vendorName || ''}` : (v.vendorName || 'Instructions');
-      const block = document.createElement('div');
-      block.className = 'instr-block instr-block--important';
-      block.innerHTML = `<div class="instr-block__header"><span class="instr-block__icon">🏢</span><span class="instr-block__title">${escHtml(label)}</span></div>`;
-      const body = document.createElement('div');
-      body.className = 'instr-block__body';
-      if (v.bookingInstructions) {
-        const wrapper = document.createElement('div');
-        wrapper.className = 'rich-instruction-wrapper';
-        if (isHtml(v.bookingInstructions)) wrapper.innerHTML = v.bookingInstructions;
-        else wrapper.textContent = v.bookingInstructions;
-        body.appendChild(wrapper);
-      } else {
-        body.innerHTML = '<p class="instruction-empty">No instructions for this vendor.</p>';
-      }
-      block.appendChild(body);
-      instrBody.appendChild(block);
-    });
-  }
-  details.appendChild(instrSection);
-
-  // ── Customer ──
-  const custSection = makeSection('customer-details', '👤', 'Customer Details', 'customer');
-  const custBody    = custSection.querySelector('.section-body');
-  let hasCust = false;
-  if (flat.guestName)  { custBody.appendChild(makeFieldRow('Guest Name',  flat.guestName));  hasCust = true; }
-  if (flat.guestEmail) { custBody.appendChild(makeFieldRow('Guest Email', flat.guestEmail)); hasCust = true; }
-  if (!hasCust) custBody.innerHTML = '<p class="instruction-empty">No customer details available.</p>';
-  details.appendChild(custSection);
-
-  // ── Vendors ──
-  const vendSection = makeSection('important-links', '🏢', 'Vendor Info', 'vendors');
-  const vendBody    = vendSection.querySelector('.section-body');
-  if (vendors.length === 0) {
-    vendBody.innerHTML = '<p class="instruction-empty">No vendor information available.</p>';
-  } else {
-    vendors.forEach((v, i) => {
-      const card  = document.createElement('div');
-      card.className = 'guest-card';
-      const badge = vendors.length > 1 ? `Vendor ${i + 1}` : 'Vendor';
-      card.innerHTML = `<div class="guest-type-badge">${escHtml(badge)}</div>`;
-      if (v.vendorName) card.appendChild(makeFieldRow('Vendor Name', v.vendorName));
-      if (v.vendorId)   card.appendChild(makeFieldRow('Vendor ID',   String(v.vendorId)));
-      if (v.tourId)     card.appendChild(makeFieldRow('Tour ID',     String(v.tourId)));
-      vendBody.appendChild(card);
-    });
-  }
-  details.appendChild(vendSection);
-
-  // ── Raw ──
-  const rawSection = makeSection('raw', '{ }', 'Raw API Response', 'raw');
-  rawSection.querySelector('.section-body').textContent = JSON.stringify(rawData, null, 2);
-  details.appendChild(rawSection);
+  $('tab-nav').hidden = false;
+  switchTab('full-booking');
 }
 
-function makeSection(sectionId, icon, title, tabId) {
+// ── Summary bar ───────────────────────────────────────────────────────────────
+
+function renderSummaryBar(id, flat) {
+  const bar = $('booking-summary');
+
+  const status = flat.status || '';
+  const statusClass = /COMPLETED/i.test(status) ? 'yes'
+    : /CANCELLED|REFUNDED/i.test(status) ? 'no' : 'na';
+
+  const date  = flat.inventoryDate || flat.bookingDate || '';
+  const time  = flat.inventoryTime || '';
+  const pax   = flat.totalPax != null ? String(flat.totalPax) : '';
+  const price = flat.netPrice != null
+    ? `${flat.currency || ''} ${flat.netPrice}`.trim() : '';
+
+  const fact = (label, valueHtml) =>
+    valueHtml ? `<div class="bs-fact">
+      <span class="bs-fact-label">${label}</span>
+      <span class="bs-fact-value">${valueHtml}</span>
+    </div>` : '';
+
+  bar.innerHTML = `
+    <div class="bs-tour">${escHtml(flat.productName || '—')}</div>
+    <div class="bs-facts">
+      ${fact('Booking ID', `<span class="booking-id-badge">#${escHtml(id)}</span>`)}
+      ${status ? fact('Status', `<span class="status-badge ${statusClass}">${escHtml(status)}</span>`) : ''}
+      ${date  ? fact('Date',   escHtml(date))  : ''}
+      ${time  ? fact('Time',   escHtml(time))  : ''}
+      ${pax   ? fact('Pax',   escHtml(pax))   : ''}
+      ${price ? fact('Net',   escHtml(price)) : ''}
+    </div>
+  `;
+  bar.hidden = false;
+}
+
+// ── Tab switching ─────────────────────────────────────────────────────────────
+
+function switchTab(tabId) {
+  document.querySelectorAll('#tab-nav .tab-pill').forEach(pill => {
+    pill.classList.toggle('active', pill.dataset.tab === tabId);
+  });
+  document.querySelectorAll('#ticket-details .section').forEach(sec => {
+    sec.classList.toggle('tab-section-hidden', sec.dataset.sectionId !== tabId);
+  });
+}
+
+// ── Section builders ──────────────────────────────────────────────────────────
+
+function buildSection(sectionId, title, iconEmoji, bodyHtml) {
   const sec = document.createElement('div');
-  sec.className = 'section tab-section-hidden';
+  sec.className = 'section';
   sec.dataset.sectionId = sectionId;
-  sec.dataset.tabId     = tabId;
   sec.innerHTML = `
     <div class="section-header">
-      <div class="section-title">
-        <span class="section-icon">${icon}</span>
-        ${escHtml(title)}
-      </div>
+      <span class="section-title">
+        <span class="section-icon">${iconEmoji}</span>${escHtml(title)}
+      </span>
     </div>
-    <div class="section-body"></div>
+    <div class="section-body">${bodyHtml}</div>
   `;
   return sec;
 }
 
-function makeFieldRow(label, value) {
-  const row = document.createElement('div');
-  row.className = 'field-row';
-  const l = document.createElement('span');
-  l.className   = 'field-label';
-  l.textContent = label;
-  const v = document.createElement('span');
-  v.className   = 'field-value';
-  v.textContent = value;
-  row.appendChild(l);
-  row.appendChild(v);
-  return row;
+function fieldRow(label, value) {
+  if (value == null || value === '') return '';
+  return `<div class="field-row">
+    <span class="field-label">${escHtml(label)}</span>
+    <span class="field-value">${escHtml(String(value))}</span>
+  </div>`;
 }
 
-// ── Tab switching ──────────────────────────────────────────────────────────────
-function switchTab(tabId) {
-  currentTab = tabId;
-  document.querySelectorAll('.tab-pill').forEach(pill => {
-    pill.classList.toggle('active', pill.dataset.tab === tabId);
+// Booking tab ──────────────────────────────────────────────────────────────────
+const BOOKING_FIELDS = [
+  ['bookingId',        'Booking ID'],
+  ['status',           'Status'],
+  ['fulfilmentType',   'Fulfilment Type'],
+  ['fulfilmentStatus', 'Fulfilment Status'],
+  ['productName',      'Product'],
+  ['variantName',      'Variant'],
+  ['inventoryDate',    'Date'],
+  ['inventoryTime',    'Time'],
+  ['ticketType',       'Ticket Type'],
+  ['totalPax',         'Total Pax'],
+  ['netPrice',         'Net Price'],
+  ['currency',         'Currency'],
+  ['createdAt',        'Created'],
+  ['updatedAt',        'Updated'],
+];
+
+function buildBookingSection(flat) {
+  const handled = new Set([...BOOKING_FIELDS.map(f => f[0]), 'guestName', 'guestEmail', 'vendorsInfo']);
+  let html = BOOKING_FIELDS.map(([key, label]) => fieldRow(label, flat[key])).join('');
+
+  // Extra scalar fields not in the standard list
+  for (const [key, v] of Object.entries(flat)) {
+    if (handled.has(key) || v == null || typeof v === 'object') continue;
+    html += fieldRow(humanise(key), v);
+  }
+
+  if (!html) html = '<p class="instruction-empty">No booking fields available.</p>';
+  return buildSection('full-booking', 'Booking Details', '📋', html);
+}
+
+// Instructions tab ─────────────────────────────────────────────────────────────
+function buildInstructionsSection(vendors) {
+  const withInstr = vendors.filter(v => v.bookingInstructions);
+  if (!withInstr.length) {
+    return buildSection('instructions', 'Instructions', '📌',
+      '<p class="instruction-empty">No booking instructions available.</p>');
+  }
+
+  let html = '';
+  withInstr.forEach((v, i) => {
+    const title = vendors.length > 1
+      ? (v.vendorName || `Vendor ${i + 1}`)
+      : (v.vendorName || 'Booking Instructions');
+    const instr = v.bookingInstructions;
+    let bodyHtml;
+    if (isHtmlContent(instr)) {
+      bodyHtml = `<div class="rich-instruction-wrapper">${instr}</div>`;
+    } else {
+      const paras = instr.split(/\n\n+/).filter(Boolean);
+      bodyHtml = `<div class="instruction-text">${
+        paras.map(p => `<p class="instruction-para">${escHtml(p)}</p>`).join('')
+      }</div>`;
+    }
+    html += `<div class="instr-block instr-block--booking">
+      <div class="instr-block__header">
+        <span class="instr-block__icon">📌</span>
+        <span class="instr-block__title">${escHtml(title)}</span>
+      </div>
+      <div class="instr-block__body">${bodyHtml}</div>
+    </div>`;
   });
-  document.querySelectorAll('#ticket-details .section').forEach(sec => {
-    sec.classList.toggle('tab-section-hidden', sec.dataset.tabId !== tabId);
+
+  return buildSection('instructions', 'Instructions', '📌', html);
+}
+
+// Customer tab ─────────────────────────────────────────────────────────────────
+function buildCustomerSection(flat) {
+  let html = fieldRow('Guest Name', flat.guestName) + fieldRow('Guest Email', flat.guestEmail);
+  if (!html) html = '<p class="instruction-empty">No customer details available.</p>';
+  return buildSection('customer-details', 'Customer Details', '👤', html);
+}
+
+// Vendors tab ──────────────────────────────────────────────────────────────────
+function buildVendorsSection(vendors) {
+  if (!vendors.length) {
+    return buildSection('important-links', 'Vendors', '🏢',
+      '<p class="instruction-empty">No vendor information available.</p>');
+  }
+  let html = '';
+  vendors.forEach((v, i) => {
+    const rows = [
+      fieldRow('Name', v.vendorName),
+      fieldRow('Vendor ID', v.vendorId),
+      fieldRow('Tour ID', v.tourId),
+    ].join('');
+    html += `<div class="guest-card">
+      <span class="guest-type-badge">Vendor ${i + 1}</span>
+      ${rows || '<p class="instruction-empty">No details.</p>'}
+    </div>`;
   });
+  return buildSection('important-links', 'Vendors', '🏢', html);
 }
 
-$('tab-nav').addEventListener('click', (e) => {
-  const pill = e.target.closest('.tab-pill');
-  if (pill) switchTab(pill.dataset.tab);
-});
-
-// ── UI helpers ─────────────────────────────────────────────────────────────────
-function showLoading(show) {
-  $('loading-spinner').classList.toggle('hidden', !show);
+// Raw tab ──────────────────────────────────────────────────────────────────────
+function buildRawSection(data) {
+  return buildSection('raw', 'Raw API Response', '{ }',
+    `<pre>${escHtml(JSON.stringify(data, null, 2))}</pre>`);
 }
 
-function setError(msg) {
-  const el = $('error-message');
-  el.textContent = msg;
-  el.classList.toggle('hidden', !msg);
-}
+// ── Auto-detect booking from active tab URL ────────────────────────────────────
 
-// ── Auto-detect booking ID from active BMS tab ─────────────────────────────────
 async function autoDetect() {
   try {
-    const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-    const url  = tabs[0]?.url || '';
-    if (!url.startsWith('https://box-office.headout.com/')) return;
+    const tabs  = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    const url   = tabs[0]?.url || '';
     const match = url.match(/\/(\d{6,})/);
     if (!match) return;
-    $('ticket-input').value = match[1];
-    doSearch();
+    $('booking-id').value = match[1];
+    await doSearch();
   } catch (_) {}
 }
 
-// ── Init ───────────────────────────────────────────────────────────────────────
+// ── Init ──────────────────────────────────────────────────────────────────────
+
+$('ticket-details').innerHTML =
+  '<div class="welcome-placeholder"><p>Search for a booking above to get started.</p></div>';
+
 (async () => {
-  await loadTheme();
+  await initTheme();
   const status = await checkAuth();
   if (status === 'AUTHENTICATED') await autoDetect();
 })();
