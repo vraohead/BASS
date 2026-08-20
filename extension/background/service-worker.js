@@ -59,6 +59,13 @@ async function testAuthentication() {
 
 chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
 
+  if (request.action === 'GET_COOKIES') {
+    chrome.cookies.getAll({ url: 'https://box-office.headout.com/' })
+      .then(cookies => sendResponse({ ok: true, cookies: cookies.map(c => c.name) }))
+      .catch(err => sendResponse({ ok: false, error: err.message }));
+    return true;
+  }
+
   if (request.action === 'TEST_AUTH') {
     testAuthentication().then(sendResponse).catch(() => sendResponse('UNKNOWN'));
     return true;
