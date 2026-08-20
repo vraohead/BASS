@@ -80,7 +80,7 @@ async function checkAuth() {
     pill.className   = 'auth-pill auth-pill--warn';
     pill.textContent = '⚠ Not authenticated';
     const msgs = {
-      NOT_AUTHENTICATED: 'Not logged in to Box Office — open box-office.headout.com and log in, then Re-check.',
+      NOT_AUTHENTICATED: 'Not logged in to Box Office — log in, then Re-check.',
       SESSION_EXPIRED:   'Box Office session expired — log in again, then Re-check.',
       TIMEOUT:           'Box Office did not respond. Check your connection, then Re-check.',
     };
@@ -88,9 +88,30 @@ async function checkAuth() {
     warning.hidden   = false;
     input.disabled   = true;
     btn.disabled     = true;
+
+    // Clear any stale results and show the auth gate
+    showAuthGate(status);
   }
 
   return status;
+}
+
+function showAuthGate(status) {
+  $('error-message').hidden     = true;
+  $('booking-summary').hidden   = true;
+  $('tab-nav').hidden           = true;
+
+  const isTimeout = status === 'TIMEOUT';
+  $('ticket-details').innerHTML = `
+    <div class="auth-gate">
+      <div class="auth-gate-icon">${isTimeout ? '⏱️' : '🔒'}</div>
+      <p class="auth-gate-title">${isTimeout ? 'Box Office unreachable' : 'Sign in to Box Office'}</p>
+      <p class="auth-gate-sub">${isTimeout
+        ? 'Could not reach Box Office. Check your connection, then click <strong>Re-check</strong>.'
+        : 'Open <a href="https://box-office.headout.com" target="_blank" rel="noopener">box-office.headout.com</a>, log in, then click <strong>Re-check</strong>.'
+      }</p>
+    </div>
+  `;
 }
 
 $('recheck-btn').addEventListener('click', async () => {
