@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>BASS - Booking Assistant</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+
+  <!-- Header -->
+  <header class="app-header">
+    <div class="header-logo">
+      <div class="logo-icon" aria-hidden="true">
+        <svg viewBox="0 0 128 128" width="20" height="20" focusable="false">
+          <path d="M102 28 L24 58 L56 72 L62 70 Z" fill="#ffffff"/>
+          <path d="M56 72 L62 102 L102 28 Z" fill="#ffffff" fill-opacity="0.6"/>
+        </svg>
+      </div>
+      <div>
+        <div class="header-title">BASS</div>
+        <div class="header-sub">Headout &middot; Booking Assistant</div>
+      </div>
+    </div>
+    <div class="header-actions">
+      <span id="auth-status" class="auth-pill auth-pill--checking">checking…</span>
+      <button id="theme-toggle" class="theme-toggle" title="Toggle light/dark mode">&#9728;&#65039;</button>
+    </div>
+  </header>
+
+  <!-- Search Bar -->
+  <div class="search-bar">
+    <input type="text" id="booking-id" placeholder="Booking ID&hellip;" inputmode="numeric" autocomplete="off" spellcheck="false" disabled />
+    <div class="btn-row">
+      <button id="search-btn" class="btn btn-primary" disabled>&#10227; Fetch</button>
+      <button id="clear-btn" class="btn btn-danger">&#10005; Clear</button>
+    </div>
+  </div>
+
+  <!-- Auth warning banner -->
+  <div id="auth-warning" class="bms-warning" hidden>
+    <span id="auth-warning-text"></span>
+    <button id="recheck-btn" class="recheck-inline-btn">Re-check</button>
+  </div>
+
+  <!-- Loading -->
+  <div id="loading-spinner" class="spinner-wrap hidden">
+    <div class="spinner"></div>
+    <p class="spinner-label">Fetching ticket&hellip;</p>
+  </div>
+
+  <!-- Error -->
+  <div id="error-message" class="error-box hidden"></div>
+
+  <!-- Booking Summary -->
+  <div id="booking-summary" class="booking-summary-bar" hidden>
+    <div id="bs-tour" class="bs-tour na">&mdash;</div>
+    <div class="bs-facts">
+      <div class="bs-fact">
+        <span class="bs-fact-label">Booking ID</span>
+        <span id="bs-id" class="bs-fact-value na">&mdash;</span>
+      </div>
+      <div class="bs-fact">
+        <span class="bs-fact-label">Status</span>
+        <span id="bs-status" class="bs-fact-value na">&mdash;</span>
+      </div>
+      <div class="bs-fact">
+        <span class="bs-fact-label">Date</span>
+        <span id="bs-date" class="bs-fact-value na">&mdash;</span>
+      </div>
+      <div class="bs-fact">
+        <span class="bs-fact-label">Pax</span>
+        <span id="bs-pax" class="bs-fact-value na">&mdash;</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Tab Nav -->
+  <nav id="tab-nav" class="tab-nav" hidden>
+    <button class="tab-pill active" data-tab="full-booking">&#128203; Booking</button>
+    <button class="tab-pill" data-tab="instructions">&#128204; Instructions</button>
+    <button class="tab-pill" data-tab="customer-details">&#128100; Customer</button>
+    <button class="tab-pill" data-tab="important-links">&#127970; Vendors</button>
+    <button class="tab-pill" data-tab="raw">{ } Raw</button>
+  </nav>
+
+  <!-- Ticket Content -->
+  <div id="ticket-details"></div>
+
+  <!-- Footer -->
+  <footer id="app-footer" class="app-footer">
+    <p class="footer-text">
+      Have suggestions? Fill this <a href="https://docs.google.com/forms/d/e/1FAIpQLSdzGd6m2PnxfMxuD34dEH4WOY9HQSJSAilaZX4PXeA325RmqA/viewform?usp=header" target="_blank" rel="noopener noreferrer" class="footer-link">form</a>.
+    </p>
+  </footer>
+
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

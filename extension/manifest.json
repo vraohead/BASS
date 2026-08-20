@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "BASS - BMS Booking Assistant",
+  "version": "10.0.0",
+  "description": "BMS/Box Office frontend — reads booking data directly from Box Office APIs using your existing session.",
+  "permissions": ["sidePanel", "storage", "tabs"],
+  "host_permissions": [
+    "https://box-office.headout.com/*"
+  ],
+  "background": {
+    "service_worker": "background/service-worker.js",
+    "type": "module"
+  },
+  "side_panel": {
+    "default_path": "popup/popup.html"
+  },
+  "action": {
+    "default_title": "Open BASS"
+  }
+}

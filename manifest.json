@@ -1,0 +1,41 @@
+{
+  "manifest_version": 3,
+  "name": "BASS - Booking Assistant",
+  "version": "6.6",
+  "description": "Your all-in-one booking assistant for Reservation Operations.",
+  "permissions": ["sidePanel", "storage", "activeTab", "tabs", "scripting"],
+  "host_permissions": [
+    "https://script.google.com/*"
+  ],
+  "optional_host_permissions": [
+    "https://*/*",
+    "http://*/*"
+  ],
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "action": {
+    "default_title": "Open RO Booking Assistant",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png",
+      "48": "icons/icon-48.png",
+      "128": "icons/icon-128.png"
+    }
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["sidepanel.html"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}
