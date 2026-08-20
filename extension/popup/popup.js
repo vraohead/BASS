@@ -42,22 +42,6 @@ async function checkAuth() {
     badge.classList.add('badge--ok');
     input.disabled = false;
     btn.disabled   = false;
-  } else if (status === 'NO_BMS_TAB') {
-    badge.textContent = '⚠ No Box Office tab open';
-    badge.classList.add('badge--warn');
-    warning.textContent = 'Open box-office.headout.com in a Chrome tab and log in, then click Re-check.';
-    warning.hidden  = false;
-    recheck.hidden  = false;
-    input.disabled  = true;
-    btn.disabled    = true;
-  } else if (status === 'REFRESH_BMS_TAB') {
-    badge.textContent = '⚠ Refresh Box Office tab';
-    badge.classList.add('badge--warn');
-    warning.textContent = 'Refresh your Box Office tab (F5), wait for it to load, then click Re-check.';
-    warning.hidden  = false;
-    recheck.hidden  = false;
-    input.disabled  = true;
-    btn.disabled    = true;
   } else if (status === 'TIMEOUT') {
     badge.textContent = '⚠ Connection timed out';
     badge.classList.add('badge--warn');
@@ -112,9 +96,6 @@ async function doSearch() {
       await checkAuth();
     } else if (errType === 'TIMEOUT' || errType === 'FETCH_ERROR') {
       setError('Request timed out. Check the Box Office tab is loaded, then try again.');
-    } else if (errType === 'NO_BMS_TAB' || errType === 'REFRESH_BMS_TAB') {
-      setError(result.error || 'Box Office tab not ready. Refresh it and try again.');
-      await checkAuth();
     } else {
       setError(`Error ${result?.status || ''}: ${result?.error || 'Unexpected error'}`);
     }
