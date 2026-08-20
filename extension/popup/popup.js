@@ -80,6 +80,12 @@ async function checkAuth() {
 $('search-btn').addEventListener('click', doSearch);
 $('booking-id').addEventListener('keydown', (e) => { if (e.key === 'Enter') doSearch(); });
 $('recheck-btn').addEventListener('click', () => checkAuth());
+$('clear-btn').addEventListener('click', () => {
+  $('booking-id').value = '';
+  setError('');
+  showSection('search');
+  $('booking-id').focus();
+});
 
 async function doSearch() {
   const id = $('booking-id').value.trim();
@@ -131,7 +137,7 @@ function renderResult(bookingId, data) {
     if (v.vendorName)          container.appendChild(makeField(`${prefix}Vendor`, v.vendorName));
     if (v.vendorId)            container.appendChild(makeField(`${prefix}Vendor ID`, String(v.vendorId)));
     if (v.tourId)              container.appendChild(makeField(`${prefix}Tour ID`, String(v.tourId)));
-    if (v.bookingInstructions) container.appendChild(makeField(`${prefix}Booking Instructions`, v.bookingInstructions, true));
+    if (v.bookingInstructions) container.appendChild(makeField(`${prefix}Booking Instructions`, v.bookingInstructions, isHtml(v.bookingInstructions) ? 'html' : 'pre'));
   });
 
   const handled = new Set([...FIELD_MAP.map(f => f.key), 'vendorsInfo', 'booking', 'fulfillmentDetails']);
@@ -141,15 +147,30 @@ function renderResult(bookingId, data) {
   }
 }
 
-function makeField(label, value, pre = false) {
+function isHtml(str) {
+  return /<[a-z][\s\S]*>/i.test(str);
+}
+
+function makeField(label, value, mode = 'text') {
   const row = document.createElement('div');
   row.className = 'field-row';
   const l = document.createElement('span');
   l.className = 'field-label';
   l.textContent = label;
-  const v = document.createElement(pre ? 'pre' : 'span');
-  v.className = 'field-value';
-  v.textContent = value;
+  let v;
+  if (mode === 'html') {
+    v = document.createElement('div');
+    v.className = 'field-value field-html';
+    v.innerHTML = value;
+  } else if (mode === 'pre') {
+    v = document.createElement('pre');
+    v.className = 'field-value';
+    v.textContent = value;
+  } else {
+    v = document.createElement('span');
+    v.className = 'field-value';
+    v.textContent = value;
+  }
   row.appendChild(l);
   row.appendChild(v);
   return row;
