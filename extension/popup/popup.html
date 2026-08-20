@@ -1,54 +1,99 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>BASS</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>BASS - Booking Assistant</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="popup.css" />
 </head>
 <body>
-  <header>
-    <span class="logo">BASS</span>
-    <span id="auth-badge" class="badge badge--checking">checking session…</span>
+
+  <!-- Header -->
+  <header class="app-header">
+    <div class="header-logo">
+      <div class="logo-icon" aria-hidden="true">
+        <svg viewBox="0 0 128 128" width="20" height="20" focusable="false">
+          <path d="M102 28 L24 58 L56 72 L62 70 Z" fill="#ffffff"/>
+          <path d="M56 72 L62 102 L102 28 Z" fill="#ffffff" fill-opacity="0.6"/>
+        </svg>
+      </div>
+      <div>
+        <div class="header-title">BASS</div>
+        <div class="header-sub">Headout &middot; Booking Assistant</div>
+      </div>
+    </div>
+    <div class="header-actions">
+      <span id="auth-pill" class="auth-pill auth-pill--checking">checking…</span>
+      <button id="recheck-btn" class="theme-toggle hidden" title="Re-check session">&#8635;</button>
+      <button id="theme-toggle" class="theme-toggle" title="Toggle light/dark mode">&#9728;&#65039;</button>
+    </div>
   </header>
 
-  <div id="auth-warning" class="banner banner--warn" hidden></div>
-  <button id="recheck-btn" class="recheck-btn" hidden>Re-check session</button>
-
-
-  <section id="search-section">
-    <div class="search-row">
-      <input
-        id="booking-id"
-        type="text"
-        inputmode="numeric"
-        placeholder="Booking ID"
-        autocomplete="off"
-        spellcheck="false"
-      />
-      <button id="search-btn">Search</button>
+  <!-- Search Bar -->
+  <div class="search-bar">
+    <input type="text" id="ticket-input" placeholder="Enter Booking ID&hellip;" autocomplete="off" spellcheck="false" />
+    <div class="btn-row">
+      <button id="fetch-ticket" class="btn btn-primary" disabled>&#10227; Fetch</button>
+      <button id="clear-ticket" class="btn btn-danger">&#10005; Clear</button>
     </div>
-    <p id="search-error" class="error" hidden></p>
-  </section>
+  </div>
 
-  <section id="result-section" hidden>
-    <div id="result-header">
-      <span class="result-label">Booking</span>
-      <span id="result-booking-id" class="result-id"></span>
-      <button id="clear-btn" class="clear-btn">✕ Clear</button>
-    </div>
-    <div id="result-fields"></div>
+  <!-- Auth warning banner -->
+  <div id="auth-warning" class="bms-warning hidden"></div>
 
-    <details id="raw-details">
-      <summary>Raw API response</summary>
-      <pre id="raw-json"></pre>
-    </details>
-  </section>
-
-  <section id="loading-section" hidden>
+  <!-- Loading -->
+  <div id="loading-spinner" class="spinner-wrap hidden">
     <div class="spinner"></div>
-    <p>Fetching from Box Office…</p>
-  </section>
+    <p class="spinner-label">Fetching ticket&hellip;</p>
+  </div>
+
+  <!-- Error -->
+  <div id="error-message" class="error-box hidden"></div>
+
+  <!-- Booking Summary -->
+  <div id="booking-summary" class="booking-summary-bar hidden">
+    <div id="bs-tour" class="bs-tour na">&mdash;</div>
+    <div class="bs-facts">
+      <div class="bs-fact">
+        <span class="bs-fact-label">Booking ID</span>
+        <span id="bs-id" class="bs-fact-value na">&mdash;</span>
+      </div>
+      <div class="bs-fact">
+        <span class="bs-fact-label">Status</span>
+        <span id="bs-status" class="bs-fact-value na">&mdash;</span>
+      </div>
+      <div class="bs-fact">
+        <span class="bs-fact-label">Date</span>
+        <span id="bs-date" class="bs-fact-value na">&mdash;</span>
+      </div>
+      <div class="bs-fact">
+        <span class="bs-fact-label">Pax</span>
+        <span id="bs-pax" class="bs-fact-value na">&mdash;</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Tab Nav -->
+  <nav id="tab-nav" class="tab-nav hidden">
+    <button class="tab-pill active" data-tab="booking">&#128203; Booking</button>
+    <button class="tab-pill" data-tab="instructions">&#128204; Instructions</button>
+    <button class="tab-pill" data-tab="customer">&#128100; Customer</button>
+    <button class="tab-pill" data-tab="vendors">&#127970; Vendors</button>
+    <button class="tab-pill" data-tab="raw">{ } Raw</button>
+  </nav>
+
+  <!-- Ticket Content -->
+  <div id="ticket-details"></div>
+
+  <!-- Footer -->
+  <footer class="app-footer">
+    <p class="footer-text">
+      Have suggestions? Fill this <a href="https://docs.google.com/forms/d/e/1FAIpQLSdzGd6m2PnxfMxuD34dEH4WOY9HQSJSAilaZX4PXeA325RmqA/viewform?usp=header" target="_blank" rel="noopener noreferrer" class="footer-link">form</a>.
+    </p>
+  </footer>
 
   <script type="module" src="popup.js"></script>
 </body>
