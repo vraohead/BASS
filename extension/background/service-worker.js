@@ -65,16 +65,21 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
   }
 
   if (request.action === 'FETCH_BOOKING') {
-    const url = ENDPOINTS.booking(String(request.bookingId || '').trim());
-    bmsApiCall(url)
-      .then(result => {
-        if (!result.ok) {
-          sendResponse({ ok: false, error: result.error, errorType: result.type, status: result.status });
-        } else {
-          sendResponse({ ok: true, data: result.data });
-        }
-      })
-      .catch(err => sendResponse({ ok: false, error: String(err), errorType: 'UNKNOWN' }));
+    const id = String(request.bookingId || '').trim();
+    Promise.all([
+      bmsApiCall(ENDPOINTS.booking(id)),
+      bmsApiCall(ENDPOINTS.guestDetails(id)),
+    ]).then(([bookingResult, guestResult]) => {
+      if (!bookingResult.ok) {
+        sendResponse({ ok: false, error: bookingResult.error, errorType: bookingResult.type, status: bookingResult.status });
+      } else {
+        sendResponse({
+          ok: true,
+          data: bookingResult.data,
+          guestData: guestResult.ok ? guestResult.data : null,
+        });
+      }
+    }).catch(err => sendResponse({ ok: false, error: String(err), errorType: 'UNKNOWN' }));
     return true;
   }
 

@@ -146,12 +146,12 @@ async function doSearch() {
     return;
   }
 
-  renderBooking(id, result.data);
+  renderBooking(id, result.data, result.guestData);
 }
 
 // ── Render booking ────────────────────────────────────────────────────────────
 
-function renderBooking(id, data) {
+function renderBooking(id, data, guestData) {
   const flat    = data.booking || data.fulfillmentDetails || data;
   const vendors = data.vendorsInfo || flat.vendorsInfo || [];
 
@@ -161,9 +161,9 @@ function renderBooking(id, data) {
   details.innerHTML = '';
   details.appendChild(buildBookingSection(flat));
   details.appendChild(buildInstructionsSection(vendors));
-  details.appendChild(buildCustomerSection(flat));
+  details.appendChild(buildCustomerSection(flat, guestData));
   details.appendChild(buildVendorsSection(vendors));
-  details.appendChild(buildRawSection(data));
+  details.appendChild(buildRawSection(data, guestData));
 
   // Wire up tab pills (re-added each render)
   document.querySelectorAll('#tab-nav .tab-pill').forEach(pill => {
@@ -313,8 +313,50 @@ function buildInstructionsSection(vendors) {
 }
 
 // Customer tab ─────────────────────────────────────────────────────────────────
-function buildCustomerSection(flat) {
-  let html = fieldRow('Guest Name', flat.guestName) + fieldRow('Guest Email', flat.guestEmail);
+function buildCustomerSection(flat, guestData) {
+  let html = '';
+
+  if (guestData) {
+    // Primary guest identity
+    const pg = guestData.primaryGuest;
+    if (pg) {
+      const fullName = [pg.firstName, pg.lastName].filter(Boolean).join(' ');
+      html += fieldRow('Name', fullName);
+      html += fieldRow('Email', pg.email);
+    }
+
+    // Additional user-provided fields (phone, custom fields — skip NAME and EMAIL already shown)
+    const shownTypes = new Set(['NAME', 'EMAIL']);
+    const mainGuest = guestData.guests?.[0];
+    if (mainGuest?.bookingUserFields?.length) {
+      mainGuest.bookingUserFields.forEach(f => {
+        const type = f.tourUserFieldType?.name;
+        if (!shownTypes.has(type) && f.value) {
+          html += fieldRow(f.name || humanise(type || ''), f.value);
+          if (type) shownTypes.add(type);
+        }
+      });
+    }
+
+    // Pax breakdown
+    if (guestData.paxDetails?.length) {
+      const paxLabel = guestData.paxDetails
+        .filter(p => p.count > 0)
+        .map(p => `${p.count} ${p.count === 1 ? p.displayName : p.pluralDisplayName}`)
+        .join(', ');
+      if (paxLabel) html += fieldRow('Pax Breakdown', paxLabel);
+    }
+
+    // Device & login status
+    if (guestData.device)      html += fieldRow('Device',       guestData.device);
+    if (guestData.loginStatus) html += fieldRow('Login Status', guestData.loginStatus.replace(/_/g, ' '));
+
+  } else {
+    // Fallback: basic fields from the booking response
+    html += fieldRow('Guest Name',  flat.guestName);
+    html += fieldRow('Guest Email', flat.guestEmail);
+  }
+
   if (!html) html = '<p class="instruction-empty">No customer details available.</p>';
   return buildSection('customer-details', 'Customer Details', '👤', html);
 }
@@ -341,9 +383,10 @@ function buildVendorsSection(vendors) {
 }
 
 // Raw tab ──────────────────────────────────────────────────────────────────────
-function buildRawSection(data) {
+function buildRawSection(data, guestData) {
+  const payload = guestData ? { booking: data, guestDetails: guestData } : data;
   return buildSection('raw', 'Raw API Response', '{ }',
-    `<pre>${escHtml(JSON.stringify(data, null, 2))}</pre>`);
+    `<pre>${escHtml(JSON.stringify(payload, null, 2))}</pre>`);
 }
 
 // ── Auto-detect booking from active tab URL ────────────────────────────────────
