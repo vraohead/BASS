@@ -180,27 +180,9 @@ function sendMessage(msg) {
   });
 }
 
-// ── Cookie diagnostic ────────────────────────────────────────────────────────
-
-async function showCookies() {
-  const el = $('cookie-debug');
-  const res = await sendMessage({ action: 'GET_COOKIES' });
-  if (!res) {
-    el.textContent = 'cookies: (no response from service worker)';
-  } else if (!res.ok) {
-    el.textContent = 'cookies error: ' + res.error;
-  } else if (res.cookies.length === 0) {
-    el.textContent = 'cookies: none found for box-office.headout.com';
-  } else {
-    el.textContent = 'cookies (' + res.cookies.length + '): ' + res.cookies.join(', ');
-  }
-  el.hidden = false;
-}
-
 // ── Init ─────────────────────────────────────────────────────────────────────
 
 $('booking-id').disabled = true;
 $('search-btn').disabled = true;
 showSection('search');
-showCookies();
 checkAuth();
