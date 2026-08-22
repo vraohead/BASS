@@ -448,6 +448,36 @@ details.instr-block:not([open]) .instr-block__header { border-bottom: none; }
 .instr-block--booking { border-left: 3px solid var(--accent); }
 .instr-block--booking .instr-block__header { background: rgba(124,47,240,0.04); color: var(--accent); }
 
+/* ── Instruction view toggle ─────────────────────────────────────────── */
+.instr-view-toggle {
+  display: flex; gap: 6px; margin-bottom: 10px;
+}
+.instr-view-btn {
+  flex: 1; padding: 4px 0; border-radius: 6px; border: 1px solid var(--border);
+  background: var(--surface2); color: var(--muted); font-size: 11px;
+  font-weight: 600; cursor: pointer; transition: all 0.15s;
+}
+.instr-view-btn.active {
+  background: var(--accent); color: #fff; border-color: var(--accent);
+}
+
+/* Scroll view: normal size, scrollable */
+.instr-view--scroll {
+  overflow-y: auto; max-height: 420px;
+}
+
+/* Compact view: all open, smaller text, no inner scroll */
+.instr-view--compact .instr-block { font-size: 10.5px; }
+.instr-view--compact .instr-block__header { padding: 6px 10px; font-size: 10px; }
+.instr-view--compact .instr-block__body { padding: 6px 10px; }
+.instr-view--compact .instruction-para { margin-bottom: 4px; line-height: 1.4; }
+.instr-view--compact .rich-instruction-wrapper { font-size: 10px; line-height: 1.4; }
+.instr-view--compact details.instr-block { }
+.instr-view--compact details.instr-block:not([open]) { }
+/* Force all blocks open in compact mode */
+.instr-view--compact details.instr-block summary::after { display: none; }
+.instr-view--compact details.instr-block .instr-block__body { display: block !important; }
+
 /* ── Section title colour for raw ───────────────────────────────────── */
 [data-section-id="raw"] .section-title { color: var(--muted); }
 

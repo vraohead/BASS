@@ -176,7 +176,7 @@ function renderBooking(id, data, guestData) {
   const flat    = data.booking || data.fulfillmentDetails || data;
   const vendors = data.vendorsInfo || flat.vendorsInfo || [];
 
-  renderSummaryBar(id, flat);
+  renderSummaryBar(id, flat, guestData);
 
   const details = $('ticket-details');
   details.innerHTML = '';
@@ -194,18 +194,19 @@ function renderBooking(id, data, guestData) {
 
 // ── Summary bar ───────────────────────────────────────────────────────────────
 
-function renderSummaryBar(id, flat) {
+function renderSummaryBar(id, flat, guestData) {
   const bar = $('booking-summary');
-
-  const status = flat.status || '';
-  const statusClass = /COMPLETED/i.test(status) ? 'yes'
-    : /CANCELLED|REFUNDED/i.test(status) ? 'no' : 'na';
 
   const date  = flat.inventoryDate || flat.bookingDate || '';
   const time  = flat.inventoryTime || '';
-  const pax   = flat.totalPax != null ? String(flat.totalPax) : '';
   const price = flat.netPrice != null
     ? `${flat.currency || ''} ${flat.netPrice}`.trim() : '';
+
+  let pax = flat.totalPax != null ? String(flat.totalPax) : '';
+  if (!pax && guestData?.paxDetails?.length) {
+    const total = guestData.paxDetails.reduce((s, p) => s + (p.count || 0), 0);
+    if (total) pax = String(total);
+  }
 
   const fact = (label, valueHtml) =>
     valueHtml ? `<div class="bs-fact">
@@ -301,7 +302,7 @@ function buildInstructionsSection(vendors) {
       '<p class="instruction-empty">No booking instructions available.</p>');
   }
 
-  let html = '';
+  let blocksHtml = '';
   withInstr.forEach((v, i) => {
     const title = vendors.length > 1
       ? (v.vendorName || `Vendor ${i + 1}`)
@@ -316,7 +317,7 @@ function buildInstructionsSection(vendors) {
         paras.map(p => `<p class="instruction-para">${escHtml(p)}</p>`).join('')
       }</div>`;
     }
-    html += `<details class="instr-block instr-block--booking" ${i === 0 ? 'open' : ''}>
+    blocksHtml += `<details class="instr-block instr-block--booking" ${i === 0 ? 'open' : ''}>
       <summary class="instr-block__header">
         <span class="instr-block__icon">📌</span>
         <span class="instr-block__title">${escHtml(title)}</span>
@@ -325,7 +326,30 @@ function buildInstructionsSection(vendors) {
     </details>`;
   });
 
-  return buildSection('instructions', 'Instructions', '📌', html);
+  const html = `
+    <div class="instr-view-toggle">
+      <button class="instr-view-btn active" data-view="scroll">Full</button>
+      <button class="instr-view-btn" data-view="compact">Compact</button>
+    </div>
+    <div class="instr-container instr-view--scroll">${blocksHtml}</div>
+  `;
+
+  const sec = buildSection('instructions', 'Instructions', '📌', html);
+
+  // Wire toggle after insertion
+  sec.querySelectorAll('.instr-view-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      sec.querySelectorAll('.instr-view-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      const container = sec.querySelector('.instr-container');
+      container.className = `instr-container instr-view--${btn.dataset.view}`;
+      if (btn.dataset.view === 'compact') {
+        container.querySelectorAll('details').forEach(d => d.open = true);
+      }
+    });
+  });
+
+  return sec;
 }
 
 // Customer tab ─────────────────────────────────────────────────────────────────
