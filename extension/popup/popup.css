@@ -204,6 +204,15 @@ body > * { position: relative; z-index: 1; }
   flex: 0 0 auto;
 }
 
+/* ── Automation modal banner ─────────────────────────────────────────── */
+.automation-modal-banner {
+  padding: 8px 14px; font-size: 12px; line-height: 1.5; flex: 0 0 auto;
+  background: rgba(229,72,77,0.08); border-bottom: 2px solid var(--red);
+  color: var(--red);
+}
+.automation-modal-banner a { color: inherit; font-weight: 700; }
+.automation-modal-banner[hidden] { display: none !important; }
+
 /* ── Warnings ────────────────────────────────────────────────────────── */
 .bms-warning { padding: 6px 12px; font-size: 11px; line-height: 1.5; font-weight: 600; flex: 0 0 auto; }
 .bms-warning { background: rgba(251,191,36,0.06); border-bottom: 2px solid var(--amber); color: var(--amber); display: flex; align-items: center; gap: 8px; }

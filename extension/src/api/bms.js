@@ -5,8 +5,9 @@
 export const BMS_BASE = 'https://box-office.headout.com';
 
 export const ENDPOINTS = {
-  booking:      (id) => `${BMS_BASE}/proxy/aries/apis/v2/order-fulfillment/booking/${id}`,
-  guestDetails: (id) => `${BMS_BASE}/proxy/aries/apis/v2/order-fulfillment/booking/${id}/guestDetails`,
+  booking:             (id) => `${BMS_BASE}/proxy/aries/apis/v2/order-fulfillment/booking/${id}`,
+  guestDetails:        (id) => `${BMS_BASE}/proxy/aries/apis/v2/order-fulfillment/booking/${id}/guestDetails`,
+  automationModal:     (id) => `${BMS_BASE}/proxy/aries/apis/v2/order-fulfillment/booking/${id}/showAutomationFailureModal`,
 };
 
 // Headers observed in Box Office requests.

@@ -167,16 +167,26 @@ async function doSearch() {
     return;
   }
 
-  renderBooking(id, result.data, result.guestData);
+  renderBooking(id, result.data, result.guestData, result.showAutomationModal);
 }
 
 // ── Render booking ────────────────────────────────────────────────────────────
 
-function renderBooking(id, data, guestData) {
+function renderBooking(id, data, guestData, showAutomationModal) {
   const flat    = data.booking || data.fulfillmentDetails || data;
   const vendors = data.vendorsInfo || flat.vendorsInfo || [];
 
   renderSummaryBar(id, flat, guestData);
+
+  // Automation failure modal warning
+  const modalBanner = $('automation-modal-banner');
+  if (showAutomationModal) {
+    const bmsLink = `https://box-office.headout.com/bms/booking/${id}`;
+    modalBanner.innerHTML = `⚠️ <strong>Action required:</strong> Go to <a href="${bmsLink}" target="_blank" rel="noopener">BMS</a> and complete the automation failure modal before processing this booking.`;
+    modalBanner.hidden = false;
+  } else {
+    modalBanner.hidden = true;
+  }
 
   const details = $('ticket-details');
   details.innerHTML = '';

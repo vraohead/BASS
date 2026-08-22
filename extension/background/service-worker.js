@@ -86,14 +86,20 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
     Promise.all([
       bmsApiCall(ENDPOINTS.booking(id)),
       bmsApiCall(ENDPOINTS.guestDetails(id)),
-    ]).then(([bookingResult, guestResult]) => {
+      bmsApiCall(ENDPOINTS.automationModal(id)),
+    ]).then(([bookingResult, guestResult, modalResult]) => {
       if (!bookingResult.ok) {
         sendResponse({ ok: false, error: bookingResult.error, errorType: bookingResult.type, status: bookingResult.status });
       } else {
+        const modalData = modalResult.ok ? modalResult.data : null;
+        const showModal = modalData === true
+          || modalData?.showAutomationFailureModal === true
+          || modalData?.show === true;
         sendResponse({
           ok: true,
           data: bookingResult.data,
           guestData: guestResult.ok ? guestResult.data : null,
+          showAutomationModal: showModal,
         });
       }
     }).catch(err => sendResponse({ ok: false, error: String(err), errorType: 'UNKNOWN' }));
