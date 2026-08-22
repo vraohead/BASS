@@ -180,7 +180,6 @@ function renderBooking(id, data, guestData) {
 
   const details = $('ticket-details');
   details.innerHTML = '';
-  details.appendChild(buildBookingSection(flat));
   details.appendChild(buildInstructionsSection(vendors));
   details.appendChild(buildCustomerSection(flat, guestData));
 
@@ -190,7 +189,7 @@ function renderBooking(id, data, guestData) {
   });
 
   $('tab-nav').hidden = false;
-  switchTab('full-booking');
+  switchTab('instructions');
 }
 
 // ── Summary bar ───────────────────────────────────────────────────────────────
@@ -317,13 +316,13 @@ function buildInstructionsSection(vendors) {
         paras.map(p => `<p class="instruction-para">${escHtml(p)}</p>`).join('')
       }</div>`;
     }
-    html += `<div class="instr-block instr-block--booking">
-      <div class="instr-block__header">
+    html += `<details class="instr-block instr-block--booking" ${i === 0 ? 'open' : ''}>
+      <summary class="instr-block__header">
         <span class="instr-block__icon">📌</span>
         <span class="instr-block__title">${escHtml(title)}</span>
-      </div>
+      </summary>
       <div class="instr-block__body">${bodyHtml}</div>
-    </div>`;
+    </details>`;
   });
 
   return buildSection('instructions', 'Instructions', '📌', html);

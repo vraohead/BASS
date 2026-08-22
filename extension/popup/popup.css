@@ -366,7 +366,15 @@ body > * { position: relative; z-index: 1; }
   padding: 9px 14px; font-size: 11px; font-weight: 700;
   text-transform: uppercase; letter-spacing: 0.08em;
   border-bottom: 1px solid var(--border);
+  cursor: pointer; list-style: none; user-select: none;
 }
+.instr-block__header::-webkit-details-marker { display: none; }
+.instr-block__header::after {
+  content: '▾'; margin-left: auto; font-size: 13px;
+  transition: transform 0.2s; opacity: 0.5;
+}
+details.instr-block:not([open]) .instr-block__header::after { transform: rotate(-90deg); }
+details.instr-block:not([open]) .instr-block__header { border-bottom: none; }
 .instr-block__icon { font-size: 14px; line-height: 1; }
 .instr-block__title { flex: 1; }
 .instr-block--important { border-left: 3px solid var(--amber); }
