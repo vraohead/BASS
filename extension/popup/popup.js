@@ -201,8 +201,9 @@ function renderSummaryBar(id, flat, guestData) {
 
   const date  = flat.inventoryDate || flat.bookingDate || '';
   const time  = flat.inventoryTime || '';
+  const currency = flat.currency || flat.currencyName || flat.tourCurrency || '';
   const price = flat.netPrice != null
-    ? `${flat.currency || ''} ${flat.netPrice}`.trim() : '';
+    ? `${currency} ${flat.netPrice}`.trim() : '';
 
   let pax = flat.totalPax != null ? String(flat.totalPax) : '';
   if (!pax && guestData?.paxDetails?.length) {
@@ -336,8 +337,8 @@ function buildBookingSection(flat) {
 
   // Net price with currency combined
   if (flat.netPrice != null) {
-    const netDisplay = flat.currency ? `${flat.currency} ${flat.netPrice}` : String(flat.netPrice);
-    html += fieldRow('Net Price', netDisplay);
+    const cur = flat.currency || flat.currencyName || flat.tourCurrency || '';
+    html += fieldRow('Net Price', cur ? `${cur} ${flat.netPrice}` : String(flat.netPrice));
   }
 
   // Vendor product name if top-level productName missing
@@ -393,7 +394,8 @@ function _getVerifyFacts(flat, guestData) {
 
 function buildVerifySection(flat, guestData) {
   const { date, time, pax, price } = _getVerifyFacts(flat, guestData);
-  const displayPrice = price ? `${flat.currency || ''} ${price}`.trim() : '—';
+  const cur2 = flat.currency || flat.currencyName || flat.tourCurrency || '';
+  const displayPrice = price ? `${cur2} ${price}`.trim() : '—';
 
   const html = `
     <div class="verify-facts">
