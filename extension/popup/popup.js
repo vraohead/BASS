@@ -280,8 +280,6 @@ const BOOKING_FIELDS = [
   ['inventoryTime',    'Time'],
   ['ticketType',       'Ticket Type'],
   ['totalPax',         'Total Pax'],
-  ['netPrice',         'Net Price'],
-  ['currency',         'Currency'],
   ['createdAt',        'Created'],
   ['updatedAt',        'Updated'],
 ];
@@ -328,12 +326,19 @@ function buildBookingSection(flat) {
     ...BOOKING_FIELDS.map(f => f[0]),
     'guestName', 'guestEmail', 'vendorsInfo',
     'tourId', 'tourGroupId', 'vendorId', 'guestNumbers',
+    'currency', 'netPrice',
     'siblingBookings', 'tickets', 'vouchers', 'ticketTypes',
     'oopCancelRischeduleConfig', 'oopCancelRescheduleConfig',
     'itineraryPricing', 'bookingPricing',
   ]);
 
   html += BOOKING_FIELDS.map(([key, label]) => fieldRow(label, flat[key])).join('');
+
+  // Net price with currency combined
+  if (flat.netPrice != null) {
+    const netDisplay = flat.currency ? `${flat.currency} ${flat.netPrice}` : String(flat.netPrice);
+    html += fieldRow('Net Price', netDisplay);
+  }
 
   // Vendor product name if top-level productName missing
   if (!flat.productName && primary?.productName) {
