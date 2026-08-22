@@ -183,8 +183,6 @@ function renderBooking(id, data, guestData) {
   details.appendChild(buildBookingSection(flat));
   details.appendChild(buildInstructionsSection(vendors));
   details.appendChild(buildCustomerSection(flat, guestData));
-  details.appendChild(buildVendorsSection(vendors));
-  details.appendChild(buildRawSection(data, guestData));
 
   // Wire up tab pills (re-added each render)
   document.querySelectorAll('#tab-nav .tab-pill').forEach(pill => {
@@ -382,33 +380,6 @@ function buildCustomerSection(flat, guestData) {
   return buildSection('customer-details', 'Customer Details', '👤', html);
 }
 
-// Vendors tab ──────────────────────────────────────────────────────────────────
-function buildVendorsSection(vendors) {
-  if (!vendors.length) {
-    return buildSection('important-links', 'Vendors', '🏢',
-      '<p class="instruction-empty">No vendor information available.</p>');
-  }
-  let html = '';
-  vendors.forEach((v, i) => {
-    const rows = [
-      fieldRow('Name', v.vendorName),
-      fieldRow('Vendor ID', v.vendorId),
-      fieldRow('Tour ID', v.tourId),
-    ].join('');
-    html += `<div class="guest-card">
-      <span class="guest-type-badge">Vendor ${i + 1}</span>
-      ${rows || '<p class="instruction-empty">No details.</p>'}
-    </div>`;
-  });
-  return buildSection('important-links', 'Vendors', '🏢', html);
-}
-
-// Raw tab ──────────────────────────────────────────────────────────────────────
-function buildRawSection(data, guestData) {
-  const payload = guestData ? { booking: data, guestDetails: guestData } : data;
-  return buildSection('raw', 'Raw API Response', '{ }',
-    `<pre>${escHtml(JSON.stringify(payload, null, 2))}</pre>`);
-}
 
 // ── Auto-detect booking from active tab URL ────────────────────────────────────
 
