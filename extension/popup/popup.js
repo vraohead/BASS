@@ -308,7 +308,6 @@ function buildBookingSection(flat) {
 
   if (tourId && tourGroupId) {
     linksHtml += linkRow('Inventory', `https://aries.headout.com/inventory?tourId=${tourId}&tourGroupId=${tourGroupId}`);
-    linksHtml += linkRow('Headout.com (TGID)', `https://www.headout.com/t/${tourGroupId}/`);
   }
 
   if (primary?.tourId && primary?.vendorId) {
@@ -327,7 +326,8 @@ function buildBookingSection(flat) {
     ...BOOKING_FIELDS.map(f => f[0]),
     'guestName', 'guestEmail', 'vendorsInfo',
     'tourId', 'tourGroupId', 'vendorId', 'guestNumbers',
-    'currency', 'netPrice',
+    'currency', 'netPrice', 'currencyName', 'tourCurrency',
+    'itineraryId', 'automateRiskyBooking', 'deskCaseId', 'twoStepFulfillmentEnabled',
     'siblingBookings', 'tickets', 'vouchers', 'ticketTypes',
     'oopCancelRischeduleConfig', 'oopCancelRescheduleConfig',
     'itineraryPricing', 'bookingPricing',
@@ -339,6 +339,11 @@ function buildBookingSection(flat) {
   if (flat.netPrice != null) {
     const cur = flat.currency || flat.currencyName || flat.tourCurrency || '';
     html += fieldRow('Net Price', cur ? `${cur} ${flat.netPrice}` : String(flat.netPrice));
+  }
+
+  // Two-step only when enabled
+  if (flat.twoStepFulfillmentEnabled === true) {
+    html += fieldRow('Two-Step Fulfilment', 'Yes');
   }
 
   // Vendor product name if top-level productName missing

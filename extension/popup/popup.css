@@ -475,17 +475,20 @@ details.instr-block:not([open]) .instr-block__header { border-bottom: none; }
   overflow-y: auto; max-height: 420px;
 }
 
-/* Compact view: all open, smaller text, no inner scroll */
-.instr-view--compact .instr-block { font-size: 10.5px; }
-.instr-view--compact .instr-block__header { padding: 6px 10px; font-size: 10px; }
-.instr-view--compact .instr-block__body { padding: 6px 10px; }
-.instr-view--compact .instruction-para { margin-bottom: 4px; line-height: 1.4; }
-.instr-view--compact .rich-instruction-wrapper { font-size: 10px; line-height: 1.4; }
-.instr-view--compact details.instr-block { }
-.instr-view--compact details.instr-block:not([open]) { }
-/* Force all blocks open in compact mode */
+/* Compact view: all open, aggressively small text */
+.instr-view--compact { overflow-y: auto; max-height: 420px; }
+.instr-view--compact .instr-block { margin-bottom: 5px; }
+.instr-view--compact .instr-block__header { padding: 4px 8px; font-size: 9px; }
+.instr-view--compact .instr-block__body { padding: 5px 8px; }
+.instr-view--compact .instruction-para { margin-bottom: 3px; line-height: 1.3; font-size: 9px !important; }
+/* Override inline font-size styles in rich HTML instructions */
+.instr-view--compact .rich-instruction-wrapper * { font-size: 9px !important; line-height: 1.3 !important; }
+.instr-view--compact .rich-instruction-wrapper p,
+.instr-view--compact .rich-instruction-wrapper li,
+.instr-view--compact .rich-instruction-wrapper span { margin-bottom: 2px !important; }
+/* Hide chevron in compact mode */
 .instr-view--compact details.instr-block summary::after { display: none; }
-.instr-view--compact details.instr-block .instr-block__body { display: block !important; }
+.instr-view--compact details.instr-block .instr-block__header { border-bottom: 1px solid var(--border) !important; }
 
 /* ── Section title colour for raw ───────────────────────────────────── */
 [data-section-id="raw"] .section-title { color: var(--muted); }
