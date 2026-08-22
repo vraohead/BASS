@@ -481,7 +481,7 @@ details.instr-block:not([open]) .instr-block__header { border-bottom: none; }
 
 /* Scroll view: normal size, scrollable */
 .instr-view--scroll {
-  overflow-y: auto; max-height: 420px;
+  overflow-y: auto; max-height: calc(100vh - 310px);
 }
 
 /* Compact view: all open, aggressively small text */

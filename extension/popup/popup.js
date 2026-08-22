@@ -188,10 +188,13 @@ function renderBooking(id, data, guestData, showAutomationModal) {
     modalBanner.hidden = true;
   }
 
+  const primary = getPrimaryVendor(flat);
+  const instrVendors = primary ? [primary] : vendors;
+
   const details = $('ticket-details');
   details.innerHTML = '';
   details.appendChild(buildBookingSection(flat));
-  details.appendChild(buildInstructionsSection(vendors));
+  details.appendChild(buildInstructionsSection(instrVendors));
   details.appendChild(buildCustomerSection(flat, guestData));
   details.appendChild(buildVerifySection(flat, guestData));
 
@@ -338,6 +341,7 @@ function buildBookingSection(flat) {
     'tourId', 'tourGroupId', 'vendorId', 'guestNumbers',
     'currency', 'netPrice', 'currencyName', 'tourCurrency',
     'itineraryId', 'automateRiskyBooking', 'deskCaseId', 'twoStepFulfillmentEnabled',
+    'whatsAppOptIn', 'netPriceEditable', 'noTicketDataBooking',
     'siblingBookings', 'tickets', 'vouchers', 'ticketTypes',
     'oopCancelRischeduleConfig', 'oopCancelRescheduleConfig',
     'itineraryPricing', 'bookingPricing',
