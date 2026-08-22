@@ -5,7 +5,8 @@
   "description": "BMS/Box Office frontend — reads booking data directly from Box Office APIs using your existing session.",
   "permissions": ["sidePanel", "storage", "tabs", "activeTab", "scripting"],
   "host_permissions": [
-    "https://box-office.headout.com/*"
+    "https://box-office.headout.com/*",
+    "<all_urls>"
   ],
   "background": {
     "service_worker": "background/service-worker.js",
