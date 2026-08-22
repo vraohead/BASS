@@ -59,6 +59,21 @@ async function testAuthentication() {
 
 chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
 
+  if (request.action === 'CAPTURE_TAB') {
+    chrome.tabs.query({ active: true, lastFocusedWindow: true }, tabs => {
+      if (!tabs[0]) { sendResponse({ ok: false, error: 'No active tab' }); return; }
+      chrome.tabs.captureVisibleTab(tabs[0].windowId, { format: 'png' }, dataUrl => {
+        if (chrome.runtime.lastError) {
+          sendResponse({ ok: false, error: chrome.runtime.lastError.message });
+        } else {
+          sendResponse({ ok: true, dataUrl });
+        }
+      });
+    });
+    return true;
+  }
+
+
   if (request.action === 'TEST_AUTH') {
     testAuthentication().then(sendResponse).catch(() => sendResponse('UNKNOWN'));
     return true;

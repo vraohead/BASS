@@ -183,6 +183,7 @@ function renderBooking(id, data, guestData) {
   details.appendChild(buildBookingSection(flat));
   details.appendChild(buildInstructionsSection(vendors));
   details.appendChild(buildCustomerSection(flat, guestData));
+  details.appendChild(buildVerifySection(flat, guestData));
 
   // Wire up tab pills (re-added each render)
   document.querySelectorAll('#tab-nav .tab-pill').forEach(pill => {
@@ -206,6 +207,10 @@ function renderSummaryBar(id, flat, guestData) {
   let pax = flat.totalPax != null ? String(flat.totalPax) : '';
   if (!pax && guestData?.paxDetails?.length) {
     const total = guestData.paxDetails.reduce((s, p) => s + (p.count || 0), 0);
+    if (total) pax = String(total);
+  }
+  if (!pax) {
+    const total = (flat.guestNumbers || []).reduce((s, g) => s + (g.persons || 0), 0);
     if (total) pax = String(total);
   }
 
@@ -319,6 +324,16 @@ function buildBookingSection(flat) {
   const handled = new Set([...BOOKING_FIELDS.map(f => f[0]), 'guestName', 'guestEmail', 'vendorsInfo']);
   html += BOOKING_FIELDS.map(([key, label]) => fieldRow(label, flat[key])).join('');
 
+  // Vendor product names if top-level productName is missing
+  if (!flat.productName && vendors.length) {
+    vendors.forEach((v, i) => {
+      if (v.productName) {
+        const label = vendors.length > 1 ? `Product (${v.vendorName || i + 1})` : 'Product (Vendor)';
+        html += fieldRow(label, v.productName);
+      }
+    });
+  }
+
   for (const [key, v] of Object.entries(flat)) {
     if (handled.has(key) || v == null || typeof v === 'object') continue;
     html += fieldRow(humanise(key), v);
@@ -326,6 +341,93 @@ function buildBookingSection(flat) {
 
   if (!html) html = '<p class="instruction-empty">No booking fields available.</p>';
   return buildSection('full-booking', 'Booking Details', '📋', html);
+}
+
+// Verify tab ───────────────────────────────────────────────────────────────────
+let _verifySection = null;
+
+document.addEventListener('paste', e => {
+  if (!_verifySection || _verifySection.classList.contains('tab-section-hidden')) return;
+  const items = e.clipboardData?.items || [];
+  for (const item of items) {
+    if (item.type.startsWith('image/')) {
+      const reader = new FileReader();
+      reader.onload = ev => _setVerifyImage(_verifySection, ev.target.result);
+      reader.readAsDataURL(item.getAsFile());
+      break;
+    }
+  }
+});
+
+function _setVerifyImage(sec, dataUrl) {
+  sec.querySelector('.verify-img').src = dataUrl;
+  sec.querySelector('.verify-img-wrap').hidden = false;
+}
+
+function buildVerifySection(flat, guestData) {
+  const date  = flat.inventoryDate || flat.bookingDate || '—';
+  const time  = flat.inventoryTime || '—';
+  const price = flat.netPrice != null ? `${flat.currency || ''} ${flat.netPrice}`.trim() : '—';
+
+  let pax = flat.totalPax != null ? String(flat.totalPax) : '';
+  if (!pax && guestData?.paxDetails?.length) {
+    const t = guestData.paxDetails.reduce((s, p) => s + (p.count || 0), 0);
+    if (t) pax = String(t);
+  }
+  if (!pax) {
+    const t = (flat.guestNumbers || []).reduce((s, g) => s + (g.persons || 0), 0);
+    if (t) pax = String(t);
+  }
+  pax = pax || '—';
+
+  const html = `
+    <div class="verify-facts">
+      <div class="verify-fact"><div class="verify-fact-label">Date</div><div class="verify-fact-value">${escHtml(date)}</div></div>
+      <div class="verify-fact"><div class="verify-fact-label">Time</div><div class="verify-fact-value">${escHtml(time)}</div></div>
+      <div class="verify-fact"><div class="verify-fact-label">Pax</div><div class="verify-fact-value">${escHtml(pax)}</div></div>
+      <div class="verify-fact"><div class="verify-fact-label">Net</div><div class="verify-fact-value">${escHtml(price)}</div></div>
+    </div>
+    <div class="verify-btns">
+      <button class="btn btn-secondary verify-capture-btn">📸 Capture Tab</button>
+      <label class="btn btn-secondary verify-upload-label">
+        📁 Upload
+        <input type="file" class="verify-file-input" accept="image/*">
+      </label>
+    </div>
+    <p class="verify-paste-hint">or paste (Ctrl+V / ⌘V)</p>
+    <div class="verify-img-wrap" hidden>
+      <img class="verify-img" alt="Ticket screenshot">
+      <button class="verify-clear-btn">✕ Clear image</button>
+    </div>
+  `;
+
+  const sec = buildSection('verify', 'Verify Ticket', '✓', html);
+  _verifySection = sec;
+
+  sec.querySelector('.verify-capture-btn').addEventListener('click', async () => {
+    const result = await sendMessage({ action: 'CAPTURE_TAB' });
+    if (result?.ok) _setVerifyImage(sec, result.dataUrl);
+    else {
+      const errEl = $('error-message');
+      errEl.textContent = 'Could not capture tab: ' + (result?.error || 'unknown');
+      errEl.hidden = false;
+    }
+  });
+
+  sec.querySelector('.verify-file-input').addEventListener('change', e => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = ev => _setVerifyImage(sec, ev.target.result);
+    reader.readAsDataURL(file);
+  });
+
+  sec.querySelector('.verify-clear-btn').addEventListener('click', () => {
+    sec.querySelector('.verify-img-wrap').hidden = true;
+    sec.querySelector('.verify-img').src = '';
+  });
+
+  return sec;
 }
 
 // Instructions tab ─────────────────────────────────────────────────────────────
