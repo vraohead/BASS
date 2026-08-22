@@ -630,9 +630,6 @@ function buildCustomerSection(flat, guestData) {
       if (paxLabel) html += fieldRow('Pax Breakdown', paxLabel);
     }
 
-    // Device & login status
-    if (guestData.device)      html += fieldRow('Device',       guestData.device);
-    if (guestData.loginStatus) html += fieldRow('Login Status', guestData.loginStatus.replace(/_/g, ' '));
 
   } else {
     // Fallback: basic fields from the booking response
