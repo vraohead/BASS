@@ -217,8 +217,6 @@ function renderSummaryBar(id, flat) {
   bar.innerHTML = `
     <div class="bs-tour">${escHtml(flat.productName || '—')}</div>
     <div class="bs-facts">
-      ${fact('Booking ID', `<span class="booking-id-badge">#${escHtml(id)}</span>`)}
-      ${status ? fact('Status', `<span class="status-badge ${statusClass}">${escHtml(status)}</span>`) : ''}
       ${date  ? fact('Date',   escHtml(date))  : ''}
       ${time  ? fact('Time',   escHtml(time))  : ''}
       ${pax   ? fact('Pax',   escHtml(pax))   : ''}
