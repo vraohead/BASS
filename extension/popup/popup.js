@@ -180,6 +180,7 @@ function renderBooking(id, data, guestData) {
 
   const details = $('ticket-details');
   details.innerHTML = '';
+  details.appendChild(buildBookingSection(flat));
   details.appendChild(buildInstructionsSection(vendors));
   details.appendChild(buildCustomerSection(flat, guestData));
 
@@ -189,7 +190,7 @@ function renderBooking(id, data, guestData) {
   });
 
   $('tab-nav').hidden = false;
-  switchTab('instructions');
+  switchTab('full-booking');
 }
 
 // ── Summary bar ───────────────────────────────────────────────────────────────
@@ -280,11 +281,44 @@ const BOOKING_FIELDS = [
   ['updatedAt',        'Updated'],
 ];
 
-function buildBookingSection(flat) {
-  const handled = new Set([...BOOKING_FIELDS.map(f => f[0]), 'guestName', 'guestEmail', 'vendorsInfo']);
-  let html = BOOKING_FIELDS.map(([key, label]) => fieldRow(label, flat[key])).join('');
+function linkRow(label, url) {
+  return `<div class="field-row">
+    <span class="field-label">${escHtml(label)}</span>
+    <span class="field-value"><a href="${escHtml(url)}" target="_blank" rel="noopener" class="quick-link">${escHtml(label)} ↗</a></span>
+  </div>`;
+}
 
-  // Extra scalar fields not in the standard list
+function buildBookingSection(flat) {
+  const tourId      = flat.tourId;
+  const tourGroupId = flat.tourGroupId;
+  const vendors     = flat.vendorsInfo || [];
+
+  // ── Quick Links ──────────────────────────────────────────────────────────
+  let linksHtml = '';
+
+  if (tourId && tourGroupId) {
+    linksHtml += linkRow('Inventory', `https://aries.headout.com/inventory?tourId=${tourId}&tourGroupId=${tourGroupId}`);
+    linksHtml += linkRow('Headout.com (TGID)', `https://www.headout.com/t/${tourGroupId}/`);
+  }
+
+  vendors.forEach(v => {
+    if (v.tourId && v.vendorId) {
+      const name = v.vendorName ? escHtml(v.vendorName) : `Vendor ${v.vendorId}`;
+      linksHtml += `<div class="field-row">
+        <span class="field-label">Scorpio</span>
+        <span class="field-value"><a href="https://scorpio.headout.com/admin/vendor/vendortour/?tour=${v.tourId}&vendor_id=${v.vendorId}" target="_blank" rel="noopener" class="quick-link">${name} ↗</a></span>
+      </div>`;
+    }
+  });
+
+  let html = linksHtml
+    ? `<div class="quick-links-group">${linksHtml}</div><div class="quick-links-divider"></div>`
+    : '';
+
+  // ── Standard fields ──────────────────────────────────────────────────────
+  const handled = new Set([...BOOKING_FIELDS.map(f => f[0]), 'guestName', 'guestEmail', 'vendorsInfo']);
+  html += BOOKING_FIELDS.map(([key, label]) => fieldRow(label, flat[key])).join('');
+
   for (const [key, v] of Object.entries(flat)) {
     if (handled.has(key) || v == null || typeof v === 'object') continue;
     html += fieldRow(humanise(key), v);

@@ -319,6 +319,15 @@ body > * { position: relative; z-index: 1; }
 }
 .section { animation: card-enter 0.35s ease-out both; }
 
+/* ── Quick Links ─────────────────────────────────────────────────────── */
+.quick-links-group { margin-bottom: 2px; }
+.quick-links-divider { border-top: 2px solid var(--border); margin: 8px 0; }
+.quick-link {
+  color: var(--accent); text-decoration: none; font-size: 11px;
+  font-weight: 600; word-break: break-all;
+}
+.quick-link:hover { text-decoration: underline; }
+
 /* ── Field Rows ──────────────────────────────────────────────────────── */
 .field-row {
   display: flex; align-items: baseline; justify-content: space-between;
