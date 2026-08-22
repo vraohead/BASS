@@ -293,12 +293,18 @@ function linkRow(label, url) {
   </div>`;
 }
 
+function getPrimaryVendor(flat) {
+  const vendors = flat.vendorsInfo || [];
+  if (!vendors.length) return null;
+  return vendors.find(v => v.vendorId === flat.vendorId) || vendors[0];
+}
+
 function buildBookingSection(flat) {
   const tourId      = flat.tourId;
   const tourGroupId = flat.tourGroupId;
-  const vendors     = flat.vendorsInfo || [];
+  const primary     = getPrimaryVendor(flat);
 
-  // ── Quick Links ──────────────────────────────────────────────────────────
+  // ── Quick Links (primary vendor only) ───────────────────────────────────
   let linksHtml = '';
 
   if (tourId && tourGroupId) {
@@ -306,36 +312,36 @@ function buildBookingSection(flat) {
     linksHtml += linkRow('Headout.com (TGID)', `https://www.headout.com/t/${tourGroupId}/`);
   }
 
-  vendors.forEach(v => {
-    if (v.tourId && v.vendorId) {
-      const name = v.vendorName ? escHtml(v.vendorName) : `Vendor ${v.vendorId}`;
-      linksHtml += `<div class="field-row">
-        <span class="field-label">Scorpio</span>
-        <span class="field-value"><a href="https://scorpio.headout.com/admin/vendor/vendortour/?tour=${v.tourId}&vendor_id=${v.vendorId}" target="_blank" rel="noopener" class="quick-link">${name} ↗</a></span>
-      </div>`;
-    }
-  });
+  if (primary?.tourId && primary?.vendorId) {
+    linksHtml += `<div class="field-row">
+      <span class="field-label">Scorpio</span>
+      <span class="field-value"><a href="https://scorpio.headout.com/admin/vendor/vendortour/?tour=${primary.tourId}&vendor_id=${primary.vendorId}" target="_blank" rel="noopener" class="quick-link">${escHtml(primary.vendorName || 'Vendor')} ↗</a></span>
+    </div>`;
+  }
 
   let html = linksHtml
     ? `<div class="quick-links-group">${linksHtml}</div><div class="quick-links-divider"></div>`
     : '';
 
   // ── Standard fields ──────────────────────────────────────────────────────
-  const handled = new Set([...BOOKING_FIELDS.map(f => f[0]), 'guestName', 'guestEmail', 'vendorsInfo']);
+  const HIDDEN = new Set([
+    ...BOOKING_FIELDS.map(f => f[0]),
+    'guestName', 'guestEmail', 'vendorsInfo',
+    'tourId', 'tourGroupId', 'vendorId', 'guestNumbers',
+    'siblingBookings', 'tickets', 'vouchers', 'ticketTypes',
+    'oopCancelRischeduleConfig', 'oopCancelRescheduleConfig',
+    'itineraryPricing', 'bookingPricing',
+  ]);
+
   html += BOOKING_FIELDS.map(([key, label]) => fieldRow(label, flat[key])).join('');
 
-  // Vendor product names if top-level productName is missing
-  if (!flat.productName && vendors.length) {
-    vendors.forEach((v, i) => {
-      if (v.productName) {
-        const label = vendors.length > 1 ? `Product (${v.vendorName || i + 1})` : 'Product (Vendor)';
-        html += fieldRow(label, v.productName);
-      }
-    });
+  // Vendor product name if top-level productName missing
+  if (!flat.productName && primary?.productName) {
+    html += fieldRow('Product (Vendor)', primary.productName);
   }
 
   for (const [key, v] of Object.entries(flat)) {
-    if (handled.has(key) || v == null || typeof v === 'object') continue;
+    if (HIDDEN.has(key) || v == null || typeof v === 'object') continue;
     html += fieldRow(humanise(key), v);
   }
 
@@ -364,11 +370,10 @@ function _setVerifyImage(sec, dataUrl) {
   sec.querySelector('.verify-img-wrap').hidden = false;
 }
 
-function buildVerifySection(flat, guestData) {
-  const date  = flat.inventoryDate || flat.bookingDate || '—';
-  const time  = flat.inventoryTime || '—';
-  const price = flat.netPrice != null ? `${flat.currency || ''} ${flat.netPrice}`.trim() : '—';
-
+function _getVerifyFacts(flat, guestData) {
+  const date  = flat.inventoryDate || flat.bookingDate || '';
+  const time  = flat.inventoryTime || '';
+  const price = flat.netPrice != null ? String(flat.netPrice) : '';
   let pax = flat.totalPax != null ? String(flat.totalPax) : '';
   if (!pax && guestData?.paxDetails?.length) {
     const t = guestData.paxDetails.reduce((s, p) => s + (p.count || 0), 0);
@@ -378,43 +383,78 @@ function buildVerifySection(flat, guestData) {
     const t = (flat.guestNumbers || []).reduce((s, g) => s + (g.persons || 0), 0);
     if (t) pax = String(t);
   }
-  pax = pax || '—';
+  return { date, time, pax: pax || '', price };
+}
+
+function buildVerifySection(flat, guestData) {
+  const { date, time, pax, price } = _getVerifyFacts(flat, guestData);
+  const displayPrice = price ? `${flat.currency || ''} ${price}`.trim() : '—';
 
   const html = `
     <div class="verify-facts">
-      <div class="verify-fact"><div class="verify-fact-label">Date</div><div class="verify-fact-value">${escHtml(date)}</div></div>
-      <div class="verify-fact"><div class="verify-fact-label">Time</div><div class="verify-fact-value">${escHtml(time)}</div></div>
-      <div class="verify-fact"><div class="verify-fact-label">Pax</div><div class="verify-fact-value">${escHtml(pax)}</div></div>
-      <div class="verify-fact"><div class="verify-fact-label">Net</div><div class="verify-fact-value">${escHtml(price)}</div></div>
+      <div class="verify-fact"><div class="verify-fact-label">Date</div><div class="verify-fact-value">${escHtml(date || '—')}</div></div>
+      <div class="verify-fact"><div class="verify-fact-label">Time</div><div class="verify-fact-value">${escHtml(time || '—')}</div></div>
+      <div class="verify-fact"><div class="verify-fact-label">Pax</div><div class="verify-fact-value">${escHtml(pax || '—')}</div></div>
+      <div class="verify-fact"><div class="verify-fact-label">Net</div><div class="verify-fact-value">${escHtml(displayPrice)}</div></div>
     </div>
-    <div class="verify-btns">
-      <button class="btn btn-secondary verify-capture-btn">📸 Capture Tab</button>
-      <label class="btn btn-secondary verify-upload-label">
-        📁 Upload
+
+    <div class="verify-mode-btns">
+      <button class="verify-mode-btn active" data-mode="screenshot">📸 Screenshot</button>
+      <button class="verify-mode-btn" data-mode="response">🔍 Capture Response</button>
+    </div>
+
+    <div class="verify-pane" data-pane="screenshot">
+      <div class="drop-zone">
         <input type="file" class="verify-file-input" accept="image/*">
-      </label>
+        <div class="drop-zone-inner">
+          <div class="drop-zone-icon">🖼️</div>
+          <p class="drop-zone-text">Drop image, click to upload, or paste (Ctrl+V)</p>
+        </div>
+      </div>
+      <div class="verify-img-wrap" hidden>
+        <img class="verify-img" alt="Ticket screenshot">
+        <button class="verify-clear-btn">✕ Clear</button>
+      </div>
     </div>
-    <p class="verify-paste-hint">or paste (Ctrl+V / ⌘V)</p>
-    <div class="verify-img-wrap" hidden>
-      <img class="verify-img" alt="Ticket screenshot">
-      <button class="verify-clear-btn">✕ Clear image</button>
+
+    <div class="verify-pane" data-pane="response" hidden>
+      <p class="verify-paste-hint">Navigate to the vendor portal or ticket page, then click:</p>
+      <button class="btn btn-primary verify-capture-resp-btn" style="width:100%">🔍 Capture Active Tab Response</button>
+      <div class="verify-results" hidden></div>
     </div>
   `;
 
   const sec = buildSection('verify', 'Verify Ticket', '✓', html);
   _verifySection = sec;
 
-  sec.querySelector('.verify-capture-btn').addEventListener('click', async () => {
-    const result = await sendMessage({ action: 'CAPTURE_TAB' });
-    if (result?.ok) _setVerifyImage(sec, result.dataUrl);
-    else {
-      const errEl = $('error-message');
-      errEl.textContent = 'Could not capture tab: ' + (result?.error || 'unknown');
-      errEl.hidden = false;
-    }
+  // Mode toggle
+  sec.querySelectorAll('.verify-mode-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      sec.querySelectorAll('.verify-mode-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      sec.querySelectorAll('.verify-pane').forEach(p => {
+        p.hidden = p.dataset.pane !== btn.dataset.mode;
+      });
+    });
   });
 
-  sec.querySelector('.verify-file-input').addEventListener('change', e => {
+  // Drop zone — click to open file picker
+  const dropZone = sec.querySelector('.drop-zone');
+  const fileInput = sec.querySelector('.verify-file-input');
+  dropZone.addEventListener('click', () => fileInput.click());
+  dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+  dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+  dropZone.addEventListener('drop', e => {
+    e.preventDefault();
+    dropZone.classList.remove('drag-over');
+    const file = e.dataTransfer.files[0];
+    if (file?.type.startsWith('image/')) {
+      const reader = new FileReader();
+      reader.onload = ev => _setVerifyImage(sec, ev.target.result);
+      reader.readAsDataURL(file);
+    }
+  });
+  fileInput.addEventListener('change', e => {
     const file = e.target.files[0];
     if (!file) return;
     const reader = new FileReader();
@@ -422,9 +462,50 @@ function buildVerifySection(flat, guestData) {
     reader.readAsDataURL(file);
   });
 
+  // Clear image
   sec.querySelector('.verify-clear-btn').addEventListener('click', () => {
     sec.querySelector('.verify-img-wrap').hidden = true;
     sec.querySelector('.verify-img').src = '';
+    fileInput.value = '';
+  });
+
+  // Capture response
+  sec.querySelector('.verify-capture-resp-btn').addEventListener('click', async () => {
+    const btn = sec.querySelector('.verify-capture-resp-btn');
+    btn.disabled = true;
+    btn.textContent = 'Reading page…';
+    const result = await sendMessage({ action: 'CAPTURE_RESPONSE' });
+    btn.disabled = false;
+    btn.textContent = '🔍 Capture Active Tab Response';
+
+    const resultsEl = sec.querySelector('.verify-results');
+    if (!result?.ok) {
+      resultsEl.innerHTML = `<p class="verify-result-error">Could not read tab: ${escHtml(result?.error || 'unknown')}</p>`;
+      resultsEl.hidden = false;
+      return;
+    }
+
+    const text = result.text;
+    const checks = [
+      { label: 'Date',      expected: date,  found: date  ? text.includes(date)  : null },
+      { label: 'Time',      expected: time,  found: time  ? text.includes(time.substring(0,5)) : null },
+      { label: 'Pax',       expected: pax,   found: pax   ? new RegExp(`\\b${pax}\\b`).test(text) : null },
+      { label: 'Net Price', expected: price, found: price ? text.includes(price) : null },
+    ].filter(c => c.expected && c.found !== null);
+
+    if (!checks.length) {
+      resultsEl.innerHTML = '<p class="verify-result-error">No booking values to match against.</p>';
+    } else {
+      resultsEl.innerHTML = checks.map(c => `
+        <div class="verify-result-row ${c.found ? 'match' : 'nomatch'}">
+          <span class="vr-icon">${c.found ? '✓' : '✗'}</span>
+          <span class="vr-label">${escHtml(c.label)}</span>
+          <span class="vr-value">${escHtml(c.expected)}</span>
+          <span class="vr-status">${c.found ? 'Found' : 'Not found'}</span>
+        </div>
+      `).join('');
+    }
+    resultsEl.hidden = false;
   });
 
   return sec;

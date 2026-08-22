@@ -59,16 +59,18 @@ async function testAuthentication() {
 
 chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
 
-  if (request.action === 'CAPTURE_TAB') {
-    chrome.tabs.query({ active: true, lastFocusedWindow: true }, tabs => {
+  if (request.action === 'CAPTURE_RESPONSE') {
+    chrome.tabs.query({ active: true, lastFocusedWindow: true }, async tabs => {
       if (!tabs[0]) { sendResponse({ ok: false, error: 'No active tab' }); return; }
-      chrome.tabs.captureVisibleTab(tabs[0].windowId, { format: 'png' }, dataUrl => {
-        if (chrome.runtime.lastError) {
-          sendResponse({ ok: false, error: chrome.runtime.lastError.message });
-        } else {
-          sendResponse({ ok: true, dataUrl });
-        }
-      });
+      try {
+        const results = await chrome.scripting.executeScript({
+          target: { tabId: tabs[0].id },
+          func: () => document.body.innerText,
+        });
+        sendResponse({ ok: true, text: results[0]?.result || '' });
+      } catch (err) {
+        sendResponse({ ok: false, error: err.message });
+      }
     });
     return true;
   }
