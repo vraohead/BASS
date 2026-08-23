@@ -240,8 +240,24 @@ function renderSummaryBar(id, flat, guestData) {
     if (total) pax = String(total);
   }
 
-  const fact = (label, valueHtml) =>
-    valueHtml ? `<div class="bs-fact">
+  // Time to Experience: diff from now to inventory date+time
+  let tte = '';
+  if (date) {
+    const dtStr = time ? `${date}T${time}` : `${date}T00:00:00`;
+    const expMs = new Date(dtStr).getTime();
+    if (!isNaN(expMs)) {
+      const diffMs = expMs - Date.now();
+      const neg = diffMs < 0;
+      const abs = Math.abs(diffMs);
+      const totalH = Math.floor(abs / 3_600_000);
+      const d = Math.floor(totalH / 24);
+      const h = totalH % 24;
+      tte = `${neg ? '-' : '+'}${d}d ${h}h`;
+    }
+  }
+
+  const fact = (label, valueHtml, cls = '') =>
+    valueHtml ? `<div class="bs-fact${cls ? ' ' + cls : ''}">
       <span class="bs-fact-label">${label}</span>
       <span class="bs-fact-value">${valueHtml}</span>
     </div>` : '';
@@ -253,6 +269,7 @@ function renderSummaryBar(id, flat, guestData) {
       ${time  ? fact('Time',   escHtml(time))  : ''}
       ${pax   ? fact('Pax',   escHtml(pax))   : ''}
       ${price ? fact('Net',   escHtml(price)) : ''}
+      ${tte   ? fact('TTE',   escHtml(tte), tte.startsWith('-') ? 'bs-fact--past' : 'bs-fact--future') : ''}
     </div>
   `;
   bar.hidden = false;
@@ -354,6 +371,7 @@ function buildBookingSection(flat) {
     'currency', 'netPrice', 'currencyName', 'tourCurrency',
     'itineraryId', 'automateRiskyBooking', 'deskCaseId', 'twoStepFulfillmentEnabled',
     'whatsAppOptIn', 'netPriceEditable', 'noTicketDataBooking',
+    'ticketUnblurred', 'meetingPointAddress', 'meetingPointUrl', 'appPushMode',
     'siblingBookings', 'tickets', 'vouchers', 'ticketTypes',
     'oopCancelRischeduleConfig', 'oopCancelRescheduleConfig',
     'itineraryPricing', 'bookingPricing',

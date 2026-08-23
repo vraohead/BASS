@@ -260,6 +260,8 @@ body > * { position: relative; z-index: 1; }
 }
 .bs-fact-value { font-size: 12px; color: var(--text); font-weight: 600; }
 .bs-fact-value.na { color: var(--muted); font-style: italic; font-weight: 400; font-size: 11px; }
+.bs-fact--past  .bs-fact-value { color: var(--red); }
+.bs-fact--future .bs-fact-value { color: var(--green, #16a34a); }
 
 /* ── Tab Navigation ──────────────────────────────────────────────────── */
 .tab-nav {
