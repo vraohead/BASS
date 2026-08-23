@@ -247,7 +247,7 @@ function renderSummaryBar(id, flat, guestData) {
     </div>` : '';
 
   bar.innerHTML = `
-    <div class="bs-tour">${escHtml(flat.productName || '—')}</div>
+    ${flat.productName ? `<div class="bs-tour">${escHtml(flat.productName)}</div>` : ''}
     <div class="bs-facts">
       ${date  ? fact('Date',   escHtml(date))  : ''}
       ${time  ? fact('Time',   escHtml(time))  : ''}
