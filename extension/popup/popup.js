@@ -393,6 +393,9 @@ document.addEventListener('paste', e => {
 function _setVerifyImage(sec, dataUrl) {
   sec.querySelector('.verify-img').src = dataUrl;
   sec.querySelector('.verify-img-wrap').hidden = false;
+  sec.querySelector('.verify-ai-row').hidden = false;
+  sec.querySelector('.verify-ai-results').hidden = true;
+  sec.querySelector('.verify-ai-results').innerHTML = '';
 }
 
 function _getVerifyFacts(flat, guestData) {
@@ -441,6 +444,17 @@ function buildVerifySection(flat, guestData) {
         <img class="verify-img" alt="Ticket screenshot">
         <button class="verify-clear-btn">✕ Clear</button>
       </div>
+      <div class="verify-ai-row" hidden>
+        <button class="btn btn-primary verify-ai-btn">🤖 AI Verify</button>
+      </div>
+      <div class="verify-ai-results" hidden></div>
+      <details class="verify-worker-details">
+        <summary class="verify-worker-summary">⚙ Worker URL</summary>
+        <div class="verify-worker-body">
+          <input type="url" class="verify-worker-input" placeholder="https://bass-verify.xxx.workers.dev" spellcheck="false" autocomplete="off">
+          <button class="verify-worker-save">Save</button>
+        </div>
+      </details>
     </div>
 
     <div class="verify-pane" data-pane="response" hidden>
@@ -491,8 +505,76 @@ function buildVerifySection(flat, guestData) {
   // Clear image
   sec.querySelector('.verify-clear-btn').addEventListener('click', () => {
     sec.querySelector('.verify-img-wrap').hidden = true;
+    sec.querySelector('.verify-ai-row').hidden = true;
+    sec.querySelector('.verify-ai-results').hidden = true;
     sec.querySelector('.verify-img').src = '';
     fileInput.value = '';
+  });
+
+  // Worker URL — load saved value, wire save button
+  chrome.storage.local.get('aiWorkerUrl').then(({ aiWorkerUrl = '' }) => {
+    sec.querySelector('.verify-worker-input').value = aiWorkerUrl;
+  }).catch(() => {});
+
+  sec.querySelector('.verify-worker-save').addEventListener('click', async () => {
+    const url = sec.querySelector('.verify-worker-input').value.trim();
+    try { await chrome.storage.local.set({ aiWorkerUrl: url }); } catch (_) {}
+    const btn = sec.querySelector('.verify-worker-save');
+    btn.textContent = '✓ Saved';
+    setTimeout(() => { btn.textContent = 'Save'; }, 1500);
+  });
+
+  // AI Verify
+  sec.querySelector('.verify-ai-btn').addEventListener('click', async () => {
+    const { aiWorkerUrl = '' } = await chrome.storage.local.get('aiWorkerUrl').catch(() => ({}));
+    if (!aiWorkerUrl) {
+      sec.querySelector('.verify-worker-details').open = true;
+      sec.querySelector('.verify-worker-input').focus();
+      return;
+    }
+    const imgEl = sec.querySelector('.verify-img');
+    if (!imgEl.src || imgEl.src === window.location.href) return;
+
+    const aiBtn = sec.querySelector('.verify-ai-btn');
+    const resultsEl = sec.querySelector('.verify-ai-results');
+    aiBtn.disabled = true;
+    aiBtn.textContent = '⏳ Verifying…';
+    resultsEl.hidden = true;
+
+    const [header, imageBase64] = imgEl.src.split(',');
+    const mimeType = header.match(/:(.*?);/)?.[1] || 'image/png';
+
+    const result = await sendMessage({
+      action: 'VERIFY_IMAGE',
+      imageBase64,
+      mimeType,
+      facts: { date, time, pax, price },
+      workerUrl: aiWorkerUrl,
+    });
+
+    aiBtn.disabled = false;
+    aiBtn.textContent = '🤖 AI Verify';
+
+    if (!result?.ok) {
+      resultsEl.innerHTML = `<p class="verify-result-error">Error: ${escHtml(result?.error || 'unknown')}</p>`;
+      resultsEl.hidden = false;
+      return;
+    }
+
+    const checks = result.checks || [];
+    if (!checks.length) {
+      resultsEl.innerHTML = '<p class="verify-result-error">No results returned from AI.</p>';
+    } else {
+      resultsEl.innerHTML = checks.map(c => `
+        <div class="verify-result-row ${c.found ? 'match' : 'nomatch'}">
+          <span class="vr-icon">${c.found ? '✓' : '✗'}</span>
+          <span class="vr-label">${escHtml(c.label)}</span>
+          <span class="vr-value">${escHtml(String(c.expected))}</span>
+          <span class="vr-status">${c.found ? 'Found' : 'Not found'}</span>
+        </div>
+      `).join('');
+    }
+    resultsEl.hidden = false;
   });
 
   // Capture response

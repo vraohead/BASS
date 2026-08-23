@@ -76,6 +76,24 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
   }
 
 
+  if (request.action === 'VERIFY_IMAGE') {
+    const { imageBase64, mimeType, facts, workerUrl } = request;
+    (async () => {
+      try {
+        const res = await fetch(`${workerUrl.replace(/\/$/, '')}/verify`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ imageBase64, mimeType, facts }),
+        });
+        const data = await res.json();
+        sendResponse(res.ok ? { ok: true, ...data } : { ok: false, error: data.error || 'Worker error' });
+      } catch (err) {
+        sendResponse({ ok: false, error: err.message });
+      }
+    })();
+    return true;
+  }
+
   if (request.action === 'TEST_AUTH') {
     testAuthentication().then(sendResponse).catch(() => sendResponse('UNKNOWN'));
     return true;
