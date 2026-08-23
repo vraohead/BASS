@@ -213,6 +213,17 @@ body > * { position: relative; z-index: 1; }
 .automation-modal-banner a { color: inherit; font-weight: 700; }
 .automation-modal-banner[hidden] { display: none !important; }
 
+/* ── Automation lockout ───────────────────────────────────────────────── */
+.automation-lockout {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  flex: 1 1 auto; padding: 32px 24px; text-align: center; gap: 12px;
+  background: rgba(229,72,77,0.04);
+}
+.automation-lockout-icon { font-size: 40px; line-height: 1; }
+.automation-lockout-title { font-size: 16px; font-weight: 700; color: var(--red); margin: 0; }
+.automation-lockout-body { font-size: 13px; color: var(--text-muted); line-height: 1.55; margin: 0; max-width: 280px; }
+.automation-lockout-btn { margin-top: 8px; font-size: 13px; padding: 9px 20px; }
+
 /* ── Warnings ────────────────────────────────────────────────────────── */
 .bms-warning { padding: 6px 12px; font-size: 11px; line-height: 1.5; font-weight: 600; flex: 0 0 auto; }
 .bms-warning { background: rgba(251,191,36,0.06); border-bottom: 2px solid var(--amber); color: var(--amber); display: flex; align-items: center; gap: 8px; }

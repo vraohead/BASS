@@ -59,6 +59,19 @@ async function testAuthentication() {
 
 chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
 
+  if (request.action === 'CAPTURE_SCREENSHOT') {
+    chrome.tabs.query({ active: true, lastFocusedWindow: true }, async tabs => {
+      if (!tabs[0]) { sendResponse({ ok: false, error: 'No active tab' }); return; }
+      try {
+        const dataUrl = await chrome.tabs.captureVisibleTab(tabs[0].windowId, { format: 'png' });
+        sendResponse({ ok: true, dataUrl });
+      } catch (err) {
+        sendResponse({ ok: false, error: err.message });
+      }
+    });
+    return true;
+  }
+
   if (request.action === 'CAPTURE_RESPONSE') {
     chrome.tabs.query({ active: true, lastFocusedWindow: true }, async tabs => {
       if (!tabs[0]) { sendResponse({ ok: false, error: 'No active tab' }); return; }

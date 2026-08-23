@@ -178,14 +178,26 @@ function renderBooking(id, data, guestData, showAutomationModal) {
 
   renderSummaryBar(id, flat, guestData);
 
-  // Automation failure modal warning
-  const modalBanner = $('automation-modal-banner');
+  $('automation-modal-banner').hidden = true;
+
   if (showAutomationModal) {
-    const bmsLink = `https://box-office.headout.com/bms/booking/${id}`;
-    modalBanner.innerHTML = `⚠️ <strong>Action required:</strong> Go to <a href="${bmsLink}" target="_blank" rel="noopener">BMS</a> and complete the automation failure modal before processing this booking.`;
-    modalBanner.hidden = false;
-  } else {
-    modalBanner.hidden = true;
+    const bmsLink = `https://box-office.headout.com/booking/${id}`;
+    $('tab-nav').hidden = true;
+    const details = $('ticket-details');
+    details.innerHTML = '';
+    const lockout = document.createElement('div');
+    lockout.className = 'automation-lockout';
+    lockout.innerHTML = `
+      <div class="automation-lockout-icon">⚠️</div>
+      <p class="automation-lockout-title">Action Required</p>
+      <p class="automation-lockout-body">This booking has an automation failure. Complete the automation failure modal in BMS before processing this booking.</p>
+      <button class="btn btn-primary automation-lockout-btn" data-url="${escHtml(bmsLink)}">Open Booking in BMS ↗</button>
+    `;
+    lockout.querySelector('.automation-lockout-btn').addEventListener('click', () => {
+      chrome.tabs.create({ url: bmsLink });
+    });
+    details.appendChild(lockout);
+    return;
   }
 
   const primary = getPrimaryVendor(flat);
@@ -433,11 +445,12 @@ function buildVerifySection(flat, guestData) {
     </div>
 
     <div class="verify-pane" data-pane="screenshot">
+      <button class="btn btn-primary verify-capture-tab-btn" style="width:100%;margin-bottom:8px">📸 Capture Current Tab</button>
       <div class="drop-zone">
         <input type="file" class="verify-file-input" accept="image/*">
         <div class="drop-zone-inner">
           <div class="drop-zone-icon">🖼️</div>
-          <p class="drop-zone-text">Drop image, click to upload, or paste (Ctrl+V)</p>
+          <p class="drop-zone-text">Or drop / upload / paste (Ctrl+V)</p>
         </div>
       </div>
       <div class="verify-img-wrap" hidden>
@@ -500,6 +513,23 @@ function buildVerifySection(flat, guestData) {
     const reader = new FileReader();
     reader.onload = ev => _setVerifyImage(sec, ev.target.result);
     reader.readAsDataURL(file);
+  });
+
+  // Capture current tab screenshot
+  sec.querySelector('.verify-capture-tab-btn').addEventListener('click', async () => {
+    const btn = sec.querySelector('.verify-capture-tab-btn');
+    btn.disabled = true;
+    btn.textContent = '⏳ Capturing…';
+    const result = await sendMessage({ action: 'CAPTURE_SCREENSHOT' });
+    btn.disabled = false;
+    btn.textContent = '📸 Capture Current Tab';
+    if (result?.ok) {
+      _setVerifyImage(sec, result.dataUrl);
+    } else {
+      const errEl = sec.querySelector('.verify-ai-results');
+      errEl.innerHTML = `<p class="verify-result-error">Screenshot failed: ${escHtml(result?.error || 'unknown')}</p>`;
+      errEl.hidden = false;
+    }
   });
 
   // Clear image
