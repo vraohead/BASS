@@ -181,7 +181,7 @@ function renderBooking(id, data, guestData, showAutomationModal) {
   $('automation-modal-banner').hidden = true;
 
   if (showAutomationModal) {
-    const bmsLink = `https://box-office.headout.com/booking/${id}`;
+    const bmsLink = `https://box-office.headout.com/bms/${id}`;
     $('tab-nav').hidden = true;
     const details = $('ticket-details');
     details.innerHTML = '';
