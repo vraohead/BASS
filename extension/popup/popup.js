@@ -32,24 +32,6 @@ function humanise(key) {
   return key.replace(/([A-Z])/g, ' $1').replace(/^./, s => s.toUpperCase()).trim();
 }
 
-// Convert a date+time expressed in a named IANA timezone to UTC milliseconds.
-// Uses two-pass Intl approach to handle DST correctly.
-function tzLocalToUtcMs(dateStr, timeStr, tzName) {
-  function offsetAt(utcMs) {
-    const parts = new Intl.DateTimeFormat('en', {
-      timeZone: tzName,
-      year: 'numeric', month: '2-digit', day: '2-digit',
-      hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
-    }).formatToParts(utcMs);
-    const p = {};
-    parts.forEach(({ type, value }) => { p[type] = value; });
-    const localAsUtc = Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second);
-    return localAsUtc - utcMs;
-  }
-  const approxMs = new Date(`${dateStr}T${timeStr || '00:00:00'}Z`).getTime();
-  return approxMs - offsetAt(approxMs - offsetAt(approxMs));
-}
-}
 
 // ── Theme ─────────────────────────────────────────────────────────────────────
 
@@ -259,27 +241,13 @@ function renderSummaryBar(id, flat, guestData) {
     if (total) pax = String(total);
   }
 
-  // Time to Experience: diff from now to inventory date+time, timezone-aware when possible
+  // Time to Experience: pre-computed server-side field (timezone-correct)
   let tte = '';
-  if (date) {
-    const tz = flat.timezone || flat.timeZone || flat.tourTimezone || flat.inventoryTimezone || null;
-    let expMs;
-    try {
-      expMs = tz
-        ? tzLocalToUtcMs(date, time, tz)
-        : new Date(`${date}T${time || '00:00:00'}`).getTime();
-    } catch (_) {
-      expMs = new Date(`${date}T${time || '00:00:00'}`).getTime();
-    }
-    if (!isNaN(expMs)) {
-      const diffMs = expMs - Date.now();
-      const neg = diffMs < 0;
-      const abs = Math.abs(diffMs);
-      const totalH = Math.floor(abs / 3_600_000);
-      const d = Math.floor(totalH / 24);
-      const h = totalH % 24;
-      tte = `${neg ? '-' : '+'}${d}d ${h}h`;
-    }
+  if (flat.actualLeadTimeInHours != null) {
+    const totalH = Math.abs(flat.actualLeadTimeInHours);
+    const d = Math.floor(totalH / 24);
+    const h = totalH % 24;
+    tte = `${flat.actualLeadTimeInHours < 0 ? '-' : '+'}${d}d ${h}h`;
   }
 
   const fact = (label, valueHtml, cls = '') =>
@@ -402,6 +370,7 @@ function buildBookingSection(flat) {
     'siblingBookings', 'tickets', 'vouchers', 'ticketTypes',
     'oopCancelRischeduleConfig', 'oopCancelRescheduleConfig',
     'itineraryPricing', 'bookingPricing',
+    'actualLeadTimeInHours',
   ]);
 
   html += BOOKING_FIELDS.map(([key, label]) => fieldRow(label, flat[key])).join('');
