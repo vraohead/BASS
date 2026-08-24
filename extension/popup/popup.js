@@ -532,15 +532,31 @@ function buildVerifySection(flat, guestData) {
   // Capture current tab screenshot
   sec.querySelector('.verify-capture-tab-btn').addEventListener('click', async () => {
     const btn = sec.querySelector('.verify-capture-tab-btn');
+    const errEl = sec.querySelector('.verify-ai-results');
     btn.disabled = true;
     btn.textContent = '⏳ Capturing…';
+
+    // Chrome withholds broad host permissions on new installs — request here
+    // (side panel button click is a valid user-gesture context for this call)
+    let permGranted = true;
+    try {
+      permGranted = await chrome.permissions.request({ origins: ['<all_urls>'] });
+    } catch (_) {}
+
+    if (!permGranted) {
+      btn.disabled = false;
+      btn.textContent = '📸 Capture Current Tab';
+      errEl.innerHTML = `<p class="verify-result-error">Permission denied. Go to chrome://extensions → BASS → Details → Site access → On all sites.</p>`;
+      errEl.hidden = false;
+      return;
+    }
+
     const result = await sendMessage({ action: 'CAPTURE_SCREENSHOT' });
     btn.disabled = false;
     btn.textContent = '📸 Capture Current Tab';
     if (result?.ok) {
       _setVerifyImage(sec, result.dataUrl);
     } else {
-      const errEl = sec.querySelector('.verify-ai-results');
       errEl.innerHTML = `<p class="verify-result-error">Screenshot failed: ${escHtml(result?.error || 'unknown')}</p>`;
       errEl.hidden = false;
     }
