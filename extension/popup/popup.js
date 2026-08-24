@@ -4,6 +4,8 @@
 
 const $ = id => document.getElementById(id);
 
+const DEFAULT_WORKER_URL = 'https://bass-verify.vivek-rao.workers.dev';
+
 // ── Utilities ─────────────────────────────────────────────────────────────────
 
 function sendMessage(msg) {
@@ -572,8 +574,8 @@ function buildVerifySection(flat, guestData) {
   });
 
   // Worker URL — load saved value, wire save button
-  chrome.storage.local.get('aiWorkerUrl').then(({ aiWorkerUrl = '' }) => {
-    sec.querySelector('.verify-worker-input').value = aiWorkerUrl;
+  chrome.storage.local.get('aiWorkerUrl').then(({ aiWorkerUrl }) => {
+    sec.querySelector('.verify-worker-input').value = aiWorkerUrl || DEFAULT_WORKER_URL;
   }).catch(() => {});
 
   sec.querySelector('.verify-worker-save').addEventListener('click', async () => {
@@ -586,8 +588,9 @@ function buildVerifySection(flat, guestData) {
 
   // AI Verify
   sec.querySelector('.verify-ai-btn').addEventListener('click', async () => {
-    const { aiWorkerUrl = '' } = await chrome.storage.local.get('aiWorkerUrl').catch(() => ({}));
-    if (!aiWorkerUrl) {
+    const { aiWorkerUrl } = await chrome.storage.local.get('aiWorkerUrl').catch(() => ({}));
+    const workerUrl = aiWorkerUrl || DEFAULT_WORKER_URL;
+    if (!workerUrl) {
       sec.querySelector('.verify-worker-details').open = true;
       sec.querySelector('.verify-worker-input').focus();
       return;
@@ -609,7 +612,7 @@ function buildVerifySection(flat, guestData) {
       imageBase64,
       mimeType,
       facts: { date, time, pax, price },
-      workerUrl: aiWorkerUrl,
+      workerUrl,
     });
 
     aiBtn.disabled = false;
