@@ -477,13 +477,6 @@ function buildVerifySection(flat, guestData) {
         <button class="btn btn-primary verify-ai-btn">🤖 AI Verify</button>
       </div>
       <div class="verify-ai-results" hidden></div>
-      <details class="verify-worker-details">
-        <summary class="verify-worker-summary">⚙ Worker URL</summary>
-        <div class="verify-worker-body">
-          <input type="url" class="verify-worker-input" placeholder="https://your-worker.workers.dev" spellcheck="false" autocomplete="off">
-          <button class="verify-worker-save">Save</button>
-        </div>
-      </details>
     </div>
 
     <div class="verify-pane" data-pane="response" hidden>
@@ -573,28 +566,9 @@ function buildVerifySection(flat, guestData) {
     fileInput.value = '';
   });
 
-  // Worker URL — load saved value, wire save button
-  chrome.storage.local.get('aiWorkerUrl').then(({ aiWorkerUrl }) => {
-    sec.querySelector('.verify-worker-input').value = aiWorkerUrl || DEFAULT_WORKER_URL;
-  }).catch(() => {});
-
-  sec.querySelector('.verify-worker-save').addEventListener('click', async () => {
-    const url = sec.querySelector('.verify-worker-input').value.trim();
-    try { await chrome.storage.local.set({ aiWorkerUrl: url }); } catch (_) {}
-    const btn = sec.querySelector('.verify-worker-save');
-    btn.textContent = '✓ Saved';
-    setTimeout(() => { btn.textContent = 'Save'; }, 1500);
-  });
-
   // AI Verify
   sec.querySelector('.verify-ai-btn').addEventListener('click', async () => {
-    const { aiWorkerUrl } = await chrome.storage.local.get('aiWorkerUrl').catch(() => ({}));
-    const workerUrl = aiWorkerUrl || DEFAULT_WORKER_URL;
-    if (!workerUrl) {
-      sec.querySelector('.verify-worker-details').open = true;
-      sec.querySelector('.verify-worker-input').focus();
-      return;
-    }
+    const workerUrl = DEFAULT_WORKER_URL;
     const imgEl = sec.querySelector('.verify-img');
     if (!imgEl.src || imgEl.src === window.location.href) return;
 
