@@ -478,7 +478,7 @@ function buildVerifySection(flat, guestData) {
       <details class="verify-worker-details">
         <summary class="verify-worker-summary">⚙ Worker URL</summary>
         <div class="verify-worker-body">
-          <input type="url" class="verify-worker-input" placeholder="https://bass-verify.xxx.workers.dev" spellcheck="false" autocomplete="off">
+          <input type="url" class="verify-worker-input" placeholder="https://your-worker.workers.dev" spellcheck="false" autocomplete="off">
           <button class="verify-worker-save">Save</button>
         </div>
       </details>
