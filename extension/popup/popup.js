@@ -243,13 +243,24 @@ function renderSummaryBar(id, flat, guestData) {
     if (total) pax = String(total);
   }
 
-  // Time to Experience: pre-computed server-side field (timezone-correct)
-  let tte = '';
+  // Time to Experience flag — tiered by urgency
+  let tteFlag = '';
   if (flat.actualLeadTimeInHours != null) {
-    const totalH = Math.abs(flat.actualLeadTimeInHours);
+    const h = flat.actualLeadTimeInHours;
+    const totalH = Math.abs(h);
     const d = Math.floor(totalH / 24);
-    const h = totalH % 24;
-    tte = `${flat.actualLeadTimeInHours < 0 ? '-' : '+'}${d}d ${h}h`;
+    const rem = totalH % 24;
+    const tteLabel = h < 0 ? `-${d}d ${rem}h` : `+${d}d ${rem}h`;
+    let tier, tierLabel;
+    if      (h < 0)   { tier = 'past';   tierLabel = 'PAST'; }
+    else if (h < 4)   { tier = 'urgent'; tierLabel = 'URGENT'; }
+    else if (h < 24)  { tier = 'today';  tierLabel = 'TODAY'; }
+    else if (h < 72)  { tier = 'soon';   tierLabel = 'SOON'; }
+    else              { tier = 'ok';     tierLabel = 'ON TIME'; }
+    tteFlag = `<div class="tte-flag tte-flag--${tier}">
+      <span class="tte-flag-tier">${tierLabel}</span>
+      <span class="tte-flag-val">${escHtml(tteLabel)}</span>
+    </div>`;
   }
 
   const fact = (label, valueHtml, cls = '') =>
@@ -259,13 +270,15 @@ function renderSummaryBar(id, flat, guestData) {
     </div>` : '';
 
   bar.innerHTML = `
-    ${flat.productName ? `<div class="bs-tour">${escHtml(flat.productName)}</div>` : ''}
+    <div class="bs-top-row">
+      ${flat.productName ? `<div class="bs-tour">${escHtml(flat.productName)}</div>` : '<div class="bs-tour"></div>'}
+      ${tteFlag}
+    </div>
     <div class="bs-facts">
-      ${date  ? fact('Date',   escHtml(date))  : ''}
-      ${time  ? fact('Time',   escHtml(time))  : ''}
-      ${pax   ? fact('Pax',   escHtml(pax))   : ''}
-      ${price ? fact('Net',   escHtml(price)) : ''}
-      ${tte   ? fact('TTE',   escHtml(tte), tte.startsWith('-') ? 'bs-fact--past' : 'bs-fact--future') : ''}
+      ${date  ? fact('Date', escHtml(date))  : ''}
+      ${time  ? fact('Time', escHtml(time))  : ''}
+      ${pax   ? fact('Pax',  escHtml(pax))  : ''}
+      ${price ? fact('Net',  escHtml(price)) : ''}
     </div>
   `;
   bar.hidden = false;

@@ -244,7 +244,10 @@ body > * { position: relative; z-index: 1; }
   border-bottom: 1px solid var(--border);
   border-left: 3px solid var(--sec-booking);
   padding: 7px 12px;
-  display: flex; align-items: center; gap: 10px;
+  display: flex; flex-direction: column; gap: 5px;
+}
+.bs-top-row {
+  display: flex; align-items: center; gap: 8px; min-width: 0;
 }
 .bs-tour {
   font-size: 12px; font-weight: 700; color: var(--text);
@@ -260,8 +263,22 @@ body > * { position: relative; z-index: 1; }
 }
 .bs-fact-value { font-size: 12px; color: var(--text); font-weight: 600; }
 .bs-fact-value.na { color: var(--muted); font-style: italic; font-weight: 400; font-size: 11px; }
-.bs-fact--past  .bs-fact-value { color: var(--red); }
-.bs-fact--future .bs-fact-value { color: var(--green, #16a34a); }
+
+/* ── TTE Urgency Flag ────────────────────────────────────────────────── */
+.tte-flag {
+  display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0;
+  padding: 2px 8px; border-radius: 20px; border: 1px solid;
+  font-size: 10px; font-weight: 800; letter-spacing: 0.04em; white-space: nowrap;
+}
+.tte-flag-tier { text-transform: uppercase; }
+.tte-flag-val  { font-weight: 600; opacity: 0.9; }
+.tte-flag-tier::after { content: '·'; margin-left: 4px; opacity: 0.5; }
+
+.tte-flag--past   { background: rgba(229,72,77,0.12);  color: var(--red);   border-color: rgba(229,72,77,0.35); }
+.tte-flag--urgent { background: rgba(229,72,77,0.10);  color: var(--red);   border-color: rgba(229,72,77,0.30); }
+.tte-flag--today  { background: rgba(224,130,12,0.12); color: var(--amber); border-color: rgba(224,130,12,0.35); }
+.tte-flag--soon   { background: rgba(224,130,12,0.08); color: var(--amber); border-color: rgba(224,130,12,0.25); }
+.tte-flag--ok     { background: rgba(26,157,110,0.10); color: var(--green); border-color: rgba(26,157,110,0.30); }
 
 /* ── Tab Navigation ──────────────────────────────────────────────────── */
 .tab-nav {
