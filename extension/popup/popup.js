@@ -242,24 +242,27 @@ function renderSummaryBar(id, flat, guestData) {
     if (total) pax = String(total);
   }
 
-  // Time to Experience flag — only show for actionable tiers (hide ON TIME)
-  let tteFlag = '';
+  // Time to Experience — a full-width one-line banner, only for actionable tiers (hide ON TIME)
+  let tteBanner = '';
   if (flat.actualLeadTimeInHours != null) {
     const h = flat.actualLeadTimeInHours;
     const totalH = Math.abs(h);
     const d = Math.floor(totalH / 24);
     const rem = Math.round(totalH % 24);
-    const tteLabel = h < 0 ? `-${d}d ${rem}h` : `+${d}d ${rem}h`;
-    let tier, tierLabel;
-    if      (h < 0)   { tier = 'past';   tierLabel = 'PAST'; }
-    else if (h < 4)   { tier = 'urgent'; tierLabel = 'URGENT'; }
-    else if (h < 24)  { tier = 'today';  tierLabel = 'TODAY'; }
-    else if (h < 72)  { tier = 'soon';   tierLabel = 'SOON'; }
+    const dPart = d > 0 ? `${d}d ` : '';
+    const tteLabel = h < 0 ? `${dPart}${rem}h ago` : `in ${dPart}${rem}h`;
+    let tier, tierLabel, icon;
+    if      (h < 0)   { tier = 'past';   tierLabel = 'PAST DUE'; icon = '⚠️'; }
+    else if (h < 4)   { tier = 'urgent'; tierLabel = 'URGENT';   icon = '🔥'; }
+    else if (h < 24)  { tier = 'today';  tierLabel = 'TODAY';    icon = '⏰'; }
+    else if (h < 72)  { tier = 'soon';   tierLabel = 'SOON';     icon = '⏱️'; }
     else              { tier = null; }
     if (tier) {
-      tteFlag = `<div class="tte-flag tte-flag--${tier}">
-        <span class="tte-flag-tier">${tierLabel}</span>
-        <span class="tte-flag-val">${escHtml(tteLabel)}</span>
+      tteBanner = `<div class="tte-banner tte-banner--${tier}">
+        <span class="tte-banner-icon">${icon}</span>
+        <span class="tte-banner-label">${tierLabel}</span>
+        <span class="tte-banner-sep">·</span>
+        <span class="tte-banner-val">Experience ${escHtml(tteLabel)}</span>
       </div>`;
     }
   }
@@ -270,11 +273,13 @@ function renderSummaryBar(id, flat, guestData) {
       <span class="bs-fact-value">${valueHtml}</span>
     </div>` : '';
 
+  const tourRow = flat.productName
+    ? `<div class="bs-tour">${escHtml(flat.productName)}</div>`
+    : '';
+
   bar.innerHTML = `
-    <div class="bs-top-row">
-      ${flat.productName ? `<div class="bs-tour">${escHtml(flat.productName)}</div>` : '<div class="bs-tour"></div>'}
-      ${tteFlag}
-    </div>
+    ${tteBanner}
+    ${tourRow}
     <div class="bs-facts">
       ${fact('Date', escHtml(date))}
       ${fact('Time', escHtml(time))}
