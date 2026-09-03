@@ -137,4 +137,30 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
     return true;
   }
 
+  if (request.action === 'SEND_VERIFY_FLAG') {
+    const { bookingId, skippedFields, verifiedAt } = request;
+    (async () => {
+      try {
+        const controller = new AbortController();
+        setTimeout(() => controller.abort(), 15000);
+        const res = await fetch(ENDPOINTS.verifyFlag(bookingId), {
+          method: 'POST',
+          credentials: 'include',
+          signal: controller.signal,
+          headers: { 'x-platform': 'lego', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ verificationSkipped: true, skippedFields, verifiedAt }),
+        });
+        if (res.ok) {
+          sendResponse({ ok: true });
+        } else {
+          const data = await res.json().catch(() => ({}));
+          sendResponse({ ok: false, error: data?.message || `HTTP ${res.status}` });
+        }
+      } catch (err) {
+        sendResponse({ ok: false, error: err.message });
+      }
+    })();
+    return true;
+  }
+
 });

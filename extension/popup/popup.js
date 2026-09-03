@@ -504,11 +504,21 @@ function renderVerifyRow(c, i) {
   </div>`;
 }
 
-function wireSkipBoxes(container) {
+function wireSkipBoxes(container, confirmRow) {
+  const update = () => {
+    const skipped = [...container.querySelectorAll('.vr-skip-chk:checked')];
+    if (confirmRow) {
+      confirmRow.hidden = skipped.length === 0;
+      const btn = confirmRow.querySelector('.verify-confirm-btn');
+      if (btn) btn.dataset.skipped = skipped.map(c => c.closest('.vr-label')?.textContent || c.id).join(',');
+      const lbl = confirmRow.querySelector('.verify-confirm-count');
+      if (lbl) lbl.textContent = `${skipped.length} skipped`;
+    }
+  };
   container.querySelectorAll('.vr-skip-chk').forEach(chk => {
     chk.addEventListener('change', () => {
-      const row = chk.closest('.verify-result-row');
-      row.classList.toggle('skipped', chk.checked);
+      chk.closest('.verify-result-row').classList.toggle('skipped', chk.checked);
+      update();
     });
   });
 }
@@ -578,6 +588,12 @@ function buildVerifySection(flat, guestData) {
       <p class="verify-paste-hint">Navigate to the vendor portal or ticket page, then click:</p>
       <button class="btn btn-primary verify-capture-resp-btn" style="width:100%">🔍 Capture Active Tab Response</button>
       <div class="verify-results" hidden></div>
+    </div>
+
+    <div class="verify-confirm-row" hidden>
+      <span class="verify-confirm-count"></span>
+      <button class="btn btn-primary verify-confirm-btn">✓ Confirm &amp; Flag</button>
+      <span class="verify-confirm-status"></span>
     </div>
   `;
 
@@ -698,7 +714,7 @@ function buildVerifySection(flat, guestData) {
       resultsEl.innerHTML = '<p class="verify-result-error">No results returned from AI.</p>';
     } else {
       resultsEl.innerHTML = checks.map((c, i) => renderVerifyRow(c, i)).join('');
-      wireSkipBoxes(resultsEl);
+      wireSkipBoxes(resultsEl, confirmRow);
     }
     resultsEl.hidden = false;
   });
@@ -731,9 +747,42 @@ function buildVerifySection(flat, guestData) {
       resultsEl.innerHTML = '<p class="verify-result-error">No booking values to match against.</p>';
     } else {
       resultsEl.innerHTML = checks.map((c, i) => renderVerifyRow(c, i)).join('');
-      wireSkipBoxes(resultsEl);
+      wireSkipBoxes(resultsEl, confirmRow);
     }
     resultsEl.hidden = false;
+  });
+
+  // Confirm & Flag button
+  const confirmRow = sec.querySelector('.verify-confirm-row');
+  const confirmBtn = sec.querySelector('.verify-confirm-btn');
+  const confirmStatus = sec.querySelector('.verify-confirm-status');
+  const bookingId = String(flat.bookingId || '');
+
+  confirmBtn.addEventListener('click', async () => {
+    const skippedLabels = [...sec.querySelectorAll('.verify-result-row.skipped .vr-label')]
+      .map(el => el.textContent.trim());
+
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = '⏳ Sending…';
+    confirmStatus.textContent = '';
+
+    const result = await sendMessage({
+      action: 'SEND_VERIFY_FLAG',
+      bookingId,
+      skippedFields: skippedLabels,
+      verifiedAt: new Date().toISOString(),
+    });
+
+    confirmBtn.disabled = false;
+    confirmBtn.textContent = '✓ Confirm & Flag';
+
+    if (result?.ok) {
+      confirmStatus.textContent = '✓ Flagged';
+      confirmStatus.className = 'verify-confirm-status status-ok';
+    } else {
+      confirmStatus.textContent = result?.error || 'Failed';
+      confirmStatus.className = 'verify-confirm-status status-err';
+    }
   });
 
   return sec;
