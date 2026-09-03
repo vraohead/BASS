@@ -224,7 +224,7 @@ function renderBooking(id, data, guestData, showAutomationModal) {
 function renderSummaryBar(id, flat, guestData) {
   const bar = $('booking-summary');
 
-  const date  = formatDate(flat.inventoryDate || flat.bookingDate || '') || '';
+  const date  = formatDateShort(flat.inventoryDate || flat.bookingDate || '') || '';
   const time  = formatTime(flat.inventoryTime || '') || '';
   const currency = flat.currency || flat.currencyName || flat.tourCurrency || '';
   const price = flat.netPrice != null
@@ -262,8 +262,8 @@ function renderSummaryBar(id, flat, guestData) {
     }
   }
 
-  const fact = (label, valueHtml, cls = '') =>
-    valueHtml ? `<div class="bs-fact${cls ? ' ' + cls : ''}">
+  const fact = (label, valueHtml) =>
+    valueHtml ? `<div class="bs-fact">
       <span class="bs-fact-label">${label}</span>
       <span class="bs-fact-value">${valueHtml}</span>
     </div>` : '';
@@ -274,10 +274,10 @@ function renderSummaryBar(id, flat, guestData) {
       ${tteFlag}
     </div>
     <div class="bs-facts">
-      ${date  ? fact('Date', escHtml(date))  : ''}
-      ${time  ? fact('Time', escHtml(time))  : ''}
-      ${pax   ? fact('Pax',  escHtml(pax))  : ''}
-      ${price ? fact('Net',  escHtml(price)) : ''}
+      ${fact('Date', escHtml(date))}
+      ${fact('Time', escHtml(time))}
+      ${fact('Pax',  escHtml(pax))}
+      ${fact('Net',  escHtml(price))}
     </div>
   `;
   bar.hidden = false;
@@ -321,14 +321,27 @@ function fieldRow(label, value) {
 
 // ── Date / time formatters ────────────────────────────────────────────────────
 
+const MONTHS_LONG  = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+const MONTHS_SHORT = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+function _ordinal(d) {
+  return d === 1 || d === 21 || d === 31 ? 'st' : d === 2 || d === 22 ? 'nd' : d === 3 || d === 23 ? 'rd' : 'th';
+}
+
 function formatDate(dateStr) {
   if (!dateStr) return dateStr;
   const parts = dateStr.split('-').map(Number);
   if (parts.length < 3 || parts.some(isNaN)) return dateStr;
   const [year, month, day] = parts;
-  const months = ['January','February','March','April','May','June','July','August','September','October','November','December'];
-  const sfx = (d => d === 1 || d === 21 || d === 31 ? 'st' : d === 2 || d === 22 ? 'nd' : d === 3 || d === 23 ? 'rd' : 'th')(day);
-  return `${day}${sfx} ${months[month - 1]} ${year}`;
+  return `${day}${_ordinal(day)} ${MONTHS_LONG[month - 1]} ${year}`;
+}
+
+function formatDateShort(dateStr) {
+  if (!dateStr) return dateStr;
+  const parts = dateStr.split('-').map(Number);
+  if (parts.length < 3 || parts.some(isNaN)) return dateStr;
+  const [year, month, day] = parts;
+  return `${day} ${MONTHS_SHORT[month - 1]} ${year}`;
 }
 
 function formatTime(timeStr) {
@@ -382,7 +395,7 @@ function buildBookingSection(flat) {
   if (primary?.tourId && primary?.vendorId) {
     linksHtml += `<div class="field-row">
       <span class="field-label">Scorpio</span>
-      <span class="field-value"><a href="https://scorpio.headout.com/admin/vendor/vendortour/?tour=${primary.tourId}&vendor_id=${primary.vendorId}" target="_blank" rel="noopener" class="quick-link">${escHtml(primary.vendorName || 'Vendor')} ↗</a></span>
+      <span class="field-value"><a href="https://scorpio.headout.com/admin/vendor/vendortour/?tour=${primary.tourId}&vendor_id=${primary.vendorId}" target="_blank" rel="noopener" class="quick-link">Scorpio ↗</a></span>
     </div>`;
   }
 
@@ -733,13 +746,21 @@ function _instrContent(v) {
 }
 
 function buildInstructionsSection(flat, vendors) {
+  // Debug: log all vendor keys so we can find the instructions field
+  console.log('[BASS] flat instruction keys:', {
+    bookingInstructions: flat.bookingInstructions,
+    instructions: flat.instructions,
+    bookingNotes: flat.bookingNotes,
+  });
+  vendors.forEach((v, i) => console.log(`[BASS] vendor[${i}] keys:`, Object.keys(v), v));
+
   const blocks = [];
 
-  // Booking-level instructions (some APIs put them here)
+  // Booking-level instructions
   const flatInstr = flat.bookingInstructions || flat.instructions || flat.bookingNotes || null;
   if (flatInstr) blocks.push({ title: 'Important Instructions', instr: flatInstr });
 
-  // Vendor-level instructions — use ALL vendors, not just primary
+  // Vendor-level instructions — use ALL vendors
   vendors.forEach((v, i) => {
     const instr = _instrContent(v);
     if (!instr) return;
