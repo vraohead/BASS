@@ -386,6 +386,7 @@ function buildBookingSection(flat) {
     'oopCancelRischeduleConfig', 'oopCancelRescheduleConfig',
     'itineraryPricing', 'bookingPricing',
     'actualLeadTimeInHours',
+    'productValue', 'fulfilmentId', 'fulfillmentId',
   ]);
 
   html += BOOKING_FIELDS.map(([key, label]) => fieldRow(label, flat[key])).join('');
@@ -406,9 +407,16 @@ function buildBookingSection(flat) {
     html += fieldRow('Product (Vendor)', primary.productName);
   }
 
+  const PRICE_FIELDS = new Set([
+    'couponDiscount', 'convenienceFee',
+    'walletAmountUsed', 'finalPricePaid', 'totalPrice', 'basePrice',
+  ]);
+  const cur = flat.currency || flat.currencyName || flat.tourCurrency || '';
+
   for (const [key, v] of Object.entries(flat)) {
     if (HIDDEN.has(key) || v == null || typeof v === 'object') continue;
-    html += fieldRow(humanise(key), v);
+    const display = PRICE_FIELDS.has(key) && cur ? `${cur} ${v}` : v;
+    html += fieldRow(humanise(key), display);
   }
 
   if (!html) html = '<p class="instruction-empty">No booking fields available.</p>';
@@ -740,15 +748,13 @@ function buildCustomerSection(flat, guestData) {
       html += fieldRow('Email', pg.email);
     }
 
-    // Additional user-provided fields (phone, custom fields — skip NAME and EMAIL already shown)
-    const shownTypes = new Set(['NAME', 'EMAIL']);
+    // All user-provided fields — show everything as returned by the API
     const mainGuest = guestData.guests?.[0];
     if (mainGuest?.bookingUserFields?.length) {
       mainGuest.bookingUserFields.forEach(f => {
         const type = f.tourUserFieldType?.name;
-        if (!shownTypes.has(type) && f.value) {
+        if (f.value) {
           html += fieldRow(f.name || humanise(type || ''), f.value);
-          if (type) shownTypes.add(type);
         }
       });
     }
