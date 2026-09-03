@@ -328,7 +328,7 @@ function formatDate(dateStr) {
   const [year, month, day] = parts;
   const months = ['January','February','March','April','May','June','July','August','September','October','November','December'];
   const sfx = (d => d === 1 || d === 21 || d === 31 ? 'st' : d === 2 || d === 22 ? 'nd' : d === 3 || d === 23 ? 'rd' : 'th')(day);
-  return `${months[month - 1]} ${day}${sfx}, ${year}`;
+  return `${day}${sfx} ${months[month - 1]} ${year}`;
 }
 
 function formatTime(timeStr) {
