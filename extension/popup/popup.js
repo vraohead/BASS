@@ -48,7 +48,9 @@ async function initTheme() {
 
 function applyTheme(theme) {
   document.documentElement.setAttribute('data-theme', theme);
-  $('theme-toggle').textContent = theme === 'dark' ? '☀️' : '🌙';
+  const toggle = $('theme-toggle');
+  toggle.setAttribute('aria-checked', theme === 'dark' ? 'true' : 'false');
+  toggle.querySelector('.theme-switch-thumb').textContent = theme === 'dark' ? '🌙' : '☀️';
 }
 
 $('theme-toggle').addEventListener('click', async () => {
