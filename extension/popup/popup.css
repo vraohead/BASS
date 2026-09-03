@@ -601,6 +601,22 @@ details.instr-block:not([open]) .instr-block__header { border-bottom: none; }
 .match .vr-status { color: var(--green); }
 .nomatch .vr-status { color: var(--red); }
 .verify-result-error { font-size: 12px; color: var(--red); padding: 8px 0; }
+.vr-skip-label { display: flex; align-items: center; gap: 4px; font-size: 10px;
+  color: var(--label); margin-left: auto; cursor: pointer; white-space: nowrap; }
+.vr-skip-chk { cursor: pointer; }
+.verify-result-row.skipped { opacity: 0.45; }
+.verify-result-row.skipped .vr-icon::after { content: ' ✓'; color: var(--green); }
+
+/* ── Discounts accordion ─────────────────────────────────────────────── */
+.price-accordion { margin-top: 8px; border: 1px solid var(--border); border-radius: 7px; overflow: hidden; }
+.price-accordion-summary {
+  list-style: none; padding: 7px 12px; font-size: 10px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.07em; color: var(--label);
+  cursor: pointer; user-select: none;
+}
+.price-accordion-summary::-webkit-details-marker { display: none; }
+.price-accordion-body { padding: 0 0 4px; }
+.price-accordion-body .field-row { border-top: 1px solid var(--border); }
 
 /* ── Auth Gate ───────────────────────────────────────────────────────── */
 .auth-gate {

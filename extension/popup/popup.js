@@ -203,13 +203,10 @@ function renderBooking(id, data, guestData, showAutomationModal) {
     return;
   }
 
-  const primary = getPrimaryVendor(flat);
-  const instrVendors = primary ? [primary] : vendors;
-
   const details = $('ticket-details');
   details.innerHTML = '';
   details.appendChild(buildBookingSection(flat));
-  details.appendChild(buildInstructionsSection(instrVendors));
+  details.appendChild(buildInstructionsSection(flat, vendors));
   details.appendChild(buildCustomerSection(flat, guestData));
   details.appendChild(buildVerifySection(flat, guestData));
 
@@ -227,8 +224,8 @@ function renderBooking(id, data, guestData, showAutomationModal) {
 function renderSummaryBar(id, flat, guestData) {
   const bar = $('booking-summary');
 
-  const date  = flat.inventoryDate || flat.bookingDate || '';
-  const time  = flat.inventoryTime || '';
+  const date  = formatDate(flat.inventoryDate || flat.bookingDate || '') || '';
+  const time  = formatTime(flat.inventoryTime || '') || '';
   const currency = flat.currency || flat.currencyName || flat.tourCurrency || '';
   const price = flat.netPrice != null
     ? `${currency} ${flat.netPrice}`.trim() : '';
@@ -243,24 +240,26 @@ function renderSummaryBar(id, flat, guestData) {
     if (total) pax = String(total);
   }
 
-  // Time to Experience flag — tiered by urgency
+  // Time to Experience flag — only show for actionable tiers (hide ON TIME)
   let tteFlag = '';
   if (flat.actualLeadTimeInHours != null) {
     const h = flat.actualLeadTimeInHours;
     const totalH = Math.abs(h);
     const d = Math.floor(totalH / 24);
-    const rem = totalH % 24;
+    const rem = Math.round(totalH % 24);
     const tteLabel = h < 0 ? `-${d}d ${rem}h` : `+${d}d ${rem}h`;
     let tier, tierLabel;
     if      (h < 0)   { tier = 'past';   tierLabel = 'PAST'; }
     else if (h < 4)   { tier = 'urgent'; tierLabel = 'URGENT'; }
     else if (h < 24)  { tier = 'today';  tierLabel = 'TODAY'; }
     else if (h < 72)  { tier = 'soon';   tierLabel = 'SOON'; }
-    else              { tier = 'ok';     tierLabel = 'ON TIME'; }
-    tteFlag = `<div class="tte-flag tte-flag--${tier}">
-      <span class="tte-flag-tier">${tierLabel}</span>
-      <span class="tte-flag-val">${escHtml(tteLabel)}</span>
-    </div>`;
+    else              { tier = null; }
+    if (tier) {
+      tteFlag = `<div class="tte-flag tte-flag--${tier}">
+        <span class="tte-flag-tier">${tierLabel}</span>
+        <span class="tte-flag-val">${escHtml(tteLabel)}</span>
+      </div>`;
+    }
   }
 
   const fact = (label, valueHtml, cls = '') =>
@@ -320,6 +319,27 @@ function fieldRow(label, value) {
   </div>`;
 }
 
+// ── Date / time formatters ────────────────────────────────────────────────────
+
+function formatDate(dateStr) {
+  if (!dateStr) return dateStr;
+  const parts = dateStr.split('-').map(Number);
+  if (parts.length < 3 || parts.some(isNaN)) return dateStr;
+  const [year, month, day] = parts;
+  const months = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+  const sfx = (d => d === 1 || d === 21 || d === 31 ? 'st' : d === 2 || d === 22 ? 'nd' : d === 3 || d === 23 ? 'rd' : 'th')(day);
+  return `${months[month - 1]} ${day}${sfx}, ${year}`;
+}
+
+function formatTime(timeStr) {
+  if (!timeStr) return timeStr;
+  const [h, m] = timeStr.split(':').map(Number);
+  if (isNaN(h) || isNaN(m)) return timeStr;
+  const ampm = h >= 12 ? 'PM' : 'AM';
+  const hour = h % 12 || 12;
+  return `${hour}:${String(m).padStart(2, '0')} ${ampm}`;
+}
+
 // Booking tab ──────────────────────────────────────────────────────────────────
 const BOOKING_FIELDS = [
   ['bookingId',        'Booking ID'],
@@ -328,12 +348,10 @@ const BOOKING_FIELDS = [
   ['fulfilmentStatus', 'Fulfilment Status'],
   ['productName',      'Product'],
   ['variantName',      'Variant'],
-  ['inventoryDate',    'Date'],
-  ['inventoryTime',    'Time'],
+  ['inventoryDate',    'Date',    formatDate],
+  ['inventoryTime',    'Time',    formatTime],
   ['ticketType',       'Ticket Type'],
   ['totalPax',         'Total Pax'],
-  ['createdAt',        'Created'],
-  ['updatedAt',        'Updated'],
 ];
 
 function linkRow(label, url) {
@@ -373,8 +391,10 @@ function buildBookingSection(flat) {
     : '';
 
   // ── Standard fields ──────────────────────────────────────────────────────
+  const ACCORDION_FIELDS = new Set(['couponDiscount', 'convenienceFee', 'walletAmountUsed']);
   const HIDDEN = new Set([
     ...BOOKING_FIELDS.map(f => f[0]),
+    ...ACCORDION_FIELDS,
     'guestName', 'guestEmail', 'vendorsInfo',
     'tourId', 'tourGroupId', 'vendorId', 'guestNumbers',
     'currency', 'netPrice', 'currencyName', 'tourCurrency',
@@ -387,9 +407,13 @@ function buildBookingSection(flat) {
     'itineraryPricing', 'bookingPricing',
     'actualLeadTimeInHours',
     'productValue', 'fulfilmentId', 'fulfillmentId',
+    'pending', 'rmsName', 'bookingCreationTimestamp', 'createdAt', 'updatedAt',
   ]);
 
-  html += BOOKING_FIELDS.map(([key, label]) => fieldRow(label, flat[key])).join('');
+  html += BOOKING_FIELDS.map(([key, label, fmt]) => {
+    const v = flat[key];
+    return fieldRow(label, fmt ? fmt(v) : v);
+  }).join('');
 
   // Net price with currency combined
   if (flat.netPrice != null) {
@@ -407,16 +431,28 @@ function buildBookingSection(flat) {
     html += fieldRow('Product (Vendor)', primary.productName);
   }
 
-  const PRICE_FIELDS = new Set([
-    'couponDiscount', 'convenienceFee',
-    'walletAmountUsed', 'finalPricePaid', 'totalPrice', 'basePrice',
-  ]);
+  const PRICE_FIELDS = new Set(['finalPricePaid', 'totalPrice', 'basePrice']);
   const cur = flat.currency || flat.currencyName || flat.tourCurrency || '';
 
   for (const [key, v] of Object.entries(flat)) {
     if (HIDDEN.has(key) || v == null || typeof v === 'object') continue;
     const display = PRICE_FIELDS.has(key) && cur ? `${cur} ${v}` : v;
     html += fieldRow(humanise(key), display);
+  }
+
+  // Accordion for discount / fee details
+  const accordionRows = ['couponDiscount', 'convenienceFee', 'walletAmountUsed']
+    .map(key => {
+      const v = flat[key];
+      if (v == null) return '';
+      const display = cur ? `${cur} ${v}` : String(v);
+      return fieldRow(humanise(key), display);
+    }).join('');
+  if (accordionRows) {
+    html += `<details class="price-accordion">
+      <summary class="price-accordion-summary">Discounts &amp; fees ▾</summary>
+      <div class="price-accordion-body">${accordionRows}</div>
+    </details>`;
   }
 
   if (!html) html = '<p class="instruction-empty">No booking fields available.</p>';
@@ -438,6 +474,31 @@ document.addEventListener('paste', e => {
     }
   }
 });
+
+function renderVerifyRow(c, i) {
+  const matched = c.found;
+  const skipId = `vr-skip-${i}`;
+  const skipChk = matched ? '' : `
+    <label class="vr-skip-label" for="${skipId}">
+      <input type="checkbox" class="vr-skip-chk" id="${skipId}"> Skip
+    </label>`;
+  return `<div class="verify-result-row ${matched ? 'match' : 'nomatch'}" data-idx="${i}">
+    <span class="vr-icon">${matched ? '✓' : '✗'}</span>
+    <span class="vr-label">${escHtml(c.label)}</span>
+    <span class="vr-value">${escHtml(String(c.expected ?? ''))}</span>
+    <span class="vr-status">${matched ? 'Found' : 'Not found'}</span>
+    ${skipChk}
+  </div>`;
+}
+
+function wireSkipBoxes(container) {
+  container.querySelectorAll('.vr-skip-chk').forEach(chk => {
+    chk.addEventListener('change', () => {
+      const row = chk.closest('.verify-result-row');
+      row.classList.toggle('skipped', chk.checked);
+    });
+  });
+}
 
 function _setVerifyImage(sec, dataUrl) {
   sec.querySelector('.verify-img').src = dataUrl;
@@ -623,14 +684,8 @@ function buildVerifySection(flat, guestData) {
     if (!checks.length) {
       resultsEl.innerHTML = '<p class="verify-result-error">No results returned from AI.</p>';
     } else {
-      resultsEl.innerHTML = checks.map(c => `
-        <div class="verify-result-row ${c.found ? 'match' : 'nomatch'}">
-          <span class="vr-icon">${c.found ? '✓' : '✗'}</span>
-          <span class="vr-label">${escHtml(c.label)}</span>
-          <span class="vr-value">${escHtml(String(c.expected))}</span>
-          <span class="vr-status">${c.found ? 'Found' : 'Not found'}</span>
-        </div>
-      `).join('');
+      resultsEl.innerHTML = checks.map((c, i) => renderVerifyRow(c, i)).join('');
+      wireSkipBoxes(resultsEl);
     }
     resultsEl.hidden = false;
   });
@@ -662,14 +717,8 @@ function buildVerifySection(flat, guestData) {
     if (!checks.length) {
       resultsEl.innerHTML = '<p class="verify-result-error">No booking values to match against.</p>';
     } else {
-      resultsEl.innerHTML = checks.map(c => `
-        <div class="verify-result-row ${c.found ? 'match' : 'nomatch'}">
-          <span class="vr-icon">${c.found ? '✓' : '✗'}</span>
-          <span class="vr-label">${escHtml(c.label)}</span>
-          <span class="vr-value">${escHtml(c.expected)}</span>
-          <span class="vr-status">${c.found ? 'Found' : 'Not found'}</span>
-        </div>
-      `).join('');
+      resultsEl.innerHTML = checks.map((c, i) => renderVerifyRow(c, i)).join('');
+      wireSkipBoxes(resultsEl);
     }
     resultsEl.hidden = false;
   });
@@ -678,26 +727,40 @@ function buildVerifySection(flat, guestData) {
 }
 
 // Instructions tab ─────────────────────────────────────────────────────────────
-function buildInstructionsSection(vendors) {
-  const withInstr = vendors.filter(v => v.bookingInstructions);
-  if (!withInstr.length) {
+function _instrContent(v) {
+  return v.bookingInstructions || v.instructions || v.manualFulfillmentInstructions
+    || v.fulfillmentInstructions || v.vendorInstructions || v.bookingNotes || null;
+}
+
+function buildInstructionsSection(flat, vendors) {
+  const blocks = [];
+
+  // Booking-level instructions (some APIs put them here)
+  const flatInstr = flat.bookingInstructions || flat.instructions || flat.bookingNotes || null;
+  if (flatInstr) blocks.push({ title: 'Important Instructions', instr: flatInstr });
+
+  // Vendor-level instructions — use ALL vendors, not just primary
+  vendors.forEach((v, i) => {
+    const instr = _instrContent(v);
+    if (!instr) return;
+    const title = v.vendorName || `Vendor ${i + 1}`;
+    blocks.push({ title, instr });
+  });
+
+  if (!blocks.length) {
     return buildSection('instructions', 'Instructions', '📌',
       '<p class="instruction-empty">No booking instructions available.</p>');
   }
 
   let blocksHtml = '';
-  withInstr.forEach((v, i) => {
-    const title = vendors.length > 1
-      ? (v.vendorName || `Vendor ${i + 1}`)
-      : (v.vendorName || 'Booking Instructions');
-    const instr = v.bookingInstructions;
+  blocks.forEach(({ title, instr }, i) => {
     let bodyHtml;
     if (isHtmlContent(instr)) {
       bodyHtml = `<div class="rich-instruction-wrapper">${instr}</div>`;
     } else {
-      const paras = instr.split(/\n\n+/).filter(Boolean);
+      const lines = instr.split(/\n/).filter(Boolean);
       bodyHtml = `<div class="instruction-text">${
-        paras.map(p => `<p class="instruction-para">${escHtml(p)}</p>`).join('')
+        lines.map(l => `<p class="instruction-para">${escHtml(l)}</p>`).join('')
       }</div>`;
     }
     blocksHtml += `<details class="instr-block instr-block--booking" ${i === 0 ? 'open' : ''}>
