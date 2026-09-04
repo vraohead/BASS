@@ -804,7 +804,37 @@ function _instrContent(v) {
     || v.notes || v.bookingNotes || null;
 }
 
+const TERMINAL_STATUSES = ['COMPLETED', 'COMPLETE', 'CANCELLED', 'CANCELED', 'REFUNDED'];
+
+function isTerminalBooking(flat) {
+  const status = String(flat.status || '').toUpperCase();
+  const fulfilmentStatus = String(flat.fulfilmentStatus || '').toUpperCase();
+  return TERMINAL_STATUSES.includes(status) || TERMINAL_STATUSES.includes(fulfilmentStatus);
+}
+
+function isAutomationPending(flat) {
+  const fulfilmentType = String(flat.fulfilmentType || '').toUpperCase();
+  const isAutomation = fulfilmentType && fulfilmentType !== 'MANUAL';
+  const fulfilmentStatus = String(flat.fulfilmentStatus || flat.status || '').toUpperCase();
+  return isAutomation && fulfilmentStatus === 'PENDING';
+}
+
 function buildInstructionsSection(flat, vendors, vendorTourData = []) {
+  // Debug: confirm the exact status values BMS uses, in case the guesses above are wrong
+  console.log('[BASS] instructions visibility check:', {
+    status: flat.status, fulfilmentStatus: flat.fulfilmentStatus, fulfilmentType: flat.fulfilmentType,
+    isTerminal: isTerminalBooking(flat), isAutomationPending: isAutomationPending(flat),
+  });
+
+  if (isTerminalBooking(flat)) {
+    return buildSection('instructions', 'Instructions', '📌',
+      '<p class="instruction-empty">Booking is completed or cancelled — instructions no longer apply.</p>');
+  }
+  if (isAutomationPending(flat)) {
+    return buildSection('instructions', 'Instructions', '📌',
+      '<p class="instruction-empty">Automated fulfilment is still pending — manual instructions withheld until needed.</p>');
+  }
+
   const blocks = [];
 
   // Booking-level instructions (rare, but some flows put them here)
