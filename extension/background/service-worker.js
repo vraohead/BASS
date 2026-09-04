@@ -114,26 +114,48 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
 
   if (request.action === 'FETCH_BOOKING') {
     const id = String(request.bookingId || '').trim();
-    Promise.all([
-      bmsApiCall(ENDPOINTS.booking(id)),
-      bmsApiCall(ENDPOINTS.guestDetails(id)),
-      bmsApiCall(ENDPOINTS.automationModal(id)),
-    ]).then(([bookingResult, guestResult, modalResult]) => {
-      if (!bookingResult.ok) {
-        sendResponse({ ok: false, error: bookingResult.error, errorType: bookingResult.type, status: bookingResult.status });
-      } else {
+    (async () => {
+      try {
+        const [bookingResult, guestResult, modalResult] = await Promise.all([
+          bmsApiCall(ENDPOINTS.booking(id)),
+          bmsApiCall(ENDPOINTS.guestDetails(id)),
+          bmsApiCall(ENDPOINTS.automationModal(id)),
+        ]);
+
+        if (!bookingResult.ok) {
+          sendResponse({ ok: false, error: bookingResult.error, errorType: bookingResult.type, status: bookingResult.status });
+          return;
+        }
+
         const modalData = modalResult.ok ? modalResult.data : null;
         const showModal = modalData === true
           || modalData?.showAutomationFailureModal === true
           || modalData?.show === true;
+
+        // Vendor-tour records carry each vendor's important/manual-fulfilment instructions
+        const flat = bookingResult.data.booking || bookingResult.data.fulfillmentDetails || bookingResult.data;
+        const vendors = bookingResult.data.vendorsInfo || flat.vendorsInfo || [];
+        const vendorTourResults = await Promise.all(
+          vendors.map(v => {
+            const vendorId = v.vendorId;
+            const tourId = v.tourId || flat.tourId;
+            if (!vendorId || !tourId) return Promise.resolve(null);
+            return bmsApiCall(ENDPOINTS.vendorTour(vendorId, tourId));
+          })
+        );
+        const vendorTourData = vendorTourResults.map(r => (r && r.ok) ? r.data : null);
+
         sendResponse({
           ok: true,
           data: bookingResult.data,
           guestData: guestResult.ok ? guestResult.data : null,
           showAutomationModal: showModal,
+          vendorTourData,
         });
+      } catch (err) {
+        sendResponse({ ok: false, error: String(err), errorType: 'UNKNOWN' });
       }
-    }).catch(err => sendResponse({ ok: false, error: String(err), errorType: 'UNKNOWN' }));
+    })();
     return true;
   }
 

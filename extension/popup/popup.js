@@ -172,12 +172,12 @@ async function doSearch() {
     return;
   }
 
-  renderBooking(id, result.data, result.guestData, result.showAutomationModal);
+  renderBooking(id, result.data, result.guestData, result.showAutomationModal, result.vendorTourData);
 }
 
 // ── Render booking ────────────────────────────────────────────────────────────
 
-function renderBooking(id, data, guestData, showAutomationModal) {
+function renderBooking(id, data, guestData, showAutomationModal, vendorTourData) {
   const flat    = data.booking || data.fulfillmentDetails || data;
   const vendors = data.vendorsInfo || flat.vendorsInfo || [];
 
@@ -208,7 +208,7 @@ function renderBooking(id, data, guestData, showAutomationModal) {
   const details = $('ticket-details');
   details.innerHTML = '';
   details.appendChild(buildBookingSection(flat));
-  details.appendChild(buildInstructionsSection(flat, vendors));
+  details.appendChild(buildInstructionsSection(flat, vendors, vendorTourData));
   details.appendChild(buildCustomerSection(flat, guestData));
   details.appendChild(buildVerifySection(flat, guestData));
 
@@ -797,28 +797,30 @@ function buildVerifySection(flat, guestData) {
 
 // Instructions tab ─────────────────────────────────────────────────────────────
 function _instrContent(v) {
-  return v.bookingInstructions || v.instructions || v.manualFulfillmentInstructions
-    || v.fulfillmentInstructions || v.vendorInstructions || v.bookingNotes || null;
+  if (!v) return null;
+  return v.importantInstructions || v.bookingInstructions || v.instructions
+    || v.manualFulfillmentInstructions || v.fulfillmentInstructions
+    || v.vendorInstructions || v.additionalInstructions || v.remarks
+    || v.notes || v.bookingNotes || null;
 }
 
-function buildInstructionsSection(flat, vendors) {
-  // Debug: log all vendor keys so we can find the instructions field
-  console.log('[BASS] flat instruction keys:', {
-    bookingInstructions: flat.bookingInstructions,
-    instructions: flat.instructions,
-    bookingNotes: flat.bookingNotes,
-  });
-  vendors.forEach((v, i) => console.log(`[BASS] vendor[${i}] keys:`, Object.keys(v), v));
+function buildInstructionsSection(flat, vendors, vendorTourData = []) {
+  if (vendorTourData?.length) {
+    vendorTourData.forEach((vt, i) => {
+      if (vt) console.log(`[BASS] vendorTour[${i}] keys:`, Object.keys(vt), vt);
+    });
+  }
 
   const blocks = [];
 
-  // Booking-level instructions
+  // Booking-level instructions (rare, but some flows put them here)
   const flatInstr = flat.bookingInstructions || flat.instructions || flat.bookingNotes || null;
   if (flatInstr) blocks.push({ title: 'Important Instructions', instr: flatInstr });
 
-  // Vendor-level instructions — use ALL vendors
+  // Vendor-tour record — the confirmed source of "important instructions"
   vendors.forEach((v, i) => {
-    const instr = _instrContent(v);
+    const vt = vendorTourData?.[i];
+    const instr = _instrContent(vt) || _instrContent(v);
     if (!instr) return;
     const title = v.vendorName || `Vendor ${i + 1}`;
     blocks.push({ title, instr });

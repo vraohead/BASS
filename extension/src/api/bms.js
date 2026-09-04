@@ -8,6 +8,8 @@ export const ENDPOINTS = {
   booking:             (id) => `${BMS_BASE}/proxy/aries/apis/v2/order-fulfillment/booking/${id}`,
   guestDetails:        (id) => `${BMS_BASE}/proxy/aries/apis/v2/order-fulfillment/booking/${id}/guestDetails`,
   automationModal:     (id) => `${BMS_BASE}/proxy/aries/apis/v2/order-fulfillment/booking/${id}/showAutomationFailureModal`,
+  // Vendor-tour record — carries the vendor's important/manual-fulfilment instructions
+  vendorTour:          (vendorId, tourId) => `${BMS_BASE}/proxy/calipso/api/vendortour?vendorId=${vendorId}&tourId=${tourId}`,
   // TODO: replace with the real BMS endpoint once defined on the Box Office side
   verifyFlag:          (id) => `${BMS_BASE}/proxy/aries/apis/v2/order-fulfillment/booking/${id}/verifyFlag`,
 };
