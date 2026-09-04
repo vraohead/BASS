@@ -835,13 +835,20 @@ function buildInstructionsSection(flat, vendors, vendorTourData = []) {
   const flatInstr = flat.bookingInstructions || flat.instructions || flat.bookingNotes || null;
   if (flatInstr) blocks.push({ title: 'Important Instructions', instr: flatInstr });
 
-  // Vendor-tour record — the confirmed source of "important instructions"
+  // Two distinct, independent sources per vendor — show both when present:
+  //  1. Vendor-tour SOP (general procedure for this vendor+tour, from Calipso)
+  //  2. This booking's own vendorsInfo[i].bookingInstructions (booking-specific, e.g. a portal link)
   vendors.forEach((v, i) => {
     const vt = vendorTourData?.[i];
-    const instr = _instrContent(vt) || _instrContent(v);
-    if (!instr) return;
     const title = v.vendorName || `Vendor ${i + 1}`;
-    blocks.push({ title, instr });
+
+    const sop = _instrContent(vt);
+    if (sop) blocks.push({ title: `${title} — Vendor SOP`, instr: sop });
+
+    const bookingInstr = v.bookingInstructions || null;
+    if (bookingInstr && bookingInstr !== sop) {
+      blocks.push({ title: `${title} — Booking Instructions`, instr: bookingInstr });
+    }
   });
 
   if (!blocks.length) {
