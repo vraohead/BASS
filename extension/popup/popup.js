@@ -172,8 +172,6 @@ async function doSearch() {
     return;
   }
 
-  console.log('[BASS] vendorTourDebug:', result.vendorTourDebug);
-  console.log('[BASS] vendorTourData:', result.vendorTourData);
   renderBooking(id, result.data, result.guestData, result.showAutomationModal, result.vendorTourData);
 }
 
@@ -807,12 +805,6 @@ function _instrContent(v) {
 }
 
 function buildInstructionsSection(flat, vendors, vendorTourData = []) {
-  vendors.forEach((v, i) => {
-    const vt = vendorTourData?.[i];
-    console.log(`[BASS] vendor[${i}] vendorId=${v.vendorId} tourId=${v.tourId || flat.tourId} → vendorTour:`,
-      vt ? Object.keys(vt) : '(null — see vendorTourDebug above for why)', vt);
-  });
-
   const blocks = [];
 
   // Booking-level instructions (rare, but some flows put them here)
