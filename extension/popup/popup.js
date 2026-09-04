@@ -820,12 +820,6 @@ function isAutomationPending(flat) {
 }
 
 function buildInstructionsSection(flat, vendors, vendorTourData = []) {
-  // Debug: confirm the exact status values BMS uses, in case the guesses above are wrong
-  console.log('[BASS] instructions visibility check:', {
-    status: flat.status, fulfilmentStatus: flat.fulfilmentStatus, fulfilmentType: flat.fulfilmentType,
-    isTerminal: isTerminalBooking(flat), isAutomationPending: isAutomationPending(flat),
-  });
-
   if (isTerminalBooking(flat)) {
     return buildSection('instructions', 'Instructions', '📌',
       '<p class="instruction-empty">Booking is completed or cancelled — instructions no longer apply.</p>');
