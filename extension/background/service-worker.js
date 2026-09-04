@@ -139,11 +139,17 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
           vendors.map(v => {
             const vendorId = v.vendorId;
             const tourId = v.tourId || flat.tourId;
-            if (!vendorId || !tourId) return Promise.resolve(null);
-            return bmsApiCall(ENDPOINTS.vendorTour(vendorId, tourId));
+            if (!vendorId || !tourId) {
+              return Promise.resolve({ ok: false, status: 0, error: 'missing vendorId/tourId', vendorId, tourId });
+            }
+            return bmsApiCall(ENDPOINTS.vendorTour(vendorId, tourId))
+              .then(r => ({ ...r, vendorId, tourId, url: ENDPOINTS.vendorTour(vendorId, tourId) }));
           })
         );
         const vendorTourData = vendorTourResults.map(r => (r && r.ok) ? r.data : null);
+        const vendorTourDebug = vendorTourResults.map(r => ({
+          ok: r.ok, status: r.status, error: r.error, vendorId: r.vendorId, tourId: r.tourId, url: r.url,
+        }));
 
         sendResponse({
           ok: true,
@@ -151,6 +157,7 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
           guestData: guestResult.ok ? guestResult.data : null,
           showAutomationModal: showModal,
           vendorTourData,
+          vendorTourDebug,
         });
       } catch (err) {
         sendResponse({ ok: false, error: String(err), errorType: 'UNKNOWN' });
