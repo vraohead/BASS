@@ -143,7 +143,12 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
             return bmsApiCall(ENDPOINTS.vendorTour(vendorId, tourId));
           })
         );
-        const vendorTourData = vendorTourResults.map(r => (r && r.ok) ? r.data : null);
+        // The Calipso API returns an array (usually one matching record) — unwrap it
+        const vendorTourData = vendorTourResults.map(r => {
+          if (!r || !r.ok) return null;
+          const d = r.data;
+          return Array.isArray(d) ? (d[0] || null) : d;
+        });
 
         sendResponse({
           ok: true,

@@ -843,20 +843,6 @@ function buildInstructionsSection(flat, vendors, vendorTourData = []) {
   const primary = getPrimaryVendor(flat);
   const primaryIndex = primary ? vendors.indexOf(primary) : -1;
 
-  console.log('[BASS] instructions debug — primary vendor:', {
-    primaryIndex, vendorId: primary?.vendorId, tourId: primary?.tourId || flat.tourId,
-    vendorName: primary?.vendorName, hasBookingInstructions: !!primary?.bookingInstructions,
-  });
-  vendors.forEach((v, i) => {
-    const vt = vendorTourData?.[i];
-    console.log(`[BASS] instructions debug — vendor[${i}]`, {
-      vendorId: v.vendorId, tourId: v.tourId || flat.tourId, vendorName: v.vendorName,
-      hasBookingInstructions: !!v.bookingInstructions,
-      vendorTourResult: vt === null ? 'null (fetch failed or no vendorId/tourId)' : (vt ? Object.keys(vt) : vt),
-      sopFound: !!_instrContent(vt),
-    });
-  });
-
   if (primary) {
     const bookingInstr = primary.bookingInstructions || null;
     if (bookingInstr) {
