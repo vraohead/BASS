@@ -836,29 +836,35 @@ function buildInstructionsSection(flat, vendors, vendorTourData = []) {
   if (flatInstr) blocks.push({ title: 'Important Instructions', instr: flatInstr });
 
   // vendorsInfo lists every candidate/alternate supplier for this tour — only the
-  // vendor actually assigned to THIS booking is relevant, same as the Scorpio
-  // link and Product (Vendor) field elsewhere. Showing all of them surfaces
-  // irrelevant candidate-vendor notes (e.g. "freesale") for suppliers not in use.
+  // vendor actually assigned to THIS booking is relevant for booking-specific
+  // instructions, same as the Scorpio link and Product (Vendor) field elsewhere.
+  // Showing all of them there surfaces irrelevant candidate-vendor notes
+  // (e.g. plain "freesale" placeholders) for suppliers not in use.
   const primary = getPrimaryVendor(flat);
-  const relevant = primary
-    ? [[primary, vendors.indexOf(primary)]]
-    : vendors.map((v, i) => [v, i]);
+  const primaryIndex = primary ? vendors.indexOf(primary) : -1;
 
-  // Two distinct, independent sources per vendor — show both when present:
-  //  1. Vendor-tour SOP (general procedure for this vendor+tour, from Calipso)
-  //  2. This booking's own vendorsInfo[i].bookingInstructions (booking-specific, e.g. a portal link)
-  relevant.forEach(([v, i]) => {
-    const vt = vendorTourData?.[i];
-    const title = v.vendorName || `Vendor ${i + 1}`;
-
-    const sop = _instrContent(vt);
-    if (sop) blocks.push({ title: `${title} — Vendor SOP`, instr: sop });
-
-    const bookingInstr = v.bookingInstructions || null;
-    if (bookingInstr && bookingInstr !== sop) {
+  if (primary) {
+    const bookingInstr = primary.bookingInstructions || null;
+    if (bookingInstr) {
+      const title = primary.vendorName || `Vendor ${primaryIndex + 1}`;
       blocks.push({ title: `${title} — Booking Instructions`, instr: bookingInstr });
     }
-  });
+  }
+
+  // Vendor-tour SOP: check the assigned vendor first, but a real Calipso SOP is
+  // uncommon enough (unlike the noisy bookingInstructions field) that it's safe
+  // to fall back to whichever candidate vendor actually has one configured.
+  let sopVendor = primary && _instrContent(vendorTourData?.[primaryIndex]) ? primary : null;
+  let sopIndex = sopVendor ? primaryIndex : -1;
+  if (!sopVendor) {
+    const found = vendors.findIndex((v, i) => _instrContent(vendorTourData?.[i]));
+    if (found !== -1) { sopVendor = vendors[found]; sopIndex = found; }
+  }
+  if (sopVendor) {
+    const sop = _instrContent(vendorTourData?.[sopIndex]);
+    const title = sopVendor.vendorName || `Vendor ${sopIndex + 1}`;
+    blocks.push({ title: `${title} — Vendor SOP`, instr: sop });
+  }
 
   if (!blocks.length) {
     return buildSection('instructions', 'Instructions', '📌',
