@@ -6,11 +6,13 @@
 //   wrangler deploy
 //   wrangler secret put OPENAI_API_KEY   ← paste key when prompted
 //   wrangler secret put SLACK_BOT_TOKEN  ← paste Slack bot token when prompted
-// Also set the target channel in wrangler.toml under [vars] as SLACK_CHANNEL_ID
-// (not sensitive, so it doesn't need to be a secret).
 //
 // POST /verify        { imageBase64, mimeType, facts } -> { checks: [...] }
 // POST /confirm-flag   { bookingId, agentEmail, confirmed, skipped, imageBase64?, mimeType?, verifiedAt } -> { ok: true }
+
+// Not sensitive, so hardcoded here rather than as an env var/secret —
+// change this if the target Slack channel ever changes.
+const SLACK_CHANNEL_ID = 'C0BV91K7F70';
 
 export default {
   async fetch(request, env) {
@@ -20,6 +22,14 @@ export default {
     }
 
     const url = new URL(request.url);
+
+    if (request.method === 'GET' && url.pathname === '/debug-env') {
+      return cors(JSON.stringify({
+        hasSlackToken: !!env.SLACK_BOT_TOKEN,
+        hasOpenAiKey: !!env.OPENAI_API_KEY,
+        slackChannelId: SLACK_CHANNEL_ID,
+      }), 200);
+    }
 
     if (request.method === 'POST' && url.pathname === '/confirm-flag') {
       return handleConfirmFlag(request, env);
@@ -139,9 +149,6 @@ async function handleConfirmFlag(request, env) {
   if (!env.SLACK_BOT_TOKEN) {
     return cors(JSON.stringify({ error: 'Worker misconfigured — run: wrangler secret put SLACK_BOT_TOKEN' }), 500);
   }
-  if (!env.SLACK_CHANNEL_ID) {
-    return cors(JSON.stringify({ error: 'Worker misconfigured — set SLACK_CHANNEL_ID in wrangler.toml [vars]' }), 500);
-  }
 
   const lines = [
     ':white_check_mark: *Booking Verification Confirmed*',
@@ -162,7 +169,7 @@ async function handleConfirmFlag(request, env) {
       Authorization: `Bearer ${env.SLACK_BOT_TOKEN}`,
       'Content-Type': 'application/json; charset=utf-8',
     },
-    body: JSON.stringify({ channel: env.SLACK_CHANNEL_ID, text: lines }),
+    body: JSON.stringify({ channel: SLACK_CHANNEL_ID, text: lines }),
   });
   const msgData = await msgRes.json();
   if (!msgData.ok) {
@@ -196,7 +203,7 @@ async function handleConfirmFlag(request, env) {
           },
           body: JSON.stringify({
             files: [{ id: uploadUrlData.file_id, title: filename }],
-            channel_id: env.SLACK_CHANNEL_ID,
+            channel_id: SLACK_CHANNEL_ID,
             thread_ts: msgData.ts,
           }),
         });
