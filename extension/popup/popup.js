@@ -553,14 +553,16 @@ function renderVerifyRow(c, i) {
 }
 
 function wireSkipBoxes(container, confirmRow) {
+  const totalMismatches = container.querySelectorAll('.verify-result-row.nomatch').length;
   const update = () => {
-    const skipped = [...container.querySelectorAll('.vr-skip-chk:checked')];
+    const skipped = [...container.querySelectorAll('.verify-result-row.nomatch.skipped')];
     if (confirmRow) {
-      confirmRow.hidden = skipped.length === 0;
-      const btn = confirmRow.querySelector('.verify-confirm-btn');
-      if (btn) btn.dataset.skipped = skipped.map(c => c.closest('.vr-label')?.textContent || c.id).join(',');
+      // Only reveal Confirm & Flag once EVERY mismatched field has been
+      // explicitly skipped — partial acknowledgement isn't enough.
+      const allSkipped = totalMismatches > 0 && skipped.length === totalMismatches;
+      confirmRow.hidden = !allSkipped;
       const lbl = confirmRow.querySelector('.verify-confirm-count');
-      if (lbl) lbl.textContent = `${skipped.length} skipped`;
+      if (lbl) lbl.textContent = `${skipped.length}/${totalMismatches} skipped`;
     }
   };
   container.querySelectorAll('.vr-skip-chk').forEach(chk => {
@@ -808,6 +810,16 @@ function buildVerifySection(flat, guestData) {
   const bookingId = String(flat.bookingId || '');
 
   confirmBtn.addEventListener('click', async () => {
+    // Defense in depth: even though the button is only revealed once every
+    // mismatch is skipped, never allow a partial confirmation through.
+    const totalMismatches = sec.querySelectorAll('.verify-result-row.nomatch').length;
+    const skippedMismatches = sec.querySelectorAll('.verify-result-row.nomatch.skipped').length;
+    if (totalMismatches > 0 && skippedMismatches < totalMismatches) {
+      confirmStatus.textContent = `Check "Skip" for all ${totalMismatches} mismatched field(s) before confirming.`;
+      confirmStatus.className = 'verify-confirm-status status-err';
+      return;
+    }
+
     const rowData = row => ({
       label: row.querySelector('.vr-label')?.textContent.trim() || '',
       value: row.querySelector('.vr-value')?.textContent.trim() || '',
