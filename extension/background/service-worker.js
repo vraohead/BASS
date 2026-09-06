@@ -181,7 +181,7 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
         });
         const data = await res.json().catch(() => ({}));
         if (res.ok && data.ok) {
-          sendResponse({ ok: true });
+          sendResponse({ ok: true, screenshotError: data.screenshotError || null });
         } else {
           sendResponse({ ok: false, error: data?.error || `HTTP ${res.status}` });
         }

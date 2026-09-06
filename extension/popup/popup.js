@@ -845,8 +845,8 @@ function buildVerifySection(flat, guestData) {
     confirmBtn.textContent = '✓ Confirm & Flag';
 
     if (result?.ok) {
-      confirmStatus.textContent = '✓ Flagged';
-      confirmStatus.className = 'verify-confirm-status status-ok';
+      confirmStatus.textContent = result.screenshotError ? `✓ Flagged (screenshot: ${result.screenshotError})` : '✓ Flagged';
+      confirmStatus.className = result.screenshotError ? 'verify-confirm-status status-warn' : 'verify-confirm-status status-ok';
     } else {
       confirmStatus.textContent = result?.error || 'Failed';
       confirmStatus.className = 'verify-confirm-status status-err';

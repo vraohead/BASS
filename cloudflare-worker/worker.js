@@ -176,7 +176,10 @@ async function handleConfirmFlag(request, env) {
     return cors(JSON.stringify({ error: `Slack chat.postMessage failed: ${msgData.error}` }), 502);
   }
 
-  // Upload the screenshot, if provided, threaded under the message just posted
+  // Upload the screenshot, if provided, threaded under the message just posted.
+  // Non-fatal if this fails — the text message is already posted — but the
+  // failure reason is returned so it's visible instead of silently swallowed.
+  let screenshotError = null;
   if (imageBase64) {
     try {
       const binary = Uint8Array.from(atob(imageBase64), c => c.charCodeAt(0));
@@ -193,27 +196,37 @@ async function handleConfirmFlag(request, env) {
       });
       const uploadUrlData = await uploadUrlRes.json();
 
-      if (uploadUrlData.ok) {
-        await fetch(uploadUrlData.upload_url, { method: 'POST', body: binary });
-        await fetch('https://slack.com/api/files.completeUploadExternal', {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${env.SLACK_BOT_TOKEN}`,
-            'Content-Type': 'application/json; charset=utf-8',
-          },
-          body: JSON.stringify({
-            files: [{ id: uploadUrlData.file_id, title: filename }],
-            channel_id: SLACK_CHANNEL_ID,
-            thread_ts: msgData.ts,
-          }),
-        });
+      if (!uploadUrlData.ok) {
+        screenshotError = `files.getUploadURLExternal failed: ${uploadUrlData.error}`;
+      } else {
+        const putRes = await fetch(uploadUrlData.upload_url, { method: 'POST', body: binary });
+        if (!putRes.ok) {
+          screenshotError = `Upload PUT failed: HTTP ${putRes.status}`;
+        } else {
+          const completeRes = await fetch('https://slack.com/api/files.completeUploadExternal', {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${env.SLACK_BOT_TOKEN}`,
+              'Content-Type': 'application/json; charset=utf-8',
+            },
+            body: JSON.stringify({
+              files: [{ id: uploadUrlData.file_id, title: filename }],
+              channel_id: SLACK_CHANNEL_ID,
+              thread_ts: msgData.ts,
+            }),
+          });
+          const completeData = await completeRes.json();
+          if (!completeData.ok) {
+            screenshotError = `files.completeUploadExternal failed: ${completeData.error}`;
+          }
+        }
       }
     } catch (err) {
-      // Non-fatal — the text message is already posted; screenshot upload is best-effort
+      screenshotError = `Exception: ${err.message}`;
     }
   }
 
-  return cors(JSON.stringify({ ok: true }), 200);
+  return cors(JSON.stringify({ ok: true, screenshotError }), 200);
 }
 
 function cors(body, status) {
