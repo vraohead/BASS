@@ -163,23 +163,13 @@ async function handleConfirmFlag(request, env) {
     verifiedAt ? `*At:* ${verifiedAt}` : null,
   ].filter(Boolean).join('\n');
 
-  const msgRes = await fetch('https://slack.com/api/chat.postMessage', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${env.SLACK_BOT_TOKEN}`,
-      'Content-Type': 'application/json; charset=utf-8',
-    },
-    body: JSON.stringify({ channel: SLACK_CHANNEL_ID, text: lines }),
-  });
-  const msgData = await msgRes.json();
-  if (!msgData.ok) {
-    return cors(JSON.stringify({ error: `Slack chat.postMessage failed: ${msgData.error}` }), 502);
-  }
-
-  // Upload the screenshot, if provided, threaded under the message just posted.
-  // Non-fatal if this fails — the text message is already posted — but the
-  // failure reason is returned so it's visible instead of silently swallowed.
+  // If there's a screenshot, try posting it as ONE unified message (image +
+  // text together via initial_comment) rather than a separate text message
+  // followed by a threaded file reply. Falls back to a plain text message
+  // if there's no image, or if the image upload/attach fails at any step.
   let screenshotError = null;
+  let posted = false;
+
   if (imageBase64) {
     try {
       const binary = Uint8Array.from(atob(imageBase64), c => c.charCodeAt(0));
@@ -212,17 +202,34 @@ async function handleConfirmFlag(request, env) {
             body: JSON.stringify({
               files: [{ id: uploadUrlData.file_id, title: filename }],
               channel_id: SLACK_CHANNEL_ID,
-              thread_ts: msgData.ts,
+              initial_comment: lines,
             }),
           });
           const completeData = await completeRes.json();
           if (!completeData.ok) {
             screenshotError = `files.completeUploadExternal failed: ${completeData.error}`;
+          } else {
+            posted = true;
           }
         }
       }
     } catch (err) {
       screenshotError = `Exception: ${err.message}`;
+    }
+  }
+
+  if (!posted) {
+    const msgRes = await fetch('https://slack.com/api/chat.postMessage', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${env.SLACK_BOT_TOKEN}`,
+        'Content-Type': 'application/json; charset=utf-8',
+      },
+      body: JSON.stringify({ channel: SLACK_CHANNEL_ID, text: lines }),
+    });
+    const msgData = await msgRes.json();
+    if (!msgData.ok) {
+      return cors(JSON.stringify({ error: `Slack chat.postMessage failed: ${msgData.error}` }), 502);
     }
   }
 
