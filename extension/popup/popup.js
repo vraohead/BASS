@@ -752,7 +752,8 @@ function buildVerifySection(flat, guestData) {
     aiBtn.textContent = '🤖 AI Verify';
 
     if (!result?.ok) {
-      resultsEl.innerHTML = `<p class="verify-result-error">Error: ${escHtml(result?.error || 'unknown')}</p>`;
+      const rawLine = result?.raw ? `<p class="verify-result-error">Raw AI response: ${escHtml(result.raw)}</p>` : '';
+      resultsEl.innerHTML = `<p class="verify-result-error">Error: ${escHtml(result?.error || 'unknown')}</p>${rawLine}`;
       resultsEl.hidden = false;
       return;
     }

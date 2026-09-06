@@ -99,7 +99,7 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
           body: JSON.stringify({ imageBase64, mimeType, facts }),
         });
         const data = await res.json();
-        sendResponse(res.ok ? { ok: true, ...data } : { ok: false, error: data.error || 'Worker error' });
+        sendResponse(res.ok ? { ok: true, ...data } : { ok: false, error: data.error || 'Worker error', raw: data.raw });
       } catch (err) {
         sendResponse({ ok: false, error: err.message });
       }
