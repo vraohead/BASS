@@ -29,7 +29,22 @@
 
 // Bump this string whenever you paste a new version into the dashboard —
 // visiting GET /debug-env instantly confirms whether a deploy took effect.
-const WORKER_VERSION = '2026-09-06-01';
+const WORKER_VERSION = '2026-09-06-02';
+
+// Formats an ISO timestamp as a clean IST string, e.g. "6 Sep 2026, 10:44 PM IST".
+function formatIST(isoString) {
+  if (!isoString) return '';
+  try {
+    const formatted = new Intl.DateTimeFormat('en-IN', {
+      timeZone: 'Asia/Kolkata',
+      day: 'numeric', month: 'short', year: 'numeric',
+      hour: 'numeric', minute: '2-digit', hour12: true,
+    }).format(new Date(isoString));
+    return `${formatted} IST`;
+  } catch (_) {
+    return isoString;
+  }
+}
 
 // Not sensitive, so hardcoded here rather than as an env var/secret —
 // change this if the target Slack channel ever changes.
@@ -226,7 +241,7 @@ async function handleConfirmFlag(request, env) {
     skipped.length
       ? `*Skipped (mismatch acknowledged):* ${skipped.map(c => `${c.label}: ${c.value}`).join('  |  ')}`
       : null,
-    verifiedAt ? `*At:* ${verifiedAt}` : null,
+    verifiedAt ? `*At:* ${formatIST(verifiedAt)}` : null,
   ].filter(Boolean).join('\n');
 
   // If there's a screenshot, post it as ONE unified message — the text goes
