@@ -137,7 +137,7 @@ function showAuthGate(status) {
 
 $('recheck-btn').addEventListener('click', async () => {
   const status = await checkAuth();
-  if (status === 'AUTHENTICATED') await autoDetect();
+  if (status === 'AUTHENTICATED') await detectAndLoadBooking();
 });
 
 // ── Search ────────────────────────────────────────────────────────────────────
@@ -160,19 +160,19 @@ async function clearLastBooking() {
   try { await chrome.storage.local.remove(['lastBookingId', 'lastUsedAt']); } catch (_) {}
 }
 
-async function restoreLastBooking() {
+// Pure: returns { lastBookingId, lastUsedAt } if a valid, non-expired stored
+// booking exists, else null (clearing storage if it was present but expired).
+async function getStoredLastBooking() {
   try {
     const { lastBookingId, lastUsedAt } = await chrome.storage.local.get(['lastBookingId', 'lastUsedAt']);
-    if (!lastBookingId || !lastUsedAt) return false;
+    if (!lastBookingId || !lastUsedAt) return null;
     if (Date.now() - lastUsedAt > RESTORE_TTL_MS) {
       await clearLastBooking();
-      return false;
+      return null;
     }
-    $('booking-id').value = lastBookingId;
-    await doSearch();
-    return true;
+    return { lastBookingId, lastUsedAt };
   } catch (_) {
-    return false;
+    return null;
   }
 }
 
@@ -1254,15 +1254,40 @@ function buildCustomerSection(flat, guestData) {
 
 // ── Auto-detect booking from active tab URL ────────────────────────────────────
 
-async function autoDetect() {
+// Pure: returns the booking ID found in the active Box Office tab's URL, or null.
+async function detectBookingIdFromActiveTab() {
   try {
     const tabs  = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
     const url   = tabs[0]?.url || '';
     const match = url.match(/\/(\d{6,})/);
-    if (!match) return;
-    $('booking-id').value = match[1];
+    return match ? match[1] : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+// Reconciles the restored (from storage) booking with whatever the active Box
+// Office tab is currently showing. If both exist and disagree, don't silently
+// pick one — surface an explicit error so the agent isn't misled by stale data.
+async function detectAndLoadBooking() {
+  const urlBookingId = await detectBookingIdFromActiveTab();
+  const stored = await getStoredLastBooking();
+
+  if (urlBookingId && stored && urlBookingId !== stored.lastBookingId) {
+    $('booking-id').value = urlBookingId;
+    const errEl = $('error-message');
+    errEl.textContent = `Box Office is showing booking ${urlBookingId}, but booking ${stored.lastBookingId} was restored from your last session. Click Fetch to load ${urlBookingId} instead.`;
+    errEl.hidden = false;
+    return;
+  }
+
+  if (stored) {
+    $('booking-id').value = stored.lastBookingId;
     await doSearch();
-  } catch (_) {}
+  } else if (urlBookingId) {
+    $('booking-id').value = urlBookingId;
+    await doSearch();
+  }
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
@@ -1273,8 +1298,5 @@ $('ticket-details').innerHTML =
 (async () => {
   await initTheme();
   const status = await checkAuth();
-  if (status === 'AUTHENTICATED') {
-    const restored = await restoreLastBooking();
-    if (!restored) await autoDetect();
-  }
+  if (status === 'AUTHENTICATED') await detectAndLoadBooking();
 })();
