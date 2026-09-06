@@ -6,4 +6,4 @@ compatibility_date = "2024-09-23"
 # Slack channel ID to post Confirm & Flag notifications to (e.g. "C0123456789").
 # Not sensitive — the bot token (which is) goes in a secret instead:
 #   wrangler secret put SLACK_BOT_TOKEN
-SLACK_CHANNEL_ID = "REPLACE_WITH_CHANNEL_ID"
+SLACK_CHANNEL_ID = "C0BV91K7F70"
