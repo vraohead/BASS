@@ -1,12 +1,16 @@
-// BASS Verify Worker — proxies screenshot AI verification so the OpenAI key
-// stays on Cloudflare, never in the extension.
+// BASS Verify Worker — proxies screenshot AI verification and the
+// Confirm & Flag Slack notification, so the OpenAI key and Slack bot
+// token stay on Cloudflare, never in the extension.
 //
 // Deploy:
 //   wrangler deploy
 //   wrangler secret put OPENAI_API_KEY   ← paste key when prompted
+//   wrangler secret put SLACK_BOT_TOKEN  ← paste Slack bot token when prompted
+// Also set the target channel in wrangler.toml under [vars] as SLACK_CHANNEL_ID
+// (not sensitive, so it doesn't need to be a secret).
 //
-// The extension sends POST /verify with { imageBase64, mimeType, facts }
-// and gets back { checks: [{ label, expected, found }] }
+// POST /verify        { imageBase64, mimeType, facts } -> { checks: [...] }
+// POST /confirm-flag   { bookingId, agentEmail, confirmed, skipped, imageBase64?, mimeType?, verifiedAt } -> { ok: true }
 
 export default {
   async fetch(request, env) {
@@ -16,6 +20,10 @@ export default {
     }
 
     const url = new URL(request.url);
+
+    if (request.method === 'POST' && url.pathname === '/confirm-flag') {
+      return handleConfirmFlag(request, env);
+    }
 
     if (request.method !== 'POST' || url.pathname !== '/verify') {
       return cors(JSON.stringify({ error: 'Not found' }), 404);
@@ -114,6 +122,92 @@ Rules:
     return cors(JSON.stringify(result), 200);
   },
 };
+
+async function handleConfirmFlag(request, env) {
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return cors(JSON.stringify({ error: 'Invalid JSON body' }), 400);
+  }
+
+  const {
+    bookingId, agentEmail, confirmed = [], skipped = [],
+    imageBase64, mimeType = 'image/png', verifiedAt,
+  } = body;
+
+  if (!env.SLACK_BOT_TOKEN) {
+    return cors(JSON.stringify({ error: 'Worker misconfigured — run: wrangler secret put SLACK_BOT_TOKEN' }), 500);
+  }
+  if (!env.SLACK_CHANNEL_ID) {
+    return cors(JSON.stringify({ error: 'Worker misconfigured — set SLACK_CHANNEL_ID in wrangler.toml [vars]' }), 500);
+  }
+
+  const lines = [
+    ':white_check_mark: *Booking Verification Confirmed*',
+    `*Booking ID:* ${bookingId || 'n/a'}`,
+    `*Confirmed by:* ${agentEmail || 'unknown'}`,
+    confirmed.length
+      ? `*Matched:* ${confirmed.map(c => `${c.label}: ${c.value}`).join('  |  ')}`
+      : null,
+    skipped.length
+      ? `*Skipped (mismatch acknowledged):* ${skipped.map(c => `${c.label}: ${c.value}`).join('  |  ')}`
+      : null,
+    verifiedAt ? `*At:* ${verifiedAt}` : null,
+  ].filter(Boolean).join('\n');
+
+  const msgRes = await fetch('https://slack.com/api/chat.postMessage', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${env.SLACK_BOT_TOKEN}`,
+      'Content-Type': 'application/json; charset=utf-8',
+    },
+    body: JSON.stringify({ channel: env.SLACK_CHANNEL_ID, text: lines }),
+  });
+  const msgData = await msgRes.json();
+  if (!msgData.ok) {
+    return cors(JSON.stringify({ error: `Slack chat.postMessage failed: ${msgData.error}` }), 502);
+  }
+
+  // Upload the screenshot, if provided, threaded under the message just posted
+  if (imageBase64) {
+    try {
+      const binary = Uint8Array.from(atob(imageBase64), c => c.charCodeAt(0));
+      const ext = (mimeType.split('/')[1] || 'png').replace(/[^a-z0-9]/gi, '');
+      const filename = `verify-${bookingId || 'screenshot'}.${ext}`;
+
+      const uploadUrlRes = await fetch('https://slack.com/api/files.getUploadURLExternal', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${env.SLACK_BOT_TOKEN}`,
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: new URLSearchParams({ filename, length: String(binary.length) }),
+      });
+      const uploadUrlData = await uploadUrlRes.json();
+
+      if (uploadUrlData.ok) {
+        await fetch(uploadUrlData.upload_url, { method: 'POST', body: binary });
+        await fetch('https://slack.com/api/files.completeUploadExternal', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${env.SLACK_BOT_TOKEN}`,
+            'Content-Type': 'application/json; charset=utf-8',
+          },
+          body: JSON.stringify({
+            files: [{ id: uploadUrlData.file_id, title: filename }],
+            channel_id: env.SLACK_CHANNEL_ID,
+            thread_ts: msgData.ts,
+          }),
+        });
+      }
+    } catch (err) {
+      // Non-fatal — the text message is already posted; screenshot upload is best-effort
+    }
+  }
+
+  return cors(JSON.stringify({ ok: true }), 200);
+}
 
 function cors(body, status) {
   return new Response(body, {

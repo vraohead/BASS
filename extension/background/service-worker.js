@@ -165,23 +165,25 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
   }
 
   if (request.action === 'SEND_VERIFY_FLAG') {
-    const { bookingId, skippedFields, verifiedAt } = request;
+    // No BMS endpoint exists for this yet — posts to Slack via the Cloudflare
+    // worker instead (chat.postMessage + screenshot upload). Swap back to a
+    // direct BMS call once/if that endpoint is built.
+    const { bookingId, agentEmail, confirmed, skipped, imageBase64, mimeType, verifiedAt, workerUrl } = request;
     (async () => {
       try {
         const controller = new AbortController();
-        setTimeout(() => controller.abort(), 15000);
-        const res = await fetch(ENDPOINTS.verifyFlag(bookingId), {
+        setTimeout(() => controller.abort(), 20000);
+        const res = await fetch(`${workerUrl.replace(/\/$/, '')}/confirm-flag`, {
           method: 'POST',
-          credentials: 'include',
           signal: controller.signal,
-          headers: { 'x-platform': 'lego', 'Content-Type': 'application/json' },
-          body: JSON.stringify({ verificationSkipped: true, skippedFields, verifiedAt }),
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ bookingId, agentEmail, confirmed, skipped, imageBase64, mimeType, verifiedAt }),
         });
-        if (res.ok) {
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && data.ok) {
           sendResponse({ ok: true });
         } else {
-          const data = await res.json().catch(() => ({}));
-          sendResponse({ ok: false, error: data?.message || `HTTP ${res.status}` });
+          sendResponse({ ok: false, error: data?.error || `HTTP ${res.status}` });
         }
       } catch (err) {
         sendResponse({ ok: false, error: err.message });

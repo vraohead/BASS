@@ -35,6 +35,22 @@ function humanise(key) {
 }
 
 
+// ── Agent identity (for Confirm & Flag) ────────────────────────────────────────
+// BASS has no way to read the logged-in Box Office user directly (it only ever
+// proxies session cookies for read requests) — so ask once, then remember it.
+async function getAgentEmail() {
+  try {
+    const { agentEmail } = await chrome.storage.local.get('agentEmail');
+    if (agentEmail) return agentEmail;
+  } catch (_) {}
+  const entered = window.prompt('Enter your Box Office login email (asked once, saved locally on this device):');
+  const trimmed = (entered || '').trim();
+  if (trimmed) {
+    try { await chrome.storage.local.set({ agentEmail: trimmed }); } catch (_) {}
+  }
+  return trimmed;
+}
+
 // ── Theme ─────────────────────────────────────────────────────────────────────
 
 async function initTheme() {
@@ -791,18 +807,38 @@ function buildVerifySection(flat, guestData) {
   const bookingId = String(flat.bookingId || '');
 
   confirmBtn.addEventListener('click', async () => {
-    const skippedLabels = [...sec.querySelectorAll('.verify-result-row.skipped .vr-label')]
-      .map(el => el.textContent.trim());
+    const rowData = row => ({
+      label: row.querySelector('.vr-label')?.textContent.trim() || '',
+      value: row.querySelector('.vr-value')?.textContent.trim() || '',
+    });
+    const allRows = [...sec.querySelectorAll('.verify-result-row')];
+    const confirmed = allRows.filter(r => r.classList.contains('match')).map(rowData);
+    const skipped = allRows.filter(r => r.classList.contains('skipped')).map(rowData);
 
     confirmBtn.disabled = true;
     confirmBtn.textContent = '⏳ Sending…';
     confirmStatus.textContent = '';
 
+    const agentEmail = await getAgentEmail();
+
+    const imgEl = sec.querySelector('.verify-img');
+    let imageBase64 = null, mimeType = null;
+    if (imgEl?.src?.startsWith('data:')) {
+      const [header, b64] = imgEl.src.split(',');
+      mimeType = header.match(/:(.*?);/)?.[1] || 'image/png';
+      imageBase64 = b64;
+    }
+
     const result = await sendMessage({
       action: 'SEND_VERIFY_FLAG',
       bookingId,
-      skippedFields: skippedLabels,
+      agentEmail,
+      confirmed,
+      skipped,
+      imageBase64,
+      mimeType,
       verifiedAt: new Date().toISOString(),
+      workerUrl: DEFAULT_WORKER_URL,
     });
 
     confirmBtn.disabled = false;
