@@ -99,7 +99,9 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
           body: JSON.stringify({ imageBase64, mimeType, facts }),
         });
         const data = await res.json();
-        sendResponse(res.ok ? { ok: true, ...data } : { ok: false, error: data.error || 'Worker error', raw: data.raw });
+        sendResponse(res.ok
+          ? { ok: true, ...data }
+          : { ok: false, error: data.error || 'Worker error', raw: data.raw, steps: data.steps });
       } catch (err) {
         sendResponse({ ok: false, error: err.message });
       }
@@ -181,9 +183,9 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
         });
         const data = await res.json().catch(() => ({}));
         if (res.ok && data.ok) {
-          sendResponse({ ok: true, screenshotError: data.screenshotError || null });
+          sendResponse({ ok: true, screenshotError: data.screenshotError || null, steps: data.steps });
         } else {
-          sendResponse({ ok: false, error: data?.error || `HTTP ${res.status}` });
+          sendResponse({ ok: false, error: data?.error || `HTTP ${res.status}`, steps: data?.steps });
         }
       } catch (err) {
         sendResponse({ ok: false, error: err.message });

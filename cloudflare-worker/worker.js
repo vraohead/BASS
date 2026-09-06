@@ -2,13 +2,34 @@
 // Confirm & Flag Slack notification, so the OpenAI key and Slack bot
 // token stay on Cloudflare, never in the extension.
 //
-// Deploy:
-//   wrangler deploy
-//   wrangler secret put OPENAI_API_KEY   ← paste key when prompted
-//   wrangler secret put SLACK_BOT_TOKEN  ← paste Slack bot token when prompted
+// Deploy (Cloudflare dashboard "Edit code" flow):
+//   1. Paste this entire file, replacing everything.
+//   2. Save and deploy.
+//   3. Confirm the deploy actually took by visiting /debug-env — it
+//      reports WORKER_VERSION below, so a mismatch means the paste
+//      didn't take or you're looking at a different environment.
 //
-// POST /verify        { imageBase64, mimeType, facts } -> { checks: [...] }
-// POST /confirm-flag   { bookingId, agentEmail, confirmed, skipped, imageBase64?, mimeType?, verifiedAt } -> { ok: true }
+// Deploy (wrangler CLI, if available):
+//   wrangler deploy
+//   wrangler secret put OPENAI_API_KEY   <- paste key when prompted
+//   wrangler secret put SLACK_BOT_TOKEN  <- paste Slack bot token when prompted
+//
+// Endpoints:
+//   GET  /debug-env      -> { hasSlackToken, hasOpenAiKey, slackChannelId, version }
+//   POST /verify          { imageBase64, mimeType, facts } -> { checks: [...] }
+//   POST /confirm-flag     { bookingId, agentEmail, confirmed, skipped,
+//                            imageBase64?, mimeType?, verifiedAt }
+//                          -> { ok: true, steps: [...], screenshotError? }
+//
+// Every meaningful operation (Slack calls, OpenAI calls) appends a
+// {step, ok, detail, at} entry to a `steps` array that's returned in the
+// JSON response — so a failure anywhere always comes back with the exact
+// step name, HTTP status, and raw response body instead of a generic
+// "something went wrong".
+
+// Bump this string whenever you paste a new version into the dashboard —
+// visiting GET /debug-env instantly confirms whether a deploy took effect.
+const WORKER_VERSION = '2026-09-06-01';
 
 // Not sensitive, so hardcoded here rather than as an env var/secret —
 // change this if the target Slack channel ever changes.
@@ -16,7 +37,7 @@ const SLACK_CHANNEL_ID = 'C0BV91K7F70';
 
 export default {
   async fetch(request, env) {
-    // CORS pre-flight
+    // CORS pre-flight — every route needs this handled first.
     if (request.method === 'OPTIONS') {
       return cors('', 204);
     }
@@ -25,6 +46,7 @@ export default {
 
     if (request.method === 'GET' && url.pathname === '/debug-env') {
       return cors(JSON.stringify({
+        version: WORKER_VERSION,
         hasSlackToken: !!env.SLACK_BOT_TOKEN,
         hasOpenAiKey: !!env.OPENAI_API_KEY,
         slackChannelId: SLACK_CHANNEL_ID,
@@ -35,40 +57,56 @@ export default {
       return handleConfirmFlag(request, env);
     }
 
-    if (request.method !== 'POST' || url.pathname !== '/verify') {
-      return cors(JSON.stringify({ error: 'Not found' }), 404);
+    if (request.method === 'POST' && url.pathname === '/verify') {
+      return handleVerify(request, env);
     }
 
-    let body;
-    try {
-      body = await request.json();
-    } catch {
-      return cors(JSON.stringify({ error: 'Invalid JSON body' }), 400);
-    }
+    return cors(JSON.stringify({ error: 'Not found', version: WORKER_VERSION }), 404);
+  },
+};
 
-    const { imageBase64, mimeType = 'image/png', facts = {} } = body;
+// ── /verify — AI screenshot verification ──────────────────────────────────────
 
-    if (!imageBase64) {
-      return cors(JSON.stringify({ error: 'imageBase64 is required' }), 400);
-    }
+async function handleVerify(request, env) {
+  const steps = [];
+  const logStep = (step, ok, detail) => steps.push({ step, ok, detail, at: new Date().toISOString() });
 
-    if (!env.OPENAI_API_KEY) {
-      return cors(
-        JSON.stringify({ error: 'Worker misconfigured — run: wrangler secret put OPENAI_API_KEY' }),
-        500
-      );
-    }
+  let body;
+  try {
+    body = await request.json();
+    logStep('parse_request_body', true, null);
+  } catch (err) {
+    logStep('parse_request_body', false, err.message);
+    return cors(JSON.stringify({ error: 'Invalid JSON body', steps }), 400);
+  }
 
-    const { date = '', time = '', pax = '', price = '' } = facts;
+  const { imageBase64, mimeType = 'image/png', facts = {} } = body;
 
-    const factLines = [
-      date  ? `Date: ${date}`       : null,
-      time  ? `Time: ${time}`       : null,
-      pax   ? `Pax (guests): ${pax}` : null,
-      price ? `Net price: ${price}` : null,
-    ].filter(Boolean).join('\n');
+  if (!imageBase64) {
+    logStep('validate_input', false, 'imageBase64 missing');
+    return cors(JSON.stringify({ error: 'imageBase64 is required', steps }), 400);
+  }
+  logStep('validate_input', true, null);
 
-    const prompt = `You are checking a ticket or booking confirmation screenshot against a booking record.
+  if (!env.OPENAI_API_KEY) {
+    logStep('check_openai_key', false, 'OPENAI_API_KEY secret not set');
+    return cors(JSON.stringify({
+      error: 'Worker misconfigured — run: wrangler secret put OPENAI_API_KEY (or add it as a Secret in the dashboard Settings)',
+      steps,
+    }), 500);
+  }
+  logStep('check_openai_key', true, null);
+
+  const { date = '', time = '', pax = '', price = '' } = facts;
+
+  const factLines = [
+    date  ? `Date: ${date}`        : null,
+    time  ? `Time: ${time}`        : null,
+    pax   ? `Pax (guests): ${pax}` : null,
+    price ? `Net price: ${price}`  : null,
+  ].filter(Boolean).join('\n');
+
+  const prompt = `You are checking a ticket or booking confirmation screenshot against a booking record.
 
 Booking record:
 ${factLines}
@@ -81,7 +119,9 @@ Rules:
 - Set found to true only when the value is unambiguously readable in the image.
 - For numeric pax/price, a match is true if the number appears clearly (ignore currency symbols for price match).`;
 
-    const oaiRes = await fetch('https://api.openai.com/v1/chat/completions', {
+  let oaiRes;
+  try {
+    oaiRes = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${env.OPENAI_API_KEY}`,
@@ -107,38 +147,59 @@ Rules:
         ],
       }),
     });
+    logStep('openai_chat_completions', oaiRes.ok, `HTTP ${oaiRes.status}`);
+  } catch (err) {
+    logStep('openai_chat_completions', false, `Exception: ${err.message}`);
+    return cors(JSON.stringify({ error: `OpenAI request failed: ${err.message}`, steps }), 502);
+  }
 
-    if (!oaiRes.ok) {
-      const errText = await oaiRes.text();
-      return cors(JSON.stringify({ error: `OpenAI error ${oaiRes.status}: ${errText}` }), 502);
-    }
+  if (!oaiRes.ok) {
+    const errText = await oaiRes.text();
+    logStep('openai_chat_completions_body', false, errText.slice(0, 2000));
+    return cors(JSON.stringify({ error: `OpenAI error ${oaiRes.status}: ${errText}`, steps }), 502);
+  }
 
-    const oaiData = await oaiRes.json();
-    const content = oaiData.choices?.[0]?.message?.content?.trim() || '';
+  const oaiData = await oaiRes.json();
+  const content = oaiData.choices?.[0]?.message?.content?.trim() || '';
+  logStep('extract_ai_content', content.length > 0, `length=${content.length}`);
 
-    let result;
-    try {
-      result = JSON.parse(content);
-    } catch {
-      const m = content.match(/\{[\s\S]*\}/);
-      if (m) {
-        try { result = JSON.parse(m[0]); }
-        catch { return cors(JSON.stringify({ error: 'Could not parse AI response', raw: content }), 502); }
-      } else {
-        return cors(JSON.stringify({ error: 'Unexpected AI response format', raw: content }), 502);
+  let result;
+  try {
+    result = JSON.parse(content);
+    logStep('parse_ai_json_direct', true, null);
+  } catch {
+    logStep('parse_ai_json_direct', false, 'not directly parseable, trying regex extraction');
+    const m = content.match(/\{[\s\S]*\}/);
+    if (m) {
+      try {
+        result = JSON.parse(m[0]);
+        logStep('parse_ai_json_regex', true, null);
+      } catch (err) {
+        logStep('parse_ai_json_regex', false, err.message);
+        return cors(JSON.stringify({ error: 'Could not parse AI response', raw: content, steps }), 502);
       }
+    } else {
+      logStep('parse_ai_json_regex', false, 'no {...} found in response');
+      return cors(JSON.stringify({ error: 'Unexpected AI response format', raw: content, steps }), 502);
     }
+  }
 
-    return cors(JSON.stringify(result), 200);
-  },
-};
+  return cors(JSON.stringify({ ...result, steps }), 200);
+}
+
+// ── /confirm-flag — post to Slack (message + screenshot, unified) ─────────────
 
 async function handleConfirmFlag(request, env) {
+  const steps = [];
+  const logStep = (step, ok, detail) => steps.push({ step, ok, detail, at: new Date().toISOString() });
+
   let body;
   try {
     body = await request.json();
-  } catch {
-    return cors(JSON.stringify({ error: 'Invalid JSON body' }), 400);
+    logStep('parse_request_body', true, null);
+  } catch (err) {
+    logStep('parse_request_body', false, err.message);
+    return cors(JSON.stringify({ error: 'Invalid JSON body', steps }), 400);
   }
 
   const {
@@ -147,8 +208,13 @@ async function handleConfirmFlag(request, env) {
   } = body;
 
   if (!env.SLACK_BOT_TOKEN) {
-    return cors(JSON.stringify({ error: 'Worker misconfigured — run: wrangler secret put SLACK_BOT_TOKEN' }), 500);
+    logStep('check_slack_token', false, 'SLACK_BOT_TOKEN secret not set');
+    return cors(JSON.stringify({
+      error: 'Worker misconfigured — run: wrangler secret put SLACK_BOT_TOKEN (or add it as a Secret in the dashboard Settings)',
+      steps,
+    }), 500);
   }
+  logStep('check_slack_token', true, null);
 
   const lines = [
     ':white_check_mark: *Booking Verification Confirmed*',
@@ -163,10 +229,12 @@ async function handleConfirmFlag(request, env) {
     verifiedAt ? `*At:* ${verifiedAt}` : null,
   ].filter(Boolean).join('\n');
 
-  // If there's a screenshot, try posting it as ONE unified message (image +
-  // text together via initial_comment) rather than a separate text message
-  // followed by a threaded file reply. Falls back to a plain text message
-  // if there's no image, or if the image upload/attach fails at any step.
+  // If there's a screenshot, post it as ONE unified message — the text goes
+  // in as the file's initial_comment, so Slack renders text + image together
+  // rather than a plain message followed by a separate threaded file reply.
+  // Falls back to a plain chat.postMessage if there's no image, or if the
+  // upload/attach flow fails at any step (every step logs into `steps`
+  // regardless, so a failure is always fully visible, never silent).
   let screenshotError = null;
   let posted = false;
 
@@ -175,65 +243,103 @@ async function handleConfirmFlag(request, env) {
       const binary = Uint8Array.from(atob(imageBase64), c => c.charCodeAt(0));
       const ext = (mimeType.split('/')[1] || 'png').replace(/[^a-z0-9]/gi, '');
       const filename = `verify-${bookingId || 'screenshot'}.${ext}`;
+      logStep('prepare_binary', true, `bytes=${binary.length} filename=${filename}`);
 
-      const uploadUrlRes = await fetch('https://slack.com/api/files.getUploadURLExternal', {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${env.SLACK_BOT_TOKEN}`,
-          'Content-Type': 'application/x-www-form-urlencoded',
-        },
-        body: new URLSearchParams({ filename, length: String(binary.length) }),
-      });
-      const uploadUrlData = await uploadUrlRes.json();
+      let uploadUrlRes, uploadUrlData;
+      try {
+        uploadUrlRes = await fetch('https://slack.com/api/files.getUploadURLExternal', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${env.SLACK_BOT_TOKEN}`,
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
+          body: new URLSearchParams({ filename, length: String(binary.length) }),
+        });
+        uploadUrlData = await uploadUrlRes.json();
+        logStep('slack_files_getUploadURLExternal', uploadUrlData.ok === true,
+          `HTTP ${uploadUrlRes.status} — ${JSON.stringify(uploadUrlData).slice(0, 500)}`);
+      } catch (err) {
+        logStep('slack_files_getUploadURLExternal', false, `Exception: ${err.message}`);
+        screenshotError = `files.getUploadURLExternal exception: ${err.message}`;
+        uploadUrlData = null;
+      }
 
-      if (!uploadUrlData.ok) {
+      if (uploadUrlData && !uploadUrlData.ok) {
         screenshotError = `files.getUploadURLExternal failed: ${uploadUrlData.error}`;
-      } else {
-        const putRes = await fetch(uploadUrlData.upload_url, { method: 'POST', body: binary });
-        if (!putRes.ok) {
+      } else if (uploadUrlData) {
+        let putRes;
+        try {
+          putRes = await fetch(uploadUrlData.upload_url, { method: 'POST', body: binary });
+          logStep('slack_upload_put', putRes.ok, `HTTP ${putRes.status}`);
+        } catch (err) {
+          logStep('slack_upload_put', false, `Exception: ${err.message}`);
+          screenshotError = `Upload PUT exception: ${err.message}`;
+          putRes = null;
+        }
+
+        if (putRes && !putRes.ok) {
           screenshotError = `Upload PUT failed: HTTP ${putRes.status}`;
-        } else {
-          const completeRes = await fetch('https://slack.com/api/files.completeUploadExternal', {
-            method: 'POST',
-            headers: {
-              Authorization: `Bearer ${env.SLACK_BOT_TOKEN}`,
-              'Content-Type': 'application/json; charset=utf-8',
-            },
-            body: JSON.stringify({
-              files: [{ id: uploadUrlData.file_id, title: filename }],
-              channel_id: SLACK_CHANNEL_ID,
-              initial_comment: lines,
-            }),
-          });
-          const completeData = await completeRes.json();
-          if (!completeData.ok) {
-            screenshotError = `files.completeUploadExternal failed: ${completeData.error}`;
-          } else {
-            posted = true;
+        } else if (putRes) {
+          try {
+            const completeRes = await fetch('https://slack.com/api/files.completeUploadExternal', {
+              method: 'POST',
+              headers: {
+                Authorization: `Bearer ${env.SLACK_BOT_TOKEN}`,
+                'Content-Type': 'application/json; charset=utf-8',
+              },
+              body: JSON.stringify({
+                files: [{ id: uploadUrlData.file_id, title: filename }],
+                channel_id: SLACK_CHANNEL_ID,
+                initial_comment: lines,
+              }),
+            });
+            const completeData = await completeRes.json();
+            logStep('slack_files_completeUploadExternal', completeData.ok === true,
+              `HTTP ${completeRes.status} — ${JSON.stringify(completeData).slice(0, 800)}`);
+
+            if (!completeData.ok) {
+              screenshotError = `files.completeUploadExternal failed: ${completeData.error}`;
+            } else {
+              posted = true;
+            }
+          } catch (err) {
+            logStep('slack_files_completeUploadExternal', false, `Exception: ${err.message}`);
+            screenshotError = `files.completeUploadExternal exception: ${err.message}`;
           }
         }
       }
     } catch (err) {
+      logStep('screenshot_flow_outer', false, `Exception: ${err.message}`);
       screenshotError = `Exception: ${err.message}`;
     }
+  } else {
+    logStep('screenshot_flow', true, 'no imageBase64 provided — skipping upload, plain text message only');
   }
 
   if (!posted) {
-    const msgRes = await fetch('https://slack.com/api/chat.postMessage', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${env.SLACK_BOT_TOKEN}`,
-        'Content-Type': 'application/json; charset=utf-8',
-      },
-      body: JSON.stringify({ channel: SLACK_CHANNEL_ID, text: lines }),
-    });
-    const msgData = await msgRes.json();
-    if (!msgData.ok) {
-      return cors(JSON.stringify({ error: `Slack chat.postMessage failed: ${msgData.error}` }), 502);
+    try {
+      const msgRes = await fetch('https://slack.com/api/chat.postMessage', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${env.SLACK_BOT_TOKEN}`,
+          'Content-Type': 'application/json; charset=utf-8',
+        },
+        body: JSON.stringify({ channel: SLACK_CHANNEL_ID, text: lines }),
+      });
+      const msgData = await msgRes.json();
+      logStep('slack_chat_postMessage_fallback', msgData.ok === true,
+        `HTTP ${msgRes.status} — ${JSON.stringify(msgData).slice(0, 500)}`);
+
+      if (!msgData.ok) {
+        return cors(JSON.stringify({ error: `Slack chat.postMessage failed: ${msgData.error}`, steps }), 502);
+      }
+    } catch (err) {
+      logStep('slack_chat_postMessage_fallback', false, `Exception: ${err.message}`);
+      return cors(JSON.stringify({ error: `Slack chat.postMessage exception: ${err.message}`, steps }), 502);
     }
   }
 
-  return cors(JSON.stringify({ ok: true, screenshotError }), 200);
+  return cors(JSON.stringify({ ok: true, screenshotError, steps, version: WORKER_VERSION }), 200);
 }
 
 function cors(body, status) {
@@ -242,7 +348,7 @@ function cors(body, status) {
     headers: {
       'Content-Type': 'application/json',
       'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'POST, OPTIONS',
+      'Access-Control-Allow-Methods': 'POST, OPTIONS, GET',
       'Access-Control-Allow-Headers': 'Content-Type',
     },
   });

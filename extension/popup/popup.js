@@ -754,6 +754,7 @@ function buildVerifySection(flat, guestData) {
     aiBtn.textContent = '🤖 AI Verify';
 
     if (!result?.ok) {
+      if (result?.steps) console.log('[BASS] /verify steps:', result.steps);
       const rawLine = result?.raw ? `<p class="verify-result-error">Raw AI response: ${escHtml(result.raw)}</p>` : '';
       resultsEl.innerHTML = `<p class="verify-result-error">Error: ${escHtml(result?.error || 'unknown')}</p>${rawLine}`;
       resultsEl.hidden = false;
@@ -863,6 +864,8 @@ function buildVerifySection(flat, guestData) {
 
     confirmBtn.disabled = false;
     confirmBtn.textContent = '✓ Confirm & Flag';
+
+    if (result?.steps) console.log('[BASS] /confirm-flag steps:', result.steps);
 
     if (result?.ok) {
       confirmStatus.textContent = result.screenshotError ? `✓ Flagged (screenshot: ${result.screenshotError})` : '✓ Flagged';
