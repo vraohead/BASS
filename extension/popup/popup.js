@@ -930,6 +930,15 @@ function buildCustomerSection(flat, guestData) {
       html += fieldRow('Email', pg.email);
     }
 
+    // Pax breakdown — right after Email, before the per-guest detail boxes
+    if (guestData.paxDetails?.length) {
+      const paxLabel = guestData.paxDetails
+        .filter(p => p.count > 0)
+        .map(p => `${p.count} ${p.count === 1 ? p.displayName : p.pluralDisplayName}`)
+        .join(', ');
+      if (paxLabel) html += fieldRow('Pax Breakdown', paxLabel);
+    }
+
     // All user-provided fields, for EVERY guest — not just the first
     const guests = guestData.guests || [];
     guests.forEach((g, i) => {
@@ -950,16 +959,6 @@ function buildCustomerSection(flat, guestData) {
         </div>`;
       }
     });
-
-    // Pax breakdown
-    if (guestData.paxDetails?.length) {
-      const paxLabel = guestData.paxDetails
-        .filter(p => p.count > 0)
-        .map(p => `${p.count} ${p.count === 1 ? p.displayName : p.pluralDisplayName}`)
-        .join(', ');
-      if (paxLabel) html += fieldRow('Pax Breakdown', paxLabel);
-    }
-
 
   } else {
     // Fallback: basic fields from the booking response
