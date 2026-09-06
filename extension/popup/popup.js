@@ -798,8 +798,8 @@ function buildVerifySection(flat, guestData) {
 // Instructions tab ─────────────────────────────────────────────────────────────
 function _instrContent(v) {
   if (!v) return null;
-  return v.importantInstructions || v.bookingInstructions || v.instructions
-    || v.manualFulfillmentInstructions || v.fulfillmentInstructions
+  return v.vendorTourImportantInstructions || v.importantInstructions || v.bookingInstructions
+    || v.instructions || v.manualFulfillmentInstructions || v.fulfillmentInstructions
     || v.vendorInstructions || v.additionalInstructions || v.remarks
     || v.notes || v.bookingNotes || null;
 }
