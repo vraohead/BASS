@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>BASS - Booking Assistant</title>
+  <title>Booking Assistant</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
@@ -15,14 +15,18 @@
   <header class="app-header">
     <div class="header-logo">
       <div class="logo-icon" aria-hidden="true">
-        <svg viewBox="0 0 128 128" width="20" height="20" focusable="false">
-          <path d="M102 28 L24 58 L56 72 L62 70 Z" fill="#ffffff"/>
-          <path d="M56 72 L62 102 L102 28 Z" fill="#ffffff" fill-opacity="0.6"/>
+        <svg viewBox="0 0 256 256" width="20" height="20" focusable="false">
+          <g transform="translate(128 128) rotate(-12) translate(-128 -122)">
+            <path d="M40 108 C 55 82, 100 70, 148 74 C 190 78, 218 92, 224 108 C 218 124, 190 138, 148 142 C 100 146, 55 134, 40 108 Z" fill="#ffffff"/>
+            <path d="M46 108 L12 82 L56 92 Z" fill="#ffffff"/>
+            <path d="M46 108 L12 134 L56 124 Z" fill="#ffffff"/>
+            <rect x="98" y="140" width="46" height="22" rx="9" fill="#ffffff"/>
+          </g>
         </svg>
       </div>
       <div>
-        <div class="header-title">BASS</div>
-        <div class="header-sub">Booking Assistant</div>
+        <div class="header-title">Booking Assistant</div>
+        <div class="header-sub">Box Office Tool</div>
       </div>
     </div>
     <div class="header-actions">
@@ -89,6 +93,7 @@
     <button class="tab-pill" data-tab="instructions">&#128204; Instructions</button>
     <button class="tab-pill" data-tab="customer-details">&#128100; Customer</button>
     <button class="tab-pill" data-tab="verify">&#10003; Verify</button>
+    <button class="tab-pill" data-tab="late-confirm">&#128681; Late Confirm</button>
 
   </nav>
 

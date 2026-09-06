@@ -170,7 +170,7 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
     // No BMS endpoint exists for this yet — posts to Slack via the Cloudflare
     // worker instead (chat.postMessage + screenshot upload). Swap back to a
     // direct BMS call once/if that endpoint is built.
-    const { bookingId, agentEmail, confirmed, skipped, imageBase64, mimeType, verifiedAt, workerUrl } = request;
+    const { bookingId, agentEmail, confirmed, skipped, retroactive, imageBase64, mimeType, verifiedAt, workerUrl } = request;
     (async () => {
       try {
         const controller = new AbortController();
@@ -179,7 +179,7 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
           method: 'POST',
           signal: controller.signal,
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ bookingId, agentEmail, confirmed, skipped, imageBase64, mimeType, verifiedAt }),
+          body: JSON.stringify({ bookingId, agentEmail, confirmed, skipped, retroactive, imageBase64, mimeType, verifiedAt }),
         });
         const data = await res.json().catch(() => ({}));
         if (res.ok && data.ok) {

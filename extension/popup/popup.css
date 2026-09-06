@@ -1,4 +1,4 @@
-/* ── BASS v10.0 — Premium Headout Brand Design ────────────────────────── */
+/* ── Booking Assistant v10.0 — Premium Headout Brand Design ─────────────── */
 /* Reset */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -106,7 +106,11 @@ body > * { position: relative; z-index: 1; }
   flex: 0 0 auto; min-height: 40px;
   position: relative; z-index: 20;
 }
-.header-logo { display: flex; align-items: center; gap: 8px; }
+.header-logo { display: flex; align-items: center; gap: 8px; min-width: 0; overflow: hidden; }
+.header-logo .header-title,
+.header-logo .header-sub {
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 .logo-icon {
   width: 30px; height: 30px;
   background: linear-gradient(135deg, var(--accent2), var(--accent3));
@@ -115,7 +119,7 @@ body > * { position: relative; z-index: 1; }
   box-shadow: 0 3px 12px rgba(124,47,240,0.35); color: #fff;
 }
 .logo-icon svg { width: 19px; height: 19px; display: block; }
-.header-title { font-size: 13px; font-weight: 800; color: var(--text); letter-spacing: 0.06em; }
+.header-title { font-size: 12px; font-weight: 800; color: var(--text); letter-spacing: 0.03em; }
 .header-sub { font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.12em; font-weight: 600; }
 .header-actions { display: flex; align-items: center; gap: 6px; }
 /* ── Theme switch (shadcn Switch style: pill track + sliding thumb) ────── */

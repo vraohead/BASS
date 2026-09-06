@@ -1,4 +1,4 @@
-// BASS Verify Worker — proxies screenshot AI verification and the
+// Booking Assistant Verify Worker — proxies screenshot AI verification and the
 // Confirm & Flag Slack notification, so the OpenAI key and Slack bot
 // token stay on Cloudflare, never in the extension.
 //
@@ -29,7 +29,7 @@
 
 // Bump this string whenever you paste a new version into the dashboard —
 // visiting GET /debug-env instantly confirms whether a deploy took effect.
-const WORKER_VERSION = '2026-09-06-02';
+const WORKER_VERSION = '2026-09-06-03';
 
 // Formats an ISO timestamp as a clean IST string, e.g. "6 Sep 2026, 10:44 PM IST".
 function formatIST(isoString) {
@@ -218,7 +218,7 @@ async function handleConfirmFlag(request, env) {
   }
 
   const {
-    bookingId, agentEmail, confirmed = [], skipped = [],
+    bookingId, agentEmail, confirmed = [], skipped = [], retroactive = false,
     imageBase64, mimeType = 'image/png', verifiedAt,
   } = body;
 
@@ -232,7 +232,9 @@ async function handleConfirmFlag(request, env) {
   logStep('check_slack_token', true, null);
 
   const lines = [
-    ':white_check_mark: *Booking Verification Confirmed*',
+    retroactive
+      ? ':rotating_light: *Booking Confirmed — Late (no prior verification run)*'
+      : ':white_check_mark: *Booking Verification Confirmed*',
     `*Booking ID:* ${bookingId || 'n/a'}`,
     `*Confirmed by:* ${agentEmail || 'unknown'}`,
     confirmed.length
@@ -241,6 +243,7 @@ async function handleConfirmFlag(request, env) {
     skipped.length
       ? `*Skipped (mismatch acknowledged):* ${skipped.map(c => `${c.label}: ${c.value}`).join('  |  ')}`
       : null,
+    retroactive ? '*Note:* Confirmed via Late Confirm — ticket was already booked, verification step was skipped at the time.' : null,
     verifiedAt ? `*At:* ${formatIST(verifiedAt)}` : null,
   ].filter(Boolean).join('\n');
 

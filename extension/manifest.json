@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "BASS - BMS Booking Assistant",
+  "name": "Booking Assistant",
   "version": "10.0.0",
   "description": "BMS/Box Office frontend — reads booking data directly from Box Office APIs using your existing session.",
   "permissions": ["sidePanel", "storage", "tabs", "activeTab", "scripting"],
@@ -16,6 +16,18 @@
     "default_path": "popup/popup.html"
   },
   "action": {
-    "default_title": "Open BASS"
+    "default_title": "Open Booking Assistant",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
   }
 }

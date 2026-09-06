@@ -1,4 +1,4 @@
-# API Inventory — BASS Extension
+# API Inventory — Booking Assistant Extension
 
 > **How to update this file**: open Box Office in Chrome, open DevTools → Network → filter XHR/Fetch,
 > perform each action, capture the request details below. Do not guess endpoints.

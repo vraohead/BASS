@@ -1,4 +1,4 @@
-// popup.js — BASS v10.0  (ES module, type="module")
+// popup.js — Booking Assistant v10.0  (ES module, type="module")
 // Communicates with background/service-worker.js via chrome.runtime.sendMessage.
 // Handlers: TEST_AUTH → status string, FETCH_BOOKING → { ok, data } | { ok:false, ... }
 
@@ -36,7 +36,7 @@ function humanise(key) {
 
 
 // ── Agent identity (for Confirm & Flag) ────────────────────────────────────────
-// BASS has no way to read the logged-in Box Office user directly (it only ever
+// Booking Assistant has no way to read the logged-in Box Office user directly (it only ever
 // proxies session cookies for read requests) — so ask once, then remember it.
 async function getAgentEmail() {
   try {
@@ -146,6 +146,36 @@ $('search-btn').addEventListener('click', doSearch);
 $('booking-id').addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
 $('clear-btn').addEventListener('click', clearResults);
 
+// ── Persist last-viewed booking across close/reopen ────────────────────────────
+// Closing the side panel to look at the portal shouldn't lose your place.
+// A sliding 1-hour window: every successful fetch refreshes the timestamp, so
+// active use never expires it — only 1 hour of no activity clears it.
+const RESTORE_TTL_MS = 60 * 60 * 1000;
+
+async function saveLastBooking(id) {
+  try { await chrome.storage.local.set({ lastBookingId: id, lastUsedAt: Date.now() }); } catch (_) {}
+}
+
+async function clearLastBooking() {
+  try { await chrome.storage.local.remove(['lastBookingId', 'lastUsedAt']); } catch (_) {}
+}
+
+async function restoreLastBooking() {
+  try {
+    const { lastBookingId, lastUsedAt } = await chrome.storage.local.get(['lastBookingId', 'lastUsedAt']);
+    if (!lastBookingId || !lastUsedAt) return false;
+    if (Date.now() - lastUsedAt > RESTORE_TTL_MS) {
+      await clearLastBooking();
+      return false;
+    }
+    $('booking-id').value = lastBookingId;
+    await doSearch();
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
 function clearResults() {
   $('booking-id').value = '';
   $('error-message').hidden = true;
@@ -154,6 +184,7 @@ function clearResults() {
   $('ticket-details').innerHTML =
     '<div class="welcome-placeholder"><p>Search for a booking above to get started.</p></div>';
   $('booking-id').focus();
+  clearLastBooking();
 }
 
 async function doSearch() {
@@ -189,6 +220,7 @@ async function doSearch() {
   }
 
   renderBooking(id, result.data, result.guestData, result.showAutomationModal, result.vendorTourData);
+  saveLastBooking(id);
 }
 
 // ── Render booking ────────────────────────────────────────────────────────────
@@ -227,6 +259,7 @@ function renderBooking(id, data, guestData, showAutomationModal, vendorTourData)
   details.appendChild(buildInstructionsSection(flat, vendors, vendorTourData));
   details.appendChild(buildCustomerSection(flat, guestData));
   details.appendChild(buildVerifySection(flat, guestData));
+  details.appendChild(buildLateConfirmSection(flat));
 
   // Wire up tab pills (re-added each render)
   document.querySelectorAll('#tab-nav .tab-pill').forEach(pill => {
@@ -702,7 +735,7 @@ function buildVerifySection(flat, guestData) {
     if (!permGranted) {
       btn.disabled = false;
       btn.textContent = '📸 Capture Current Tab';
-      errEl.innerHTML = `<p class="verify-result-error">Permission denied. Go to chrome://extensions → BASS → Details → Site access → On all sites.</p>`;
+      errEl.innerHTML = `<p class="verify-result-error">Permission denied. Go to chrome://extensions → Booking Assistant → Details → Site access → On all sites.</p>`;
       errEl.hidden = false;
       return;
     }
@@ -754,7 +787,7 @@ function buildVerifySection(flat, guestData) {
     aiBtn.textContent = '🤖 AI Verify';
 
     if (!result?.ok) {
-      if (result?.steps) console.log('[BASS] /verify steps:', result.steps);
+      if (result?.steps) console.log('[BA] /verify steps:', result.steps);
       const rawLine = result?.raw ? `<p class="verify-result-error">Raw AI response: ${escHtml(result.raw)}</p>` : '';
       resultsEl.innerHTML = `<p class="verify-result-error">Error: ${escHtml(result?.error || 'unknown')}</p>${rawLine}`;
       resultsEl.hidden = false;
@@ -839,7 +872,7 @@ function buildVerifySection(flat, guestData) {
     // not a fresh one taken at confirm-time.
     const imgEl = sec.querySelector('.verify-img');
     let imageBase64 = null, mimeType = null;
-    console.log('[BASS] confirm screenshot debug:', {
+    console.log('[BA] confirm screenshot debug:', {
       imgElFound: !!imgEl,
       srcPrefix: imgEl?.src?.slice(0, 30) || null,
       srcLength: imgEl?.src?.length || 0,
@@ -865,7 +898,7 @@ function buildVerifySection(flat, guestData) {
     confirmBtn.disabled = false;
     confirmBtn.textContent = '✓ Confirm & Flag';
 
-    if (result?.steps) console.log('[BASS] /confirm-flag steps:', result.steps);
+    if (result?.steps) console.log('[BA] /confirm-flag steps:', result.steps);
 
     if (result?.ok) {
       confirmStatus.textContent = result.screenshotError ? `✓ Flagged (screenshot: ${result.screenshotError})` : '✓ Flagged';
@@ -873,6 +906,168 @@ function buildVerifySection(flat, guestData) {
     } else {
       confirmStatus.textContent = result?.error || 'Failed';
       confirmStatus.className = 'verify-confirm-status status-err';
+    }
+  });
+
+  return sec;
+}
+
+// Late Confirm tab ──────────────────────────────────────────────────────────────
+// For bookings that were already fulfilled without ever running the Verify
+// flow (e.g. ticketed before this extension was used, or the step was simply
+// missed) — lets an agent retroactively attach a screenshot and send the same
+// Confirm & Flag Slack notification, unblocking whatever future Box Office
+// workflow depends on that flag, without needing to re-run AI Verify checks.
+function buildLateConfirmSection(flat) {
+  const bookingId = String(flat.bookingId || '');
+
+  const html = `
+    <p class="instruction-empty" style="margin-bottom:10px;">
+      Already booked and ticketed, but the Verify step got skipped? Attach a
+      screenshot if you have one (optional), then confirm — this still sends
+      the same Slack notification as Confirm &amp; Flag on the Verify tab.
+    </p>
+
+    <button class="btn btn-primary late-confirm-capture-btn" style="width:100%;margin-bottom:8px">📸 Capture Current Tab</button>
+    <div class="drop-zone late-confirm-drop-zone">
+      <input type="file" class="late-confirm-file-input" accept="image/*">
+      <div class="drop-zone-inner">
+        <div class="drop-zone-icon">🖼️</div>
+        <p class="drop-zone-text">Or drop / upload / paste (Ctrl+V) — optional</p>
+      </div>
+    </div>
+    <div class="verify-img-wrap late-confirm-img-wrap" hidden>
+      <img class="late-confirm-img" alt="Ticket screenshot">
+      <button class="verify-clear-btn late-confirm-clear-btn">✕ Clear</button>
+    </div>
+
+    <div class="verify-confirm-row late-confirm-row" style="margin-top:14px;">
+      <button class="btn btn-primary late-confirm-btn">✓ Confirm &amp; Flag</button>
+      <span class="verify-confirm-status late-confirm-status"></span>
+    </div>
+  `;
+
+  const sec = buildSection('late-confirm', 'Late Confirm', '🚩', html);
+
+  const imgEl = sec.querySelector('.late-confirm-img');
+  const setImage = dataUrl => {
+    imgEl.src = dataUrl;
+    sec.querySelector('.late-confirm-img-wrap').hidden = false;
+  };
+
+  // Capture current tab
+  sec.querySelector('.late-confirm-capture-btn').addEventListener('click', async () => {
+    const btn = sec.querySelector('.late-confirm-capture-btn');
+    const statusEl = sec.querySelector('.late-confirm-status');
+    btn.disabled = true;
+    btn.textContent = '⏳ Capturing…';
+
+    let permGranted = true;
+    try { permGranted = await chrome.permissions.request({ origins: ['<all_urls>'] }); } catch (_) {}
+
+    btn.disabled = false;
+    btn.textContent = '📸 Capture Current Tab';
+
+    if (!permGranted) {
+      statusEl.textContent = 'Permission denied. Go to chrome://extensions → Booking Assistant → Details → Site access → On all sites.';
+      statusEl.className = 'verify-confirm-status late-confirm-status status-err';
+      return;
+    }
+
+    const result = await sendMessage({ action: 'CAPTURE_SCREENSHOT' });
+    if (result?.ok) {
+      setImage(result.dataUrl);
+    } else {
+      statusEl.textContent = `Screenshot failed: ${result?.error || 'unknown'}`;
+      statusEl.className = 'verify-confirm-status late-confirm-status status-err';
+    }
+  });
+
+  // Upload / drop / paste
+  const dropZone = sec.querySelector('.late-confirm-drop-zone');
+  const fileInput = sec.querySelector('.late-confirm-file-input');
+  dropZone.addEventListener('click', () => fileInput.click());
+  dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+  dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+  dropZone.addEventListener('drop', e => {
+    e.preventDefault();
+    dropZone.classList.remove('drag-over');
+    const file = e.dataTransfer.files[0];
+    if (file?.type.startsWith('image/')) {
+      const reader = new FileReader();
+      reader.onload = ev => setImage(ev.target.result);
+      reader.readAsDataURL(file);
+    }
+  });
+  fileInput.addEventListener('change', e => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = ev => setImage(ev.target.result);
+    reader.readAsDataURL(file);
+  });
+  document.addEventListener('paste', e => {
+    if (sec.classList.contains('tab-section-hidden')) return;
+    const items = e.clipboardData?.items || [];
+    for (const item of items) {
+      if (item.type.startsWith('image/')) {
+        const reader = new FileReader();
+        reader.onload = ev => setImage(ev.target.result);
+        reader.readAsDataURL(item.getAsFile());
+        break;
+      }
+    }
+  });
+
+  // Clear image
+  sec.querySelector('.late-confirm-clear-btn').addEventListener('click', () => {
+    sec.querySelector('.late-confirm-img-wrap').hidden = true;
+    imgEl.src = '';
+    fileInput.value = '';
+  });
+
+  // Confirm & Flag (retroactive — no verification checks to gate on)
+  const confirmBtn = sec.querySelector('.late-confirm-btn');
+  const confirmStatus = sec.querySelector('.late-confirm-status');
+
+  confirmBtn.addEventListener('click', async () => {
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = '⏳ Sending…';
+    confirmStatus.textContent = '';
+
+    const agentEmail = await getAgentEmail();
+
+    let imageBase64 = null, mimeType = null;
+    if (imgEl.src?.startsWith('data:')) {
+      const [header, b64] = imgEl.src.split(',');
+      mimeType = header.match(/:(.*?);/)?.[1] || 'image/png';
+      imageBase64 = b64;
+    }
+
+    const result = await sendMessage({
+      action: 'SEND_VERIFY_FLAG',
+      bookingId,
+      agentEmail,
+      confirmed: [],
+      skipped: [],
+      retroactive: true,
+      imageBase64,
+      mimeType,
+      verifiedAt: new Date().toISOString(),
+      workerUrl: DEFAULT_WORKER_URL,
+    });
+
+    confirmBtn.disabled = false;
+    confirmBtn.textContent = '✓ Confirm & Flag';
+
+    if (result?.steps) console.log('[BA] /confirm-flag (late) steps:', result.steps);
+
+    if (result?.ok) {
+      confirmStatus.textContent = result.screenshotError ? `✓ Flagged (screenshot: ${result.screenshotError})` : '✓ Flagged';
+      confirmStatus.className = result.screenshotError ? 'verify-confirm-status late-confirm-status status-warn' : 'verify-confirm-status late-confirm-status status-ok';
+    } else {
+      confirmStatus.textContent = result?.error || 'Failed';
+      confirmStatus.className = 'verify-confirm-status late-confirm-status status-err';
     }
   });
 
@@ -1078,5 +1273,8 @@ $('ticket-details').innerHTML =
 (async () => {
   await initTheme();
   const status = await checkAuth();
-  if (status === 'AUTHENTICATED') await autoDetect();
+  if (status === 'AUTHENTICATED') {
+    const restored = await restoreLastBooking();
+    if (!restored) await autoDetect();
+  }
 })();
