@@ -318,12 +318,37 @@ function buildSection(sectionId, title, iconEmoji, bodyHtml) {
   return sec;
 }
 
-function fieldRow(label, value) {
+const COPY_ICON = `<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
+const CHECK_ICON = `<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>`;
+
+function fieldRow(label, value, copyable = false) {
   if (value == null || value === '') return '';
+  const valStr = String(value);
+  const copyBtn = copyable
+    ? `<button type="button" class="copy-btn" data-copy-value="${escHtml(valStr)}" title="Copy" aria-label="Copy ${escHtml(label)}">${COPY_ICON}</button>`
+    : '';
   return `<div class="field-row">
     <span class="field-label">${escHtml(label)}</span>
-    <span class="field-value">${escHtml(String(value))}</span>
+    <span class="field-value-group">
+      <span class="field-value">${escHtml(valStr)}</span>
+      ${copyBtn}
+    </span>
   </div>`;
+}
+
+function wireCopyButtons(container) {
+  container.querySelectorAll('.copy-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const val = btn.dataset.copyValue || '';
+      try {
+        await navigator.clipboard.writeText(val);
+        const original = btn.innerHTML;
+        btn.innerHTML = CHECK_ICON;
+        btn.classList.add('copied');
+        setTimeout(() => { btn.innerHTML = original; btn.classList.remove('copied'); }, 1200);
+      } catch (_) {}
+    });
+  });
 }
 
 // ── Date / time formatters ────────────────────────────────────────────────────
@@ -926,8 +951,8 @@ function buildCustomerSection(flat, guestData) {
     const pg = guestData.primaryGuest;
     if (pg) {
       const fullName = [pg.firstName, pg.lastName].filter(Boolean).join(' ');
-      html += fieldRow('Name', fullName);
-      html += fieldRow('Email', pg.email);
+      html += fieldRow('Name', fullName, true);
+      html += fieldRow('Email', pg.email, true);
     }
 
     // Pax breakdown — right after Email, before the per-guest detail boxes
@@ -936,7 +961,7 @@ function buildCustomerSection(flat, guestData) {
         .filter(p => p.count > 0)
         .map(p => `${p.count} ${p.count === 1 ? p.displayName : p.pluralDisplayName}`)
         .join(', ');
-      if (paxLabel) html += fieldRow('Pax Breakdown', paxLabel);
+      if (paxLabel) html += fieldRow('Pax Breakdown', paxLabel, true);
     }
 
     // All user-provided fields, for EVERY guest — not just the first
@@ -947,7 +972,7 @@ function buildCustomerSection(flat, guestData) {
         g.bookingUserFields.forEach(f => {
           const type = f.tourUserFieldType?.name;
           if (f.value) {
-            guestHtml += fieldRow(f.name || humanise(type || ''), f.value);
+            guestHtml += fieldRow(f.name || humanise(type || ''), f.value, true);
           }
         });
       }
@@ -962,12 +987,14 @@ function buildCustomerSection(flat, guestData) {
 
   } else {
     // Fallback: basic fields from the booking response
-    html += fieldRow('Guest Name',  flat.guestName);
-    html += fieldRow('Guest Email', flat.guestEmail);
+    html += fieldRow('Guest Name',  flat.guestName, true);
+    html += fieldRow('Guest Email', flat.guestEmail, true);
   }
 
   if (!html) html = '<p class="instruction-empty">No customer details available.</p>';
-  return buildSection('customer-details', 'Customer Details', '👤', html);
+  const sec = buildSection('customer-details', 'Customer Details', '👤', html);
+  wireCopyButtons(sec);
+  return sec;
 }
 
 
