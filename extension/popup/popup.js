@@ -821,29 +821,19 @@ function buildVerifySection(flat, guestData) {
 
     const agentEmail = await getAgentEmail();
 
-    // Always capture a fresh screenshot of the active tab at confirm-time,
-    // regardless of which verify mode was used (Capture Response never has
-    // an image at all). Falls back to any already-loaded image if this fails.
+    // Use whichever screenshot was already captured/uploaded for AI Verify —
+    // not a fresh one taken at confirm-time.
+    const imgEl = sec.querySelector('.verify-img');
     let imageBase64 = null, mimeType = null;
-    try {
-      const permGranted = await chrome.permissions.request({ origins: ['<all_urls>'] });
-      if (permGranted) {
-        const capture = await sendMessage({ action: 'CAPTURE_SCREENSHOT' });
-        if (capture?.ok && capture.dataUrl) {
-          const [header, b64] = capture.dataUrl.split(',');
-          mimeType = header.match(/:(.*?);/)?.[1] || 'image/png';
-          imageBase64 = b64;
-        }
-      }
-    } catch (_) {}
-
-    if (!imageBase64) {
-      const imgEl = sec.querySelector('.verify-img');
-      if (imgEl?.src?.startsWith('data:')) {
-        const [header, b64] = imgEl.src.split(',');
-        mimeType = header.match(/:(.*?);/)?.[1] || 'image/png';
-        imageBase64 = b64;
-      }
+    console.log('[BASS] confirm screenshot debug:', {
+      imgElFound: !!imgEl,
+      srcPrefix: imgEl?.src?.slice(0, 30) || null,
+      srcLength: imgEl?.src?.length || 0,
+    });
+    if (imgEl?.src?.startsWith('data:')) {
+      const [header, b64] = imgEl.src.split(',');
+      mimeType = header.match(/:(.*?);/)?.[1] || 'image/png';
+      imageBase64 = b64;
     }
 
     const result = await sendMessage({
