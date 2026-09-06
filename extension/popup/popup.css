@@ -385,6 +385,19 @@ body > * { position: relative; z-index: 1; }
 }
 .field-value.na { color: var(--muted); font-style: italic; font-weight: 400; font-size: 11.5px; }
 
+/* ── Guest Groups (Customer tab: one block per guest) ───────────────────── */
+.guest-group {
+  margin-top: 10px; padding: 8px 10px;
+  border: 1px solid var(--border); border-radius: 8px;
+}
+.guest-group:first-child { margin-top: 0; }
+.guest-group-label {
+  font-size: 10px; font-weight: 800; color: var(--accent);
+  text-transform: uppercase; letter-spacing: 0.06em;
+  padding-bottom: 4px; margin-bottom: 4px; border-bottom: 1px solid var(--border);
+}
+.guest-group .field-row:first-of-type { padding-top: 0; }
+
 /* ── Guest Cards ─────────────────────────────────────────────────────── */
 .guest-card {
   background: var(--surface2); border: 1px solid var(--border);

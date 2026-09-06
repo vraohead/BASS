@@ -930,16 +930,26 @@ function buildCustomerSection(flat, guestData) {
       html += fieldRow('Email', pg.email);
     }
 
-    // All user-provided fields — show everything as returned by the API
-    const mainGuest = guestData.guests?.[0];
-    if (mainGuest?.bookingUserFields?.length) {
-      mainGuest.bookingUserFields.forEach(f => {
-        const type = f.tourUserFieldType?.name;
-        if (f.value) {
-          html += fieldRow(f.name || humanise(type || ''), f.value);
-        }
-      });
-    }
+    // All user-provided fields, for EVERY guest — not just the first
+    const guests = guestData.guests || [];
+    guests.forEach((g, i) => {
+      let guestHtml = '';
+      if (g.bookingUserFields?.length) {
+        g.bookingUserFields.forEach(f => {
+          const type = f.tourUserFieldType?.name;
+          if (f.value) {
+            guestHtml += fieldRow(f.name || humanise(type || ''), f.value);
+          }
+        });
+      }
+      if (guestHtml) {
+        const label = i === 0 ? 'Primary Guest' : `Additional Guest ${i}`;
+        html += `<div class="guest-group">
+          <div class="guest-group-label">${escHtml(label)}</div>
+          ${guestHtml}
+        </div>`;
+      }
+    });
 
     // Pax breakdown
     if (guestData.paxDetails?.length) {
