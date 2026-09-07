@@ -111,14 +111,6 @@ body > * { position: relative; z-index: 1; }
 .header-logo .header-sub {
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.logo-icon {
-  width: 30px; height: 30px;
-  background: linear-gradient(135deg, var(--accent2), var(--accent3));
-  border-radius: 9px; display: flex; align-items: center; justify-content: center;
-  flex-shrink: 0;
-  box-shadow: 0 3px 12px rgba(124,47,240,0.35); color: #fff;
-}
-.logo-icon svg { width: 19px; height: 19px; display: block; }
 .header-title { font-size: 12px; font-weight: 800; color: var(--text); letter-spacing: 0.03em; }
 .header-sub { font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.12em; font-weight: 600; }
 .header-actions { display: flex; align-items: center; gap: 6px; }
