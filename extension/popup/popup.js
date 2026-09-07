@@ -641,12 +641,12 @@ function wireSkipBoxes(container, confirmRow) {
   const update = () => {
     const skipped = [...container.querySelectorAll('.verify-result-row.nomatch.skipped')];
     if (confirmRow) {
-      // Only reveal Confirm & Flag once EVERY mismatched field has been
-      // explicitly skipped — partial acknowledgement isn't enough.
-      const allSkipped = totalMismatches > 0 && skipped.length === totalMismatches;
+      // Every mismatch must be explicitly skipped before confirming — if
+      // there were no mismatches at all, that's trivially already true.
+      const allSkipped = skipped.length === totalMismatches;
       confirmRow.hidden = !allSkipped;
       const lbl = confirmRow.querySelector('.verify-confirm-count');
-      if (lbl) lbl.textContent = `${skipped.length}/${totalMismatches} skipped`;
+      if (lbl) lbl.textContent = totalMismatches ? `${skipped.length}/${totalMismatches} skipped` : 'All fields matched';
     }
   };
   container.querySelectorAll('.vr-skip-chk').forEach(chk => {
@@ -655,6 +655,8 @@ function wireSkipBoxes(container, confirmRow) {
       update();
     });
   });
+  update(); // compute initial state instead of leaving confirmRow stuck hidden
+  return { totalMismatches };
 }
 
 function _setVerifyImage(sec, dataUrl) {
@@ -859,7 +861,10 @@ function buildVerifySection(flat, guestData) {
       resultsEl.innerHTML = '<p class="verify-result-error">No results returned from AI.</p>';
     } else {
       resultsEl.innerHTML = checks.map((c, i) => renderVerifyRow(c, i)).join('');
-      wireSkipBoxes(resultsEl, confirmRow);
+      const { totalMismatches } = wireSkipBoxes(resultsEl, confirmRow);
+      // Perfect match, nothing to skip — confirm automatically instead of
+      // waiting on a click that has nothing left to gate.
+      if (totalMismatches === 0) confirmBtn.click();
     }
     resultsEl.hidden = false;
   });
@@ -892,7 +897,8 @@ function buildVerifySection(flat, guestData) {
       resultsEl.innerHTML = '<p class="verify-result-error">No booking values to match against.</p>';
     } else {
       resultsEl.innerHTML = checks.map((c, i) => renderVerifyRow(c, i)).join('');
-      wireSkipBoxes(resultsEl, confirmRow);
+      const { totalMismatches } = wireSkipBoxes(resultsEl, confirmRow);
+      if (totalMismatches === 0) confirmBtn.click();
     }
     resultsEl.hidden = false;
   });
