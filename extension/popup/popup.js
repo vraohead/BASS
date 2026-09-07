@@ -34,6 +34,24 @@ function humanise(key) {
   return key.replace(/([A-Z])/g, ' $1').replace(/^./, s => s.toUpperCase()).trim();
 }
 
+// Maps a raw /verify error string to a plain-language message plus a concrete
+// next step, so a failure never leaves the agent just staring at JSON.
+function describeVerifyError(errMsg) {
+  if (!errMsg) {
+    return { message: 'AI Verify failed for an unknown reason.', hint: 'Click Retry — if it keeps failing, use Capture Response instead.' };
+  }
+  if (/parse|unexpected ai response/i.test(errMsg)) {
+    return { message: 'The AI sent back a response we couldn\'t read.', hint: 'This is usually a one-off — click Retry.' };
+  }
+  if (/misconfigured/i.test(errMsg)) {
+    return { message: 'AI Verify isn\'t set up correctly on the server.', hint: 'Let whoever manages Booking Assistant know — this won\'t fix itself with a retry.' };
+  }
+  if (/openai (request failed|error)/i.test(errMsg)) {
+    return { message: 'Could not reach the AI service.', hint: 'Check your connection and click Retry.' };
+  }
+  return { message: errMsg, hint: 'Click Retry, or use Capture Response as a fallback.' };
+}
+
 
 // ── Agent identity (for Confirm & Flag) ────────────────────────────────────────
 // Booking Assistant has no way to read the logged-in Box Office user directly (it only ever
@@ -788,9 +806,18 @@ function buildVerifySection(flat, guestData) {
 
     if (!result?.ok) {
       if (result?.steps) console.log('[BA] /verify steps:', result.steps);
-      const rawLine = result?.raw ? `<p class="verify-result-error">Raw AI response: ${escHtml(result.raw)}</p>` : '';
-      resultsEl.innerHTML = `<p class="verify-result-error">Error: ${escHtml(result?.error || 'unknown')}</p>${rawLine}`;
+      const { message, hint } = describeVerifyError(result?.error);
+      const rawDetails = result?.raw
+        ? `<details class="verify-raw-details"><summary>Show raw AI response</summary><pre class="verify-raw-pre">${escHtml(result.raw)}</pre></details>`
+        : '';
+      resultsEl.innerHTML = `
+        <p class="verify-result-error">⚠️ ${escHtml(message)}</p>
+        <p class="verify-result-hint">${escHtml(hint)}</p>
+        <button type="button" class="btn btn-secondary verify-retry-btn">&#8635; Retry AI Verify</button>
+        ${rawDetails}
+      `;
       resultsEl.hidden = false;
+      resultsEl.querySelector('.verify-retry-btn')?.addEventListener('click', () => aiBtn.click());
       return;
     }
 

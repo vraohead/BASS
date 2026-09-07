@@ -29,7 +29,7 @@
 
 // Bump this string whenever you paste a new version into the dashboard —
 // visiting GET /debug-env instantly confirms whether a deploy took effect.
-const WORKER_VERSION = '2026-09-07-01';
+const WORKER_VERSION = '2026-09-07-02';
 
 // Formats an ISO timestamp as a clean IST string, e.g. "6 Sep 2026, 10:44 PM IST".
 function formatIST(isoString) {
@@ -145,6 +145,7 @@ Rules:
       body: JSON.stringify({
         model: 'gpt-4o',
         max_tokens: 300,
+        response_format: { type: 'json_object' },
         messages: [
           {
             role: 'user',
@@ -178,13 +179,17 @@ Rules:
   const content = oaiData.choices?.[0]?.message?.content?.trim() || '';
   logStep('extract_ai_content', content.length > 0, `length=${content.length}`);
 
+  // The model is asked not to, but sometimes wraps its JSON in a ```json fence
+  // anyway — strip that before attempting to parse.
+  const cleaned = content.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+
   let result;
   try {
-    result = JSON.parse(content);
+    result = JSON.parse(cleaned);
     logStep('parse_ai_json_direct', true, null);
   } catch {
     logStep('parse_ai_json_direct', false, 'not directly parseable, trying regex extraction');
-    const m = content.match(/\{[\s\S]*\}/);
+    const m = cleaned.match(/\{[\s\S]*\}|\[[\s\S]*\]/);
     if (m) {
       try {
         result = JSON.parse(m[0]);
@@ -194,10 +199,14 @@ Rules:
         return cors(JSON.stringify({ error: 'Could not parse AI response', raw: content, steps }), 502);
       }
     } else {
-      logStep('parse_ai_json_regex', false, 'no {...} found in response');
+      logStep('parse_ai_json_regex', false, 'no {...} or [...] found in response');
       return cors(JSON.stringify({ error: 'Unexpected AI response format', raw: content, steps }), 502);
     }
   }
+
+  // The model occasionally returns a bare array of checks instead of the
+  // requested {"checks": [...]} wrapper — normalize either shape.
+  if (Array.isArray(result)) result = { checks: result };
 
   return cors(JSON.stringify({ ...result, steps }), 200);
 }

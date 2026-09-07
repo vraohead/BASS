@@ -188,6 +188,8 @@ body > * { position: relative; z-index: 1; }
 .btn-primary:hover:not(:disabled) { box-shadow: 0 4px 16px rgba(124,47,240,0.4); }
 .btn-danger { background: transparent; color: var(--red); border: 1px solid var(--border); }
 .btn-danger:hover { background: var(--error-bg); border-color: var(--red); }
+.btn-secondary { background: var(--surface2); color: var(--text); border: 1px solid var(--border); }
+.btn-secondary:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
 
 /* ── Loading Spinner ─────────────────────────────────────────────────── */
 .spinner-wrap {
@@ -642,7 +644,16 @@ details.instr-block:not([open]) .instr-block__header { border-bottom: none; }
 .vr-status { font-size: 10px; font-weight: 700; flex-shrink: 0; }
 .match .vr-status { color: var(--green); }
 .nomatch .vr-status { color: var(--red); }
-.verify-result-error { font-size: 12px; color: var(--red); padding: 8px 0; }
+.verify-result-error { font-size: 12px; color: var(--red); padding: 8px 0 2px; font-weight: 600; }
+.verify-result-hint { font-size: 11.5px; color: var(--muted); padding: 0 0 10px; }
+.verify-retry-btn { width: 100%; margin-bottom: 8px; }
+.verify-raw-details { font-size: 11px; color: var(--muted); margin-top: 4px; }
+.verify-raw-details summary { cursor: pointer; user-select: none; }
+.verify-raw-pre {
+  white-space: pre-wrap; word-break: break-word; font-family: var(--font-mono);
+  font-size: 10.5px; background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 7px; padding: 8px; margin-top: 6px; max-height: 140px; overflow-y: auto;
+}
 .vr-skip-label { display: flex; align-items: center; gap: 5px; font-size: 10px;
   color: var(--label); margin-left: auto; cursor: pointer; white-space: nowrap; }
 
