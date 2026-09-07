@@ -19,15 +19,17 @@ async function bmsApiFetch(url) {
       headers: { 'x-platform': 'lego' },
     });
     clearTimeout(timer);
-    let data = null, error = null;
+    let data = null, error = null, parseFailed = false;
     try {
       data = await res.json();
       if (!res.ok) {
         error = data?.error || data?.message || data?.errorMessage
           || data?.errors?.[0]?.message || null;
       }
-    } catch (_) {}
-    return { ok: res.ok, status: res.status, data, error };
+    } catch (_) {
+      parseFailed = true;
+    }
+    return { ok: res.ok, status: res.status, data, error, parseFailed, redirected: res.redirected };
   } catch (err) {
     return {
       ok: false, status: 0, data: null,
@@ -43,6 +45,11 @@ async function bmsApiCall(url) {
     error: result.error || 'Not authenticated — log into Box Office.' };
   if (result.status === 403) return { ...result, type: 'SESSION_EXPIRED',
     error: result.error || 'Session expired — log into Box Office again.' };
+  // A logged-out session often gets redirected to the login page instead of
+  // an API 401/403 — that comes back as an HTTP 200 whose body isn't valid
+  // JSON. Treat that as logged-out rather than a real successful response.
+  if (result.ok && result.parseFailed) return { ...result, ok: false, type: 'NOT_AUTHENTICATED',
+    error: 'Not authenticated — log into Box Office.' };
   return result;
 }
 

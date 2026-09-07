@@ -29,7 +29,7 @@
 
 // Bump this string whenever you paste a new version into the dashboard —
 // visiting GET /debug-env instantly confirms whether a deploy took effect.
-const WORKER_VERSION = '2026-09-06-03';
+const WORKER_VERSION = '2026-09-07-01';
 
 // Formats an ISO timestamp as a clean IST string, e.g. "6 Sep 2026, 10:44 PM IST".
 function formatIST(isoString) {
@@ -154,7 +154,7 @@ Rules:
                 type: 'image_url',
                 image_url: {
                   url: `data:${mimeType};base64,${imageBase64}`,
-                  detail: 'low',
+                  detail: 'high',
                 },
               },
             ],
