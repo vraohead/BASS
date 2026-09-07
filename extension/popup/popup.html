@@ -11,86 +11,89 @@
 </head>
 <body>
 
-  <!-- Header -->
-  <header class="app-header">
-    <div class="header-logo">
-      <div>
-        <div class="header-title">Booking Assistant</div>
-        <div class="header-sub">Box Office Tool</div>
+  <!-- Sticky top chrome: stays pinned while ticket-details/footer scroll beneath it -->
+  <div class="app-chrome">
+    <!-- Header -->
+    <header class="app-header">
+      <div class="header-logo">
+        <div>
+          <div class="header-title">Booking Assistant</div>
+          <div class="header-sub">Box Office Tool</div>
+        </div>
+      </div>
+      <div class="header-actions">
+        <span id="auth-status" class="auth-pill auth-pill--checking">checking…</span>
+        <button id="theme-toggle" class="theme-switch" role="switch" aria-checked="false" title="Toggle light/dark mode">
+          <span class="theme-switch-thumb">&#9728;&#65039;</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- Search Bar -->
+    <div class="search-bar">
+      <input type="text" id="booking-id" placeholder="Booking ID&hellip;" inputmode="numeric" autocomplete="off" spellcheck="false" disabled />
+      <div class="btn-row">
+        <button id="search-btn" class="btn btn-primary" disabled>&#10227; Fetch</button>
+        <button id="clear-btn" class="btn btn-danger">&#10005; Clear</button>
       </div>
     </div>
-    <div class="header-actions">
-      <span id="auth-status" class="auth-pill auth-pill--checking">checking…</span>
-      <button id="theme-toggle" class="theme-switch" role="switch" aria-checked="false" title="Toggle light/dark mode">
-        <span class="theme-switch-thumb">&#9728;&#65039;</span>
-      </button>
+
+    <!-- Automation modal warning -->
+    <div id="automation-modal-banner" class="automation-modal-banner" hidden></div>
+
+    <!-- Auth warning banner -->
+    <div id="auth-warning" class="bms-warning" hidden>
+      <span id="auth-warning-text"></span>
+      <button id="recheck-btn" class="recheck-inline-btn">Re-check</button>
     </div>
-  </header>
 
-  <!-- Search Bar -->
-  <div class="search-bar">
-    <input type="text" id="booking-id" placeholder="Booking ID&hellip;" inputmode="numeric" autocomplete="off" spellcheck="false" disabled />
-    <div class="btn-row">
-      <button id="search-btn" class="btn btn-primary" disabled>&#10227; Fetch</button>
-      <button id="clear-btn" class="btn btn-danger">&#10005; Clear</button>
+    <!-- Loading -->
+    <div id="loading-spinner" class="spinner-wrap hidden">
+      <div class="spinner"></div>
+      <p class="spinner-label">Fetching ticket&hellip;</p>
     </div>
-  </div>
 
-  <!-- Automation modal warning -->
-  <div id="automation-modal-banner" class="automation-modal-banner" hidden></div>
+    <!-- Error -->
+    <div id="error-message" class="error-box hidden"></div>
 
-  <!-- Auth warning banner -->
-  <div id="auth-warning" class="bms-warning" hidden>
-    <span id="auth-warning-text"></span>
-    <button id="recheck-btn" class="recheck-inline-btn">Re-check</button>
-  </div>
-
-  <!-- Loading -->
-  <div id="loading-spinner" class="spinner-wrap hidden">
-    <div class="spinner"></div>
-    <p class="spinner-label">Fetching ticket&hellip;</p>
-  </div>
-
-  <!-- Error -->
-  <div id="error-message" class="error-box hidden"></div>
-
-  <!-- Booking Summary -->
-  <div id="booking-summary" class="booking-summary-bar" hidden>
-    <div id="bs-tour" class="bs-tour na">&mdash;</div>
-    <div class="bs-facts">
-      <div class="bs-fact">
-        <span class="bs-fact-label">Booking ID</span>
-        <span id="bs-id" class="bs-fact-value na">&mdash;</span>
-      </div>
-      <div class="bs-fact">
-        <span class="bs-fact-label">Status</span>
-        <span id="bs-status" class="bs-fact-value na">&mdash;</span>
-      </div>
-      <div class="bs-fact">
-        <span class="bs-fact-label">Date</span>
-        <span id="bs-date" class="bs-fact-value na">&mdash;</span>
-      </div>
-      <div class="bs-fact">
-        <span class="bs-fact-label">Pax</span>
-        <span id="bs-pax" class="bs-fact-value na">&mdash;</span>
+    <!-- Booking Summary -->
+    <div id="booking-summary" class="booking-summary-bar" hidden>
+      <div id="bs-tour" class="bs-tour na">&mdash;</div>
+      <div class="bs-facts">
+        <div class="bs-fact">
+          <span class="bs-fact-label">Booking ID</span>
+          <span id="bs-id" class="bs-fact-value na">&mdash;</span>
+        </div>
+        <div class="bs-fact">
+          <span class="bs-fact-label">Status</span>
+          <span id="bs-status" class="bs-fact-value na">&mdash;</span>
+        </div>
+        <div class="bs-fact">
+          <span class="bs-fact-label">Date</span>
+          <span id="bs-date" class="bs-fact-value na">&mdash;</span>
+        </div>
+        <div class="bs-fact">
+          <span class="bs-fact-label">Pax</span>
+          <span id="bs-pax" class="bs-fact-value na">&mdash;</span>
+        </div>
       </div>
     </div>
+
+    <!-- Tab Nav -->
+    <nav id="tab-nav" class="tab-nav" hidden>
+      <button class="tab-pill active" data-tab="full-booking">&#128203; Booking</button>
+      <button class="tab-pill" data-tab="instructions">&#128204; Instructions</button>
+      <button class="tab-pill" data-tab="customer-details">&#128100; Customer</button>
+      <button class="tab-pill" data-tab="verify">&#10003; Verify</button>
+      <button class="tab-pill" data-tab="late-confirm" hidden>&#128681; Late Confirm</button>
+    </nav>
   </div>
 
-  <!-- Tab Nav -->
-  <nav id="tab-nav" class="tab-nav" hidden>
-    <button class="tab-pill active" data-tab="full-booking">&#128203; Booking</button>
-    <button class="tab-pill" data-tab="instructions">&#128204; Instructions</button>
-    <button class="tab-pill" data-tab="customer-details">&#128100; Customer</button>
-    <button class="tab-pill" data-tab="verify">&#10003; Verify</button>
-    <button class="tab-pill" data-tab="late-confirm" hidden>&#128681; Late Confirm</button>
-
-  </nav>
-
-  <!-- Ticket Content -->
+  <!-- Ticket Content — sizes to its content; scroll the page to reach it and the footer below -->
   <div id="ticket-details"></div>
 
-  <!-- Footer -->
+  <!-- Footer: sits right after content, not pinned — no dead gap on short bookings,
+       reachable by scrolling to the end on long ones -->
   <footer id="app-footer" class="app-footer">
     <p class="footer-text">
       Have suggestions? Fill this <a href="https://docs.google.com/forms/d/e/1FAIpQLSdzGd6m2PnxfMxuD34dEH4WOY9HQSJSAilaZX4PXeA325RmqA/viewform?usp=header" target="_blank" rel="noopener noreferrer" class="footer-link">form</a>.
