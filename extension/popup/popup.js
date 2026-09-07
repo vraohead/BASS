@@ -243,10 +243,38 @@ async function doSearch() {
 
 // ── Render booking ────────────────────────────────────────────────────────────
 
+// Pending bookings whose experience time already passed need an explicit
+// go/no-go from the agent before anything else renders — mirrors the "Past
+// booking" confirmation BMS itself shows for the same situation.
+function isPastPendingBooking(flat) {
+  const status = String(flat.status || '').toUpperCase();
+  return status === 'PENDING' && flat.actualLeadTimeInHours != null && flat.actualLeadTimeInHours < 0;
+}
+
+function showPastBookingModal(onProceed, onCancel) {
+  const modal = $('past-booking-modal');
+  modal.hidden = false;
+  const close = () => { modal.hidden = true; };
+  $('past-booking-cancel').onclick  = () => { close(); onCancel(); };
+  $('past-booking-close').onclick   = () => { close(); onCancel(); };
+  $('past-booking-proceed').onclick = () => { close(); onProceed(); };
+}
+
 function renderBooking(id, data, guestData, showAutomationModal, vendorTourData) {
   const flat    = data.booking || data.fulfillmentDetails || data;
   const vendors = data.vendorsInfo || flat.vendorsInfo || [];
 
+  const proceed = () => finishRenderBooking(id, flat, vendors, guestData, showAutomationModal, vendorTourData);
+
+  if (isPastPendingBooking(flat)) {
+    showPastBookingModal(proceed, clearResults);
+    return;
+  }
+
+  proceed();
+}
+
+function finishRenderBooking(id, flat, vendors, guestData, showAutomationModal, vendorTourData) {
   renderSummaryBar(id, flat, guestData);
 
   $('automation-modal-banner').hidden = true;

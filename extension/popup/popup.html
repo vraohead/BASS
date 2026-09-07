@@ -11,6 +11,23 @@
 </head>
 <body>
 
+  <!-- Past booking modal — blocks the extension until the agent decides -->
+  <div id="past-booking-modal" class="modal-overlay" hidden>
+    <div class="modal-box">
+      <div class="modal-header">
+        <h3 class="modal-title">Past booking</h3>
+        <button id="past-booking-close" type="button" class="modal-close" aria-label="Close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p>The experience time for this booking has already passed.</p>
+      </div>
+      <div class="modal-actions">
+        <button id="past-booking-cancel" type="button" class="btn btn-outline">Cancel</button>
+        <button id="past-booking-proceed" type="button" class="btn btn-primary">Proceed with booking</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Sticky top chrome: stays pinned while ticket-details/footer scroll beneath it -->
   <div class="app-chrome">
     <!-- Header -->
