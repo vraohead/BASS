@@ -243,21 +243,33 @@ async function doSearch() {
 
 // ── Render booking ────────────────────────────────────────────────────────────
 
-// Pending bookings whose experience time already passed need an explicit
-// go/no-go from the agent before anything else renders — mirrors the "Past
-// booking" confirmation BMS itself shows for the same situation.
+// Pending bookings whose experience time already passed, or is about to
+// start within minutes, need an explicit go/no-go from the agent before
+// anything else renders — mirrors the "Past booking" confirmation BMS
+// itself shows, plus a same-style warning for the imminent case.
 function isPastPendingBooking(flat) {
   const status = String(flat.status || '').toUpperCase();
   return status === 'PENDING' && flat.actualLeadTimeInHours != null && flat.actualLeadTimeInHours < 0;
 }
 
-function showPastBookingModal(onProceed, onCancel) {
-  const modal = $('past-booking-modal');
+const IMMINENT_THRESHOLD_HOURS = 10 / 60; // under 10 minutes away, but not yet started
+
+function isImminentPendingBooking(flat) {
+  const status = String(flat.status || '').toUpperCase();
+  const h = flat.actualLeadTimeInHours;
+  return status === 'PENDING' && h != null && h >= 0 && h < IMMINENT_THRESHOLD_HOURS;
+}
+
+function showBookingGateModal({ title, bodyHtml, proceedLabel = 'Proceed with booking' }, onProceed, onCancel) {
+  const modal = $('booking-gate-modal');
+  $('booking-gate-title').textContent = title;
+  $('booking-gate-body').innerHTML = bodyHtml;
+  $('booking-gate-proceed').textContent = proceedLabel;
   modal.hidden = false;
   const close = () => { modal.hidden = true; };
-  $('past-booking-cancel').onclick  = () => { close(); onCancel(); };
-  $('past-booking-close').onclick   = () => { close(); onCancel(); };
-  $('past-booking-proceed').onclick = () => { close(); onProceed(); };
+  $('booking-gate-cancel').onclick  = () => { close(); onCancel(); };
+  $('booking-gate-close').onclick   = () => { close(); onCancel(); };
+  $('booking-gate-proceed').onclick = () => { close(); onProceed(); };
 }
 
 function renderBooking(id, data, guestData, showAutomationModal, vendorTourData) {
@@ -267,7 +279,20 @@ function renderBooking(id, data, guestData, showAutomationModal, vendorTourData)
   const proceed = () => finishRenderBooking(id, flat, vendors, guestData, showAutomationModal, vendorTourData);
 
   if (isPastPendingBooking(flat)) {
-    showPastBookingModal(proceed, clearResults);
+    showBookingGateModal({
+      title: 'Past booking',
+      bodyHtml: 'The experience time for this booking has already passed.',
+    }, proceed, clearResults);
+    return;
+  }
+
+  if (isImminentPendingBooking(flat)) {
+    const minutesLeft = Math.max(1, Math.round(flat.actualLeadTimeInHours * 60));
+    const mins = `${minutesLeft} minute${minutesLeft === 1 ? '' : 's'}`;
+    showBookingGateModal({
+      title: 'Booking due soon',
+      bodyHtml: `The experience time is only <strong>${mins} away</strong>. Are you sure you want to make this booking, and can it be fulfilled in the next ${mins} — or should it be refunded instead?`,
+    }, proceed, clearResults);
     return;
   }
 
