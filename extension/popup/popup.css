@@ -82,12 +82,12 @@
 }
 
 /* ── Base ─────────────────────────────────────────────────────────────── */
-html { width: 100%; height: 100vh; }
+html { width: 100%; height: 100vh; overflow: hidden; }
 body {
   font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
   font-size: 13px; background: var(--bg); color: var(--text);
-  min-height: 100vh; width: 100vw; line-height: 1.5;
-  overflow-y: auto; overflow-x: hidden;
+  height: 100vh; width: 100vw; line-height: 1.5; overflow: hidden;
+  display: flex; flex-direction: column; position: absolute; inset: 0;
   transition: background 0.3s ease;
 }
 body::before {
@@ -98,16 +98,10 @@ body::before {
 }
 body > * { position: relative; z-index: 1; }
 
-/* ── Sticky top chrome ───────────────────────────────────────────────────
-   Header/search/banners/summary/tabs stay pinned to the top of the panel
-   while #ticket-details and the footer scroll underneath. Keeping this as
-   ONE sticky group (rather than sizing #ticket-details to fill the
-   remaining viewport) means the footer sits right after whatever content
-   there is instead of being permanently pinned with dead space above it. */
+/* Groups header/search/banners/summary/tabs as one natural-height block —
+   same total height as before, just under one wrapper div. */
 .app-chrome {
-  position: sticky; top: 0; z-index: 10;
-  display: flex; flex-direction: column;
-  background: var(--bg);
+  display: flex; flex-direction: column; flex: 0 0 auto;
 }
 
 /* ── Header ──────────────────────────────────────────────────────────── */
@@ -366,27 +360,26 @@ body > * { position: relative; z-index: 1; }
 }
 
 /* ── Main Content ────────────────────────────────────────────────────── */
-/* Sizes to its content (no forced fill) — the whole page scrolls instead
-   of this pane, so short bookings show no dead space and long ones scroll
-   naturally, same as the footer right after them. */
 #ticket-details {
   padding: 0; display: flex; flex-direction: column; gap: 0;
-  width: 100%;
+  flex: 1 1 auto; overflow-y: hidden;
+  min-height: 0; width: 100%;
 }
 
 /* ── Section Cards ───────────────────────────────────────────────────── */
 .section {
   border: none; border-left: 3px solid var(--border);
-  border-radius: 0; overflow: visible; box-shadow: none;
+  border-radius: 0; overflow: hidden; box-shadow: none;
   display: flex; flex-direction: column;
+  flex: 1 1 auto; min-height: 0;
   background: var(--bg);
   animation: none;
 }
 .section:hover { box-shadow: none; }
 .section-header { display: none; }
 .section-body {
-  padding: 10px 12px;
-  overflow-x: hidden;
+  padding: 10px 12px; flex: 1 1 auto;
+  overflow-y: auto; overflow-x: hidden; min-height: 0;
 }
 .section-body::-webkit-scrollbar { width: 3px; }
 .section-body::-webkit-scrollbar-track { background: transparent; }
@@ -535,7 +528,7 @@ details.instr-block:not([open]) .instr-block__header { border-bottom: none; }
 /* ── Welcome placeholder ─────────────────────────────────────────────── */
 .welcome-placeholder {
   display: flex; align-items: center; justify-content: center;
-  min-height: 50vh;
+  height: 100%; min-height: 120px;
 }
 .welcome-placeholder p { color: var(--muted); font-size: 12px; text-align: center; padding: 16px; font-weight: 500; }
 
@@ -764,7 +757,7 @@ details.instr-block:not([open]) .instr-block__header { border-bottom: none; }
 .app-footer {
   padding: 8px 12px; border-top: 1px solid var(--border);
   background: var(--header-bg); backdrop-filter: blur(12px);
-  text-align: center;
+  text-align: center; flex: 0 0 auto;
 }
 .footer-text { font-size: 10px; color: var(--muted); line-height: 1.5; font-weight: 500; }
 .footer-link { color: var(--accent); text-decoration: none; font-weight: 700; }
