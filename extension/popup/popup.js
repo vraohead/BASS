@@ -309,8 +309,11 @@ function renderSummaryBar(id, flat, guestData) {
     if (total) pax = String(total);
   }
 
-  // Time to Experience — a full-width one-line banner, only for actionable tiers (hide ON TIME)
+  // Time to Experience — always shown as a plain fact; escalates to a loud
+  // full-width banner only for actionable/near-term tiers (hide ON TIME banner,
+  // but never hide the underlying countdown itself).
   let tteBanner = '';
+  let tteFact = '';
   if (flat.actualLeadTimeInHours != null) {
     const h = flat.actualLeadTimeInHours;
     const totalH = Math.abs(h);
@@ -318,6 +321,7 @@ function renderSummaryBar(id, flat, guestData) {
     const rem = Math.round(totalH % 24);
     const dPart = d > 0 ? `${d}d ` : '';
     const tteLabel = h < 0 ? `${dPart}${rem}h ago` : `in ${dPart}${rem}h`;
+    tteFact = tteLabel;
     let tier, tierLabel, icon;
     if      (h < 0)   { tier = 'past';   tierLabel = 'PAST DUE'; icon = '⚠️'; }
     else if (h < 4)   { tier = 'urgent'; tierLabel = 'URGENT';   icon = '🔥'; }
@@ -350,6 +354,7 @@ function renderSummaryBar(id, flat, guestData) {
     <div class="bs-facts">
       ${fact('Date', escHtml(date))}
       ${fact('Time', escHtml(time))}
+      ${fact('TTE',  escHtml(tteFact))}
       ${fact('Pax',  escHtml(pax))}
       ${fact('Net',  escHtml(price))}
     </div>
