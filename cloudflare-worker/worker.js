@@ -29,7 +29,7 @@
 
 // Bump this string whenever you paste a new version into the dashboard —
 // visiting GET /debug-env instantly confirms whether a deploy took effect.
-const WORKER_VERSION = '2026-09-07-02';
+const WORKER_VERSION = '2026-09-07-03';
 
 // Formats an ISO timestamp as a clean IST string, e.g. "6 Sep 2026, 10:44 PM IST".
 function formatIST(isoString) {
@@ -134,79 +134,113 @@ Rules:
 - Set found to true only when the value is unambiguously readable in the image.
 - For numeric pax/price, a match is true if the number appears clearly (ignore currency symbols for price match).`;
 
-  let oaiRes;
-  try {
-    oaiRes = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${env.OPENAI_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: 'gpt-4o',
-        max_tokens: 300,
-        response_format: { type: 'json_object' },
-        messages: [
-          {
-            role: 'user',
-            content: [
-              { type: 'text', text: prompt },
-              {
-                type: 'image_url',
-                image_url: {
-                  url: `data:${mimeType};base64,${imageBase64}`,
-                  detail: 'high',
-                },
-              },
-            ],
+  // Structured Outputs: a strict JSON Schema makes OpenAI's API layer itself
+  // guarantee the response is valid JSON matching this exact shape — the
+  // model literally cannot return markdown, prose, or a differently-shaped
+  // object. This is what makes the failure rate approach zero, rather than
+  // just parsing defensively after the fact.
+  const VERIFY_SCHEMA = {
+    name: 'verify_checks',
+    strict: true,
+    schema: {
+      type: 'object',
+      properties: {
+        checks: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              label:    { type: 'string' },
+              expected: { type: 'string' },
+              found:    { type: 'boolean' },
+            },
+            required: ['label', 'expected', 'found'],
+            additionalProperties: false,
           },
-        ],
-      }),
-    });
-    logStep('openai_chat_completions', oaiRes.ok, `HTTP ${oaiRes.status}`);
-  } catch (err) {
-    logStep('openai_chat_completions', false, `Exception: ${err.message}`);
-    return cors(JSON.stringify({ error: `OpenAI request failed: ${err.message}`, steps }), 502);
-  }
+        },
+      },
+      required: ['checks'],
+      additionalProperties: false,
+    },
+  };
 
-  if (!oaiRes.ok) {
-    const errText = await oaiRes.text();
-    logStep('openai_chat_completions_body', false, errText.slice(0, 2000));
-    return cors(JSON.stringify({ error: `OpenAI error ${oaiRes.status}: ${errText}`, steps }), 502);
-  }
+  // One retry on top of Structured Outputs: covers the rare transient case
+  // (network blip, empty completion) without ever surfacing it to the agent.
+  const MAX_ATTEMPTS = 2;
+  let result = null, lastError = null, lastRaw = null;
 
-  const oaiData = await oaiRes.json();
-  const content = oaiData.choices?.[0]?.message?.content?.trim() || '';
-  logStep('extract_ai_content', content.length > 0, `length=${content.length}`);
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS && !result; attempt++) {
+    let oaiRes;
+    try {
+      oaiRes = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${env.OPENAI_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: 'gpt-4o',
+          max_tokens: 300,
+          response_format: { type: 'json_schema', json_schema: VERIFY_SCHEMA },
+          messages: [
+            {
+              role: 'user',
+              content: [
+                { type: 'text', text: prompt },
+                {
+                  type: 'image_url',
+                  image_url: {
+                    url: `data:${mimeType};base64,${imageBase64}`,
+                    detail: 'high',
+                  },
+                },
+              ],
+            },
+          ],
+        }),
+      });
+      logStep(`openai_chat_completions_attempt${attempt}`, oaiRes.ok, `HTTP ${oaiRes.status}`);
+    } catch (err) {
+      logStep(`openai_chat_completions_attempt${attempt}`, false, `Exception: ${err.message}`);
+      lastError = `OpenAI request failed: ${err.message}`;
+      continue;
+    }
 
-  // The model is asked not to, but sometimes wraps its JSON in a ```json fence
-  // anyway — strip that before attempting to parse.
-  const cleaned = content.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+    if (!oaiRes.ok) {
+      const errText = await oaiRes.text();
+      logStep(`openai_chat_completions_body_attempt${attempt}`, false, errText.slice(0, 2000));
+      lastError = `OpenAI error ${oaiRes.status}: ${errText}`;
+      continue;
+    }
 
-  let result;
-  try {
-    result = JSON.parse(cleaned);
-    logStep('parse_ai_json_direct', true, null);
-  } catch {
-    logStep('parse_ai_json_direct', false, 'not directly parseable, trying regex extraction');
-    const m = cleaned.match(/\{[\s\S]*\}|\[[\s\S]*\]/);
-    if (m) {
-      try {
-        result = JSON.parse(m[0]);
-        logStep('parse_ai_json_regex', true, null);
-      } catch (err) {
-        logStep('parse_ai_json_regex', false, err.message);
-        return cors(JSON.stringify({ error: 'Could not parse AI response', raw: content, steps }), 502);
-      }
-    } else {
-      logStep('parse_ai_json_regex', false, 'no {...} or [...] found in response');
-      return cors(JSON.stringify({ error: 'Unexpected AI response format', raw: content, steps }), 502);
+    const oaiData = await oaiRes.json();
+    const content = oaiData.choices?.[0]?.message?.content?.trim() || '';
+    logStep(`extract_ai_content_attempt${attempt}`, content.length > 0, `length=${content.length}`);
+    lastRaw = content;
+
+    if (!content) {
+      lastError = 'OpenAI returned an empty response';
+      continue;
+    }
+
+    // Structured Outputs should already guarantee valid, schema-matching
+    // JSON — this fence-stripping/array-normalizing is just a defensive
+    // fallback in case a future model swap ever loses that guarantee.
+    const cleaned = content.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+    try {
+      let parsed = JSON.parse(cleaned);
+      if (Array.isArray(parsed)) parsed = { checks: parsed };
+      result = parsed;
+      logStep(`parse_ai_json_attempt${attempt}`, true, null);
+    } catch (err) {
+      logStep(`parse_ai_json_attempt${attempt}`, false, err.message);
+      lastError = 'Could not parse AI response';
     }
   }
 
-  // The model occasionally returns a bare array of checks instead of the
-  // requested {"checks": [...]} wrapper — normalize either shape.
-  if (Array.isArray(result)) result = { checks: result };
+  if (!result) {
+    return cors(JSON.stringify({ error: lastError || 'AI Verify failed', raw: lastRaw, steps }), 502);
+  }
 
   return cors(JSON.stringify({ ...result, steps }), 200);
 }
