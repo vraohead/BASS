@@ -260,15 +260,15 @@ function isImminentPendingBooking(flat) {
   return status === 'PENDING' && h != null && h >= 0 && h < IMMINENT_THRESHOLD_HOURS;
 }
 
-function showBookingGateModal({ title, bodyHtml, proceedLabel = 'Proceed with booking' }, onProceed, onCancel) {
+function showBookingGateModal({ title, bodyHtml, proceedLabel = 'Proceed' }, onProceed, onDismiss) {
   const modal = $('booking-gate-modal');
   $('booking-gate-title').textContent = title;
   $('booking-gate-body').innerHTML = bodyHtml;
   $('booking-gate-proceed').textContent = proceedLabel;
   modal.hidden = false;
   const close = () => { modal.hidden = true; };
-  $('booking-gate-cancel').onclick  = () => { close(); onCancel(); };
-  $('booking-gate-close').onclick   = () => { close(); onCancel(); };
+  $('booking-gate-dismiss').onclick = () => { close(); onDismiss(); };
+  $('booking-gate-close').onclick   = () => { close(); onDismiss(); };
   $('booking-gate-proceed').onclick = () => { close(); onProceed(); };
 }
 
@@ -281,7 +281,7 @@ function renderBooking(id, data, guestData, showAutomationModal, vendorTourData)
   if (isPastPendingBooking(flat)) {
     showBookingGateModal({
       title: 'Past booking',
-      bodyHtml: 'The experience time for this booking has already passed.',
+      bodyHtml: 'The experience time for this booking has already passed. Click <strong>Proceed</strong> to open it anyway, or <strong>Dismiss</strong> to back out without opening this booking.',
     }, proceed, clearResults);
     return;
   }
@@ -291,7 +291,7 @@ function renderBooking(id, data, guestData, showAutomationModal, vendorTourData)
     const mins = `${minutesLeft} minute${minutesLeft === 1 ? '' : 's'}`;
     showBookingGateModal({
       title: 'Booking due soon',
-      bodyHtml: `The experience time is only <strong>${mins} away</strong>. Are you sure you want to make this booking, and can it be fulfilled in the next ${mins} — or should it be refunded instead?`,
+      bodyHtml: `The experience time is only <strong>${mins} away</strong>. Are you sure you want to make this booking, and can it be fulfilled in the next ${mins} — or should it be refunded instead? Click <strong>Proceed</strong> to open it anyway, or <strong>Dismiss</strong> to back out without opening this booking.`,
     }, proceed, clearResults);
     return;
   }
