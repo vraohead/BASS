@@ -63,7 +63,7 @@
   --teal:        #2dd4bf;
   --pink:        #ff5aa0;
   --text:        #ece8f6;
-  --muted:       #7d779a;
+  --muted:       #a8a2c4;
   --label:       #a59ec0;
   --error-bg:    rgba(248,113,113,0.08);
   --header-bg:   rgba(19,13,34,0.95);
@@ -298,21 +298,21 @@ body > * { position: relative; z-index: 1; }
   display: flex; flex-direction: column; gap: 3px;
 }
 .bs-tour {
-  font-size: 11px; font-weight: 700; color: var(--text);
+  font-size: 12px; font-weight: 700; color: var(--text);
   min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .bs-tour.na { color: var(--muted); font-style: italic; }
 .bs-facts {
-  display: flex; flex-wrap: wrap; row-gap: 2px; column-gap: 12px;
+  display: flex; flex-wrap: wrap; row-gap: 3px; column-gap: 12px;
 }
-.bs-fact { display: flex; align-items: baseline; gap: 3px; min-width: 0; flex-shrink: 0; }
+.bs-fact { display: flex; align-items: baseline; gap: 4px; min-width: 0; flex-shrink: 0; }
 .bs-fact-label {
-  font-size: 8px; text-transform: uppercase; letter-spacing: 0.06em;
+  font-size: 9px; text-transform: uppercase; letter-spacing: 0.06em;
   color: var(--label); font-weight: 700;
 }
-.bs-fact-value { font-size: 11px; color: var(--text); font-weight: 600; white-space: nowrap; }
-.bs-fact-value.na { color: var(--muted); font-style: italic; font-weight: 400; font-size: 10px; }
+.bs-fact-value { font-size: 12px; color: var(--text); font-weight: 600; white-space: nowrap; }
+.bs-fact-value.na { color: var(--muted); font-style: italic; font-weight: 400; font-size: 11px; }
 
 /* ── TTE Urgency Banner (full-width, one line) ──────────────────────────── */
 .tte-banner {
@@ -513,6 +513,21 @@ details.instr-block:not([open]) .instr-block__header { border-bottom: none; }
 .rich-instruction-wrapper tr { border-bottom: 1px solid var(--border); }
 .rich-instruction-wrapper td { padding: 5px 6px; border: 1px solid var(--border); color: var(--text); vertical-align: top; font-size: 11px; }
 .rich-instruction-wrapper th { padding: 5px 6px; border: 1px solid var(--border); background: var(--surface2); font-weight: 700; color: var(--accent); text-align: left; font-size: 11px; }
+
+/* Vendor-authored instruction HTML brings its own inline colors (picked
+   assuming a plain white page) that our theme variables can't reach — in
+   dark mode that showed up as near-black text on a near-black card,
+   unreadable. Rather than fight arbitrary inline styles, keep this block on
+   a fixed light background so vendor content always renders as intended. */
+[data-theme="dark"] .rich-instruction-wrapper {
+  background: #ffffff; border-radius: 8px; padding: 8px 10px;
+}
+[data-theme="dark"] .rich-instruction-wrapper * { color: #1c1535 !important; }
+[data-theme="dark"] .rich-instruction-wrapper a { color: #7c2ff0 !important; }
+[data-theme="dark"] .rich-instruction-wrapper em { color: #55506b !important; }
+[data-theme="dark"] .rich-instruction-wrapper td,
+[data-theme="dark"] .rich-instruction-wrapper th { border-color: #e0ddec; }
+[data-theme="dark"] .rich-instruction-wrapper th { background: #f4f2fb; color: #7c2ff0 !important; }
 
 /* ── Raw JSON section ────────────────────────────────────────────────── */
 [data-section-id="raw"] .section-body {
