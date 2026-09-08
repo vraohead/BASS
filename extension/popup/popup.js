@@ -1393,6 +1393,13 @@ function buildCustomerSection(flat, guestData) {
     (guestData.paxDetails || []).forEach(p => { if (p.paxType) paxTypeDisplay[p.paxType] = p.displayName; });
     const guestCustomFields = guestData.guestCustomFields || [];
 
+    // Which guest is the primary contact — there's no primary flag on the
+    // guest objects themselves, so match against the separate primaryGuest
+    // record (by email, falling back to full name) instead of assuming
+    // it's always whichever guest happens to be first in the array.
+    const primaryEmail = pg?.email ? String(pg.email).toLowerCase() : null;
+    const primaryName = pg ? `${pg.firstName || ''} ${pg.lastName || ''}`.trim().toLowerCase() : null;
+
     // All user-provided fields, for EVERY guest — not just the first
     const guests = guestData.guests || [];
     guests.forEach((g, i) => {
@@ -1415,11 +1422,22 @@ function buildCustomerSection(flat, guestData) {
       if (guestHtml) {
         // Label each guest by what Box Office actually says they are
         // ("Adult 1", "Child 2", ...) instead of a generic "Additional
-        // Guest N" that doesn't say anything about who the guest is.
+        // Guest N" that doesn't say anything about who the guest is —
+        // plus call out separately whether this is the primary contact,
+        // since that's a different fact from their pax type.
         const [rawType, num] = (guestCustomFields[i]?.guestLabel || '').split('_Number_');
-        const typeDisplay = rawType ? (paxTypeDisplay[rawType] || humanise(rawType.toLowerCase())) : '';
-        const label = (typeDisplay && num) ? `${typeDisplay} ${num}`
-          : (i === 0 ? 'Primary Guest' : `Additional Guest ${i}`);
+        const typeLabel = (rawType && num) ? `${paxTypeDisplay[rawType] || humanise(rawType.toLowerCase())} ${num}` : null;
+
+        const guestEmail = g.email ? String(g.email).toLowerCase() : null;
+        const guestName = `${g.firstName || ''} ${g.lastName || ''}`.trim().toLowerCase();
+        const isPrimary = primaryEmail ? guestEmail === primaryEmail : (primaryName && guestName === primaryName);
+
+        let label;
+        if (isPrimary && typeLabel)  label = `Primary Guest · ${typeLabel}`;
+        else if (isPrimary)          label = 'Primary Guest';
+        else if (typeLabel)          label = typeLabel;
+        else                         label = i === 0 ? 'Primary Guest' : `Additional Guest ${i}`;
+
         html += `<div class="guest-group">
           <div class="guest-group-label">${escHtml(label)}</div>
           ${guestHtml}
