@@ -1398,6 +1398,11 @@ function buildCustomerSection(flat, guestData) {
     const guests = guestData.guests || [];
     guests.forEach((g, i) => {
       let guestHtml = '';
+      // If the guest already has a real "Country" custom field from Box
+      // Office, trust that over our own guess and don't show our derived
+      // one at all — only fall back to it when no real Country is given.
+      const hasRealCountryField = (g.bookingUserFields || [])
+        .some(f => /^country$/i.test((f.name || '').trim()) && f.value);
       if (g.bookingUserFields?.length) {
         g.bookingUserFields.forEach(f => {
           const type = f.tourUserFieldType?.name;
@@ -1406,20 +1411,24 @@ function buildCustomerSection(flat, guestData) {
             guestHtml += fieldRow(label, f.value, true);
             // Slack request: show the country detected from the phone number
             // right below the Phone field, saving a manual lookup.
-            if (/phone|mobile/i.test(label) || /phone|mobile/i.test(type || '')) {
+            if (!hasRealCountryField && (/phone|mobile/i.test(label) || /phone|mobile/i.test(type || ''))) {
               const country = detectPhoneCountry(f.value);
-              if (country) guestHtml += fieldRow('Country', country, false);
+              if (country) guestHtml += fieldRow('Phone Country', country, false);
             }
           }
         });
       }
       if (guestHtml) {
-        const label = i === 0 ? 'Primary Guest' : `Additional Guest ${i}`;
+        // Pax type is the headline (Adult/Child); "Primary Guest"/
+        // "Additional Guest N" moves to the small badge instead — swapped
+        // from the original BMS-mirrored layout per explicit request.
+        const guestLabelText = i === 0 ? 'Primary Guest' : `Additional Guest ${i}`;
         const rawType = guestCustomFields[i]?.guestLabel?.split('_Number_')[0] || '';
         const paxType = rawType ? (paxTypeDisplay[rawType] || humanise(rawType.toLowerCase())) : '';
-        const paxBadge = paxType ? `<span class="guest-group-paxtype">${escHtml(paxType)}</span>` : '';
+        const heading = paxType || guestLabelText;
+        const badge = paxType ? `<span class="guest-group-paxtype">${escHtml(guestLabelText)}</span>` : '';
         html += `<div class="guest-group">
-          <div class="guest-group-label"><span>${escHtml(label)}</span>${paxBadge}</div>
+          <div class="guest-group-label"><span>${escHtml(heading)}</span>${badge}</div>
           ${guestHtml}
         </div>`;
       }
