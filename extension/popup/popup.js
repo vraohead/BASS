@@ -1383,6 +1383,16 @@ function buildCustomerSection(flat, guestData) {
       if (paxLabel) html += fieldRow('Pax Breakdown', paxLabel, true);
     }
 
+    // Pax type (Adult/Child/etc.) per guest, matching new BMS. There's no
+    // shared guest id between `guests` and `guestCustomFields`, but both
+    // arrays list the same guests in the same order, so match positionally.
+    // guestLabel looks like "ADULT_Number_2" — strip the "_Number_N" suffix
+    // and look up the display name from paxDetails (falls back to a
+    // title-cased guess if that type isn't in paxDetails for some reason).
+    const paxTypeDisplay = {};
+    (guestData.paxDetails || []).forEach(p => { if (p.paxType) paxTypeDisplay[p.paxType] = p.displayName; });
+    const guestCustomFields = guestData.guestCustomFields || [];
+
     // All user-provided fields, for EVERY guest — not just the first
     const guests = guestData.guests || [];
     guests.forEach((g, i) => {
@@ -1404,8 +1414,11 @@ function buildCustomerSection(flat, guestData) {
       }
       if (guestHtml) {
         const label = i === 0 ? 'Primary Guest' : `Additional Guest ${i}`;
+        const rawType = guestCustomFields[i]?.guestLabel?.split('_Number_')[0] || '';
+        const paxType = rawType ? (paxTypeDisplay[rawType] || humanise(rawType.toLowerCase())) : '';
+        const paxBadge = paxType ? `<span class="guest-group-paxtype">${escHtml(paxType)}</span>` : '';
         html += `<div class="guest-group">
-          <div class="guest-group-label">${escHtml(label)}</div>
+          <div class="guest-group-label"><span>${escHtml(label)}</span>${paxBadge}</div>
           ${guestHtml}
         </div>`;
       }
