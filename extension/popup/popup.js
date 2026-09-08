@@ -362,12 +362,13 @@ function renderSummaryBar(id, flat, guestData) {
     if (total) pax = String(total);
   }
 
-  // Time to Experience — always shown as a plain fact; escalates to a loud
-  // full-width banner only for actionable/near-term tiers (hide ON TIME banner,
-  // but never hide the underlying countdown itself).
+  // Time to Experience — only relevant when it's actually actionable: past
+  // due, or within the next 48 hours. Anything further out (or a booking
+  // that's already completed/cancelled) has nothing to act on, so don't
+  // show it at all rather than a countdown nobody needs yet.
   let tteBanner = '';
   let tteFact = '';
-  if (flat.actualLeadTimeInHours != null) {
+  if (!isTerminalBooking(flat) && flat.actualLeadTimeInHours != null && flat.actualLeadTimeInHours < 48) {
     const h = flat.actualLeadTimeInHours;
     const totalH = Math.abs(h);
     const d = Math.floor(totalH / 24);
@@ -379,8 +380,7 @@ function renderSummaryBar(id, flat, guestData) {
     if      (h < 0)   { tier = 'past';   tierLabel = 'PAST DUE'; icon = '⚠️'; }
     else if (h < 4)   { tier = 'urgent'; tierLabel = 'URGENT';   icon = '🔥'; }
     else if (h < 24)  { tier = 'today';  tierLabel = 'TODAY';    icon = '⏰'; }
-    else if (h < 72)  { tier = 'soon';   tierLabel = 'SOON';     icon = '⏱️'; }
-    else              { tier = null; }
+    else              { tier = null; } // 24-48h: plain fact only, no loud banner
     if (tier) {
       tteBanner = `<div class="tte-banner tte-banner--${tier}">
         <span class="tte-banner-icon">${icon}</span>
