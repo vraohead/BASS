@@ -1413,12 +1413,15 @@ function buildCustomerSection(flat, guestData) {
         });
       }
       if (guestHtml) {
-        const label = i === 0 ? 'Primary Guest' : `Additional Guest ${i}`;
-        const rawType = guestCustomFields[i]?.guestLabel?.split('_Number_')[0] || '';
-        const paxType = rawType ? (paxTypeDisplay[rawType] || humanise(rawType.toLowerCase())) : '';
-        const paxBadge = paxType ? `<span class="guest-group-paxtype">${escHtml(paxType)}</span>` : '';
+        // Label each guest by what Box Office actually says they are
+        // ("Adult 1", "Child 2", ...) instead of a generic "Additional
+        // Guest N" that doesn't say anything about who the guest is.
+        const [rawType, num] = (guestCustomFields[i]?.guestLabel || '').split('_Number_');
+        const typeDisplay = rawType ? (paxTypeDisplay[rawType] || humanise(rawType.toLowerCase())) : '';
+        const label = (typeDisplay && num) ? `${typeDisplay} ${num}`
+          : (i === 0 ? 'Primary Guest' : `Additional Guest ${i}`);
         html += `<div class="guest-group">
-          <div class="guest-group-label"><span>${escHtml(label)}</span>${paxBadge}</div>
+          <div class="guest-group-label">${escHtml(label)}</div>
           ${guestHtml}
         </div>`;
       }
