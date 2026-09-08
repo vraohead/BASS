@@ -447,6 +447,13 @@ body > * { position: relative; z-index: 1; }
   font-size: 10px; font-weight: 800; color: var(--accent);
   text-transform: uppercase; letter-spacing: 0.06em;
   padding-bottom: 4px; margin-bottom: 4px; border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+}
+.guest-group-paxtype {
+  font-size: 9px; font-weight: 700; letter-spacing: 0.04em;
+  color: var(--muted); background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 10px; padding: 2px 8px; text-transform: uppercase;
+  white-space: nowrap; flex-shrink: 0;
 }
 .guest-group .field-row:first-of-type { padding-top: 0; }
 
