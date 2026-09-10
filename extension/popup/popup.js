@@ -206,7 +206,7 @@ function clearResults() {
 }
 
 async function doSearch() {
-  const id = $('booking-id').value.trim();
+  let id = $('booking-id').value.trim();
   if (!id) return;
 
   $('error-message').hidden   = true;
@@ -214,6 +214,25 @@ async function doSearch() {
   $('booking-summary').hidden = true;
   $('tab-nav').hidden         = true;
   $('ticket-details').innerHTML = '';
+
+  // "<code>-<bookingId>" typed into the same box unlocks gated instructions
+  // for the rest of the day, then proceeds with the real booking ID as if
+  // it had been typed alone — no separate code field anywhere.
+  const codeMatch = id.match(/^(\d{6})-(\d{6,})$/);
+  if (codeMatch) {
+    const [, code, bookingId] = codeMatch;
+    const codeResult = await sendMessage({ action: 'VERIFY_DAILY_CODE', code, workerUrl: DEFAULT_WORKER_URL });
+    if (!codeResult?.ok || !codeResult.valid) {
+      $('loading-spinner').hidden = true;
+      const errEl = $('error-message');
+      errEl.textContent = codeResult?.ok ? 'Incorrect daily code.' : (codeResult?.error || 'Could not check code.');
+      errEl.hidden = false;
+      return;
+    }
+    await setInstrUnlockedToday();
+    id = bookingId;
+    $('booking-id').value = bookingId;
+  }
 
   const result = await sendMessage({ action: 'FETCH_BOOKING', bookingId: id });
 
@@ -1361,16 +1380,12 @@ async function buildInstructionsSection(flat, vendors, vendorTourData = []) {
   `;
 
   // Instructions exist, but the booking's state says they shouldn't matter
-  // anymore — show why, and require today's admin-issued code to unlock
-  // them for this specific case rather than showing them to anyone who asks.
+  // anymore — show why, and point at the Booking ID box, where typing
+  // "<code>-<bookingId>" unlocks it (no separate code field here).
   const html = gateReason
     ? `<div class="instr-gate">
          <p class="instruction-empty">${escHtml(gateReason)}</p>
-         <div class="instr-code-row">
-           <input type="text" class="instr-code-input" placeholder="Daily code" inputmode="numeric" maxlength="6" autocomplete="off">
-           <button type="button" class="btn btn-secondary instr-unlock-btn">Unlock</button>
-         </div>
-         <p class="instr-code-error" hidden></p>
+         <p class="instruction-empty">To view anyway, re-fetch this booking as <strong>&lt;code&gt;-${escHtml(flat.bookingId || '')}</strong> in the Booking ID box above, using today's code.</p>
        </div>
        <div class="instr-real-content" hidden>${contentHtml}</div>`
     : contentHtml;
@@ -1389,37 +1404,6 @@ async function buildInstructionsSection(flat, vendors, vendorTourData = []) {
       }
     });
   });
-
-  if (gateReason) {
-    const input   = sec.querySelector('.instr-code-input');
-    const btn     = sec.querySelector('.instr-unlock-btn');
-    const errEl   = sec.querySelector('.instr-code-error');
-
-    const attemptUnlock = async () => {
-      const code = input.value.trim();
-      if (!code) return;
-      btn.disabled = true;
-      btn.textContent = 'Checking…';
-      errEl.hidden = true;
-
-      const result = await sendMessage({ action: 'VERIFY_DAILY_CODE', code, workerUrl: DEFAULT_WORKER_URL });
-
-      btn.disabled = false;
-      btn.textContent = 'Unlock';
-
-      if (result?.ok && result.valid) {
-        await setInstrUnlockedToday();
-        sec.querySelector('.instr-gate').hidden = true;
-        sec.querySelector('.instr-real-content').hidden = false;
-      } else {
-        errEl.textContent = result?.ok ? 'Incorrect code — try again.' : (result?.error || 'Could not check code.');
-        errEl.hidden = false;
-      }
-    };
-
-    btn.addEventListener('click', attemptUnlock);
-    input.addEventListener('keydown', e => { if (e.key === 'Enter') attemptUnlock(); });
-  }
 
   return sec;
 }

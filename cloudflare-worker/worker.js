@@ -20,7 +20,8 @@
 //   POST /confirm-flag     { bookingId, agentEmail, confirmed, skipped,
 //                            imageBase64?, mimeType?, verifiedAt }
 //                          -> { ok: true, steps: [...], screenshotError? }
-//   GET  /admin/daily-code?password=...  -> { code, date } (admin-only, see ADMIN_PASSWORD)
+//   GET  /admin/daily-code?password=...       -> { code, date } (admin-only)
+//   GET  /admin/send-daily-code?password=...  -> manually trigger the Slack DM (for testing)
 //   POST /verify-code      { code } -> { valid: true|false }
 //
 // Every meaningful operation (Slack calls, OpenAI calls) appends a
@@ -36,10 +37,16 @@
 // The code itself is never stored anywhere — it's recomputed on demand from
 // HMAC(DAILY_CODE_SECRET, today's IST date), so it's deterministic for the
 // whole day and automatically different tomorrow with zero extra state.
+//
+// Daily Slack DM: this Worker also exports a `scheduled` handler that DMs
+// the admin (SLACK_ADMIN_USER_ID below) today's code automatically. Wire it
+// up once in the Cloudflare Dashboard: Workers & Pages -> this worker ->
+// Settings -> Triggers -> Cron Triggers -> Add Cron Trigger -> schedule
+// "35 18 * * *" (that's 00:05 IST, i.e. just after the code rolls over).
 
 // Bump this string whenever you paste a new version into the dashboard —
 // visiting GET /debug-env instantly confirms whether a deploy took effect.
-const WORKER_VERSION = '2026-09-10-01';
+const WORKER_VERSION = '2026-09-10-02';
 
 // Formats an ISO timestamp as a clean IST string, e.g. "6 Sep 2026, 10:44 PM IST".
 function formatIST(isoString) {
@@ -57,8 +64,9 @@ function formatIST(isoString) {
 }
 
 // Not sensitive, so hardcoded here rather than as an env var/secret —
-// change this if the target Slack channel ever changes.
+// change these if the target Slack channels ever change.
 const SLACK_CHANNEL_ID = 'C0BV91K7F70';
+const DAILY_CODE_CHANNEL_ID = 'C0BKUTZ4ADN';
 
 export default {
   async fetch(request, env) {
@@ -77,6 +85,7 @@ export default {
         hasAdminPassword: !!env.ADMIN_PASSWORD,
         hasDailyCodeSecret: !!env.DAILY_CODE_SECRET,
         slackChannelId: SLACK_CHANNEL_ID,
+        dailyCodeChannelId: DAILY_CODE_CHANNEL_ID,
       }), 200);
     }
 
@@ -92,11 +101,24 @@ export default {
       return handleAdminDailyCode(request, env, url);
     }
 
+    if (request.method === 'GET' && url.pathname === '/admin/send-daily-code') {
+      return handleAdminSendDailyCode(request, env, url);
+    }
+
     if (request.method === 'POST' && url.pathname === '/verify-code') {
       return handleVerifyCode(request, env);
     }
 
     return cors(JSON.stringify({ error: 'Not found', version: WORKER_VERSION }), 404);
+  },
+
+  // Cloudflare cron trigger — wire up in the Dashboard (Triggers -> Cron
+  // Triggers), see the header comment. Posts today's code to the Slack
+  // channel automatically; failures are swallowed here since there's no
+  // HTTP caller to report them to (use /admin/send-daily-code to test
+  // manually and see the actual error).
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(sendDailyCodeToSlack(env));
   },
 };
 
@@ -135,6 +157,52 @@ async function handleAdminDailyCode(request, env, url) {
   const date = todayIST();
   const code = await computeDailyCode(env, date);
   return cors(JSON.stringify({ code, date }), 200);
+}
+
+// Posts today's code to the Slack channel. Shared by the daily cron trigger
+// and the manual /admin/send-daily-code endpoint (for testing without
+// waiting for the schedule to fire).
+async function sendDailyCodeToSlack(env) {
+  const steps = [];
+  const logStep = (step, ok, detail) => steps.push({ step, ok, detail, at: new Date().toISOString() });
+
+  if (!env.SLACK_BOT_TOKEN || !env.DAILY_CODE_SECRET) {
+    logStep('check_config', false, 'SLACK_BOT_TOKEN or DAILY_CODE_SECRET secret not set');
+    return { ok: false, error: 'Worker misconfigured', steps };
+  }
+
+  const date = todayIST();
+  const code = await computeDailyCode(env, date);
+  const text = `:key: *Today's Booking Assistant instructions code:* \`${code}\`\n_Valid for ${date} (IST) only — type it as \`${code}-<booking ID>\` in the Booking ID box to unlock a gated booking's instructions._`;
+
+  try {
+    const res = await fetch('https://slack.com/api/chat.postMessage', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${env.SLACK_BOT_TOKEN}`,
+        'Content-Type': 'application/json; charset=utf-8',
+      },
+      body: JSON.stringify({ channel: DAILY_CODE_CHANNEL_ID, text }),
+    });
+    const data = await res.json();
+    logStep('slack_chat_postMessage', data.ok === true, `HTTP ${res.status} — ${JSON.stringify(data).slice(0, 500)}`);
+    return { ok: data.ok === true, error: data.ok ? null : data.error, date, steps };
+  } catch (err) {
+    logStep('slack_chat_postMessage', false, `Exception: ${err.message}`);
+    return { ok: false, error: err.message, steps };
+  }
+}
+
+async function handleAdminSendDailyCode(request, env, url) {
+  if (!env.ADMIN_PASSWORD) {
+    return cors(JSON.stringify({ error: 'Worker misconfigured — set the ADMIN_PASSWORD secret' }), 500);
+  }
+  const password = url.searchParams.get('password') || '';
+  if (password !== env.ADMIN_PASSWORD) {
+    return cors(JSON.stringify({ error: 'Wrong password' }), 401);
+  }
+  const result = await sendDailyCodeToSlack(env);
+  return cors(JSON.stringify(result), result.ok ? 200 : 502);
 }
 
 async function handleVerifyCode(request, env) {
