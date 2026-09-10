@@ -546,6 +546,9 @@ details.instr-block:not([open]) .instr-block__header { border-bottom: none; }
 
 /* ── Empty state ─────────────────────────────────────────────────────── */
 .instruction-empty { color: var(--muted); font-size: 11px; padding: 6px 0; font-style: italic; }
+.instr-gate { padding: 10px 12px; display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
+.instr-gate .instruction-empty { padding: 0; }
+.instr-override-btn { font-size: 11px; padding: 6px 12px; }
 
 /* ── Welcome placeholder ─────────────────────────────────────────────── */
 .welcome-placeholder {

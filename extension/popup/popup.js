@@ -1264,13 +1264,11 @@ function isAutomationPending(flat) {
 }
 
 function buildInstructionsSection(flat, vendors, vendorTourData = []) {
+  let gateReason = null;
   if (isTerminalBooking(flat)) {
-    return buildSection('instructions', 'Instructions', '📌',
-      '<p class="instruction-empty">Booking is completed or cancelled — instructions no longer apply.</p>');
-  }
-  if (isAutomationPending(flat)) {
-    return buildSection('instructions', 'Instructions', '📌',
-      '<p class="instruction-empty">Automated fulfilment is still pending — manual instructions withheld until needed.</p>');
+    gateReason = 'Booking is completed or cancelled — instructions no longer apply.';
+  } else if (isAutomationPending(flat)) {
+    gateReason = 'Automated fulfilment is still pending — manual instructions withheld until needed.';
   }
 
   const blocks = [];
@@ -1311,8 +1309,8 @@ function buildInstructionsSection(flat, vendors, vendorTourData = []) {
   }
 
   if (!blocks.length) {
-    return buildSection('instructions', 'Instructions', '📌',
-      '<p class="instruction-empty">No booking instructions available.</p>');
+    const msg = gateReason || 'No booking instructions available.';
+    return buildSection('instructions', 'Instructions', '📌', `<p class="instruction-empty">${escHtml(msg)}</p>`);
   }
 
   let blocksHtml = '';
@@ -1335,13 +1333,24 @@ function buildInstructionsSection(flat, vendors, vendorTourData = []) {
     </details>`;
   });
 
-  const html = `
+  const contentHtml = `
     <div class="instr-view-toggle">
       <button class="instr-view-btn active" data-view="scroll">Full</button>
       <button class="instr-view-btn" data-view="compact">Compact</button>
     </div>
     <div class="instr-container instr-view--scroll">${blocksHtml}</div>
   `;
+
+  // Instructions exist, but the booking's state says they shouldn't matter
+  // anymore — don't just withhold them: show why, and let whoever's looking
+  // at THIS booking explicitly choose to see them anyway.
+  const html = gateReason
+    ? `<div class="instr-gate">
+         <p class="instruction-empty">${escHtml(gateReason)}</p>
+         <button type="button" class="btn btn-secondary instr-override-btn">Show Instructions Anyway</button>
+       </div>
+       <div class="instr-real-content" hidden>${contentHtml}</div>`
+    : contentHtml;
 
   const sec = buildSection('instructions', 'Instructions', '📌', html);
 
@@ -1357,6 +1366,13 @@ function buildInstructionsSection(flat, vendors, vendorTourData = []) {
       }
     });
   });
+
+  if (gateReason) {
+    sec.querySelector('.instr-override-btn').addEventListener('click', () => {
+      sec.querySelector('.instr-gate').hidden = true;
+      sec.querySelector('.instr-real-content').hidden = false;
+    });
+  }
 
   return sec;
 }
