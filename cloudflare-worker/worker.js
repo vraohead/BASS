@@ -20,16 +20,26 @@
 //   POST /confirm-flag     { bookingId, agentEmail, confirmed, skipped,
 //                            imageBase64?, mimeType?, verifiedAt }
 //                          -> { ok: true, steps: [...], screenshotError? }
+//   GET  /admin/daily-code?password=...  -> { code, date } (admin-only, see ADMIN_PASSWORD)
+//   POST /verify-code      { code } -> { valid: true|false }
 //
 // Every meaningful operation (Slack calls, OpenAI calls) appends a
 // {step, ok, detail, at} entry to a `steps` array that's returned in the
 // JSON response — so a failure anywhere always comes back with the exact
 // step name, HTTP status, and raw response body instead of a generic
 // "something went wrong".
+//
+// Daily instructions-unlock code: requires two new Cloudflare secrets —
+//   wrangler secret put DAILY_CODE_SECRET   <- any random string, never shared
+//   wrangler secret put ADMIN_PASSWORD      <- the password you'll type into
+//                                               the admin page to view today's code
+// The code itself is never stored anywhere — it's recomputed on demand from
+// HMAC(DAILY_CODE_SECRET, today's IST date), so it's deterministic for the
+// whole day and automatically different tomorrow with zero extra state.
 
 // Bump this string whenever you paste a new version into the dashboard —
 // visiting GET /debug-env instantly confirms whether a deploy took effect.
-const WORKER_VERSION = '2026-09-07-03';
+const WORKER_VERSION = '2026-09-10-01';
 
 // Formats an ISO timestamp as a clean IST string, e.g. "6 Sep 2026, 10:44 PM IST".
 function formatIST(isoString) {
@@ -64,6 +74,8 @@ export default {
         version: WORKER_VERSION,
         hasSlackToken: !!env.SLACK_BOT_TOKEN,
         hasOpenAiKey: !!env.OPENAI_API_KEY,
+        hasAdminPassword: !!env.ADMIN_PASSWORD,
+        hasDailyCodeSecret: !!env.DAILY_CODE_SECRET,
         slackChannelId: SLACK_CHANNEL_ID,
       }), 200);
     }
@@ -76,9 +88,69 @@ export default {
       return handleVerify(request, env);
     }
 
+    if (request.method === 'GET' && url.pathname === '/admin/daily-code') {
+      return handleAdminDailyCode(request, env, url);
+    }
+
+    if (request.method === 'POST' && url.pathname === '/verify-code') {
+      return handleVerifyCode(request, env);
+    }
+
     return cors(JSON.stringify({ error: 'Not found', version: WORKER_VERSION }), 404);
   },
 };
+
+// ── Daily instructions-unlock code ──────────────────────────────────────────
+
+// Deterministic 6-digit code from HMAC(secret, today's IST date) — same
+// input always produces the same code within a day, and a different one
+// the next, with nothing to store or expire.
+async function computeDailyCode(env, dateStr) {
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    'raw', enc.encode(env.DAILY_CODE_SECRET), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
+  );
+  const sig = await crypto.subtle.sign('HMAC', key, enc.encode(dateStr));
+  const bytes = new Uint8Array(sig);
+  let num = 0;
+  for (let i = 0; i < 4; i++) num = (num << 8) | bytes[i];
+  num = (num >>> 0) % 1000000;
+  return String(num).padStart(6, '0');
+}
+
+function todayIST() {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date()); // YYYY-MM-DD
+}
+
+async function handleAdminDailyCode(request, env, url) {
+  if (!env.ADMIN_PASSWORD || !env.DAILY_CODE_SECRET) {
+    return cors(JSON.stringify({
+      error: 'Worker misconfigured — set the ADMIN_PASSWORD and DAILY_CODE_SECRET secrets',
+    }), 500);
+  }
+  const password = url.searchParams.get('password') || '';
+  if (password !== env.ADMIN_PASSWORD) {
+    return cors(JSON.stringify({ error: 'Wrong password' }), 401);
+  }
+  const date = todayIST();
+  const code = await computeDailyCode(env, date);
+  return cors(JSON.stringify({ code, date }), 200);
+}
+
+async function handleVerifyCode(request, env) {
+  if (!env.DAILY_CODE_SECRET) {
+    return cors(JSON.stringify({ error: 'Worker misconfigured — set the DAILY_CODE_SECRET secret' }), 500);
+  }
+  let body;
+  try {
+    body = await request.json();
+  } catch (err) {
+    return cors(JSON.stringify({ error: 'Invalid JSON body' }), 400);
+  }
+  const submitted = String(body.code || '').trim();
+  const expected = await computeDailyCode(env, todayIST());
+  return cors(JSON.stringify({ valid: submitted.length > 0 && submitted === expected }), 200);
+}
 
 // ── /verify — AI screenshot verification ──────────────────────────────────────
 

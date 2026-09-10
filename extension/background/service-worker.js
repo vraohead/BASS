@@ -96,6 +96,24 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
   }
 
 
+  if (request.action === 'VERIFY_DAILY_CODE') {
+    const { code, workerUrl } = request;
+    (async () => {
+      try {
+        const res = await fetch(`${workerUrl.replace(/\/$/, '')}/verify-code`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ code }),
+        });
+        const data = await res.json().catch(() => ({}));
+        sendResponse(res.ok ? { ok: true, valid: !!data.valid } : { ok: false, error: data.error || 'Worker error' });
+      } catch (err) {
+        sendResponse({ ok: false, error: err.message });
+      }
+    })();
+    return true;
+  }
+
   if (request.action === 'VERIFY_IMAGE') {
     const { imageBase64, mimeType, facts, workerUrl } = request;
     (async () => {

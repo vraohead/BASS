@@ -299,7 +299,7 @@ function renderBooking(id, data, guestData, showAutomationModal, vendorTourData)
   proceed();
 }
 
-function finishRenderBooking(id, flat, vendors, guestData, showAutomationModal, vendorTourData) {
+async function finishRenderBooking(id, flat, vendors, guestData, showAutomationModal, vendorTourData) {
   renderSummaryBar(id, flat, guestData);
 
   $('automation-modal-banner').hidden = true;
@@ -327,7 +327,7 @@ function finishRenderBooking(id, flat, vendors, guestData, showAutomationModal, 
   const details = $('ticket-details');
   details.innerHTML = '';
   details.appendChild(buildBookingSection(flat));
-  details.appendChild(buildInstructionsSection(flat, vendors, vendorTourData));
+  details.appendChild(await buildInstructionsSection(flat, vendors, vendorTourData));
   details.appendChild(buildCustomerSection(flat, guestData));
   details.appendChild(buildVerifySection(flat, guestData));
   details.appendChild(buildLateConfirmSection(flat));
@@ -1263,13 +1263,32 @@ function isAutomationPending(flat) {
   return isAutomation && fulfilmentStatus === 'PENDING';
 }
 
-function buildInstructionsSection(flat, vendors, vendorTourData = []) {
+// Daily instructions-unlock code — once verified against the worker, cache
+// it for the rest of the (local) day so the agent doesn't re-enter it for
+// every gated booking they open.
+function todayLocalDateStr() {
+  return new Date().toISOString().slice(0, 10);
+}
+async function getInstrUnlockedToday() {
+  try {
+    const { instrUnlockedDate } = await chrome.storage.local.get('instrUnlockedDate');
+    return instrUnlockedDate === todayLocalDateStr();
+  } catch (_) {
+    return false;
+  }
+}
+async function setInstrUnlockedToday() {
+  try { await chrome.storage.local.set({ instrUnlockedDate: todayLocalDateStr() }); } catch (_) {}
+}
+
+async function buildInstructionsSection(flat, vendors, vendorTourData = []) {
   let gateReason = null;
   if (isTerminalBooking(flat)) {
     gateReason = 'Booking is completed or cancelled — instructions no longer apply.';
   } else if (isAutomationPending(flat)) {
     gateReason = 'Automated fulfilment is still pending — manual instructions withheld until needed.';
   }
+  if (gateReason && await getInstrUnlockedToday()) gateReason = null;
 
   const blocks = [];
 
@@ -1342,12 +1361,16 @@ function buildInstructionsSection(flat, vendors, vendorTourData = []) {
   `;
 
   // Instructions exist, but the booking's state says they shouldn't matter
-  // anymore — don't just withhold them: show why, and let whoever's looking
-  // at THIS booking explicitly choose to see them anyway.
+  // anymore — show why, and require today's admin-issued code to unlock
+  // them for this specific case rather than showing them to anyone who asks.
   const html = gateReason
     ? `<div class="instr-gate">
          <p class="instruction-empty">${escHtml(gateReason)}</p>
-         <button type="button" class="btn btn-secondary instr-override-btn">Show Instructions Anyway</button>
+         <div class="instr-code-row">
+           <input type="text" class="instr-code-input" placeholder="Daily code" inputmode="numeric" maxlength="6" autocomplete="off">
+           <button type="button" class="btn btn-secondary instr-unlock-btn">Unlock</button>
+         </div>
+         <p class="instr-code-error" hidden></p>
        </div>
        <div class="instr-real-content" hidden>${contentHtml}</div>`
     : contentHtml;
@@ -1368,10 +1391,34 @@ function buildInstructionsSection(flat, vendors, vendorTourData = []) {
   });
 
   if (gateReason) {
-    sec.querySelector('.instr-override-btn').addEventListener('click', () => {
-      sec.querySelector('.instr-gate').hidden = true;
-      sec.querySelector('.instr-real-content').hidden = false;
-    });
+    const input   = sec.querySelector('.instr-code-input');
+    const btn     = sec.querySelector('.instr-unlock-btn');
+    const errEl   = sec.querySelector('.instr-code-error');
+
+    const attemptUnlock = async () => {
+      const code = input.value.trim();
+      if (!code) return;
+      btn.disabled = true;
+      btn.textContent = 'Checking…';
+      errEl.hidden = true;
+
+      const result = await sendMessage({ action: 'VERIFY_DAILY_CODE', code, workerUrl: DEFAULT_WORKER_URL });
+
+      btn.disabled = false;
+      btn.textContent = 'Unlock';
+
+      if (result?.ok && result.valid) {
+        await setInstrUnlockedToday();
+        sec.querySelector('.instr-gate').hidden = true;
+        sec.querySelector('.instr-real-content').hidden = false;
+      } else {
+        errEl.textContent = result?.ok ? 'Incorrect code — try again.' : (result?.error || 'Could not check code.');
+        errEl.hidden = false;
+      }
+    };
+
+    btn.addEventListener('click', attemptUnlock);
+    input.addEventListener('keydown', e => { if (e.key === 'Enter') attemptUnlock(); });
   }
 
   return sec;
