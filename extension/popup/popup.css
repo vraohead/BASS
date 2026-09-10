@@ -233,6 +233,21 @@ body > * { position: relative; z-index: 1; }
 .automation-modal-banner a { color: inherit; font-weight: 700; }
 .automation-modal-banner[hidden] { display: none !important; }
 
+/* ── Update available banner ─────────────────────────────────────────── */
+.update-banner {
+  padding: 8px 14px; font-size: 12px; line-height: 1.5; flex: 0 0 auto;
+  background: rgba(229,72,77,0.08); border-bottom: 2px solid var(--red);
+  color: var(--red); font-weight: 600;
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+}
+.update-banner-link {
+  color: #fff; background: var(--red); flex-shrink: 0;
+  padding: 3px 10px; border-radius: 6px; font-size: 11px; font-weight: 700;
+  text-decoration: none; white-space: nowrap;
+}
+.update-banner-link:hover { opacity: 0.85; }
+.update-banner[hidden] { display: none !important; }
+
 /* ── Blocking modal (e.g. Past booking) ─────────────────────────────────── */
 .modal-overlay {
   position: fixed; inset: 0; z-index: 999;

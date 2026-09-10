@@ -1532,6 +1532,36 @@ async function detectAndLoadBooking() {
   }
 }
 
+// ── Update banner ─────────────────────────────────────────────────────────────
+
+// Compares two "x.y.z" version strings numerically (not as plain strings,
+// so "10.10.0" correctly reads as newer than "10.9.0"). Returns true if
+// `a` is strictly older than `b`.
+function isVersionOlder(a, b) {
+  const pa = String(a || '0').split('.').map(n => parseInt(n, 10) || 0);
+  const pb = String(b || '0').split('.').map(n => parseInt(n, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const na = pa[i] || 0, nb = pb[i] || 0;
+    if (na !== nb) return na < nb;
+  }
+  return false;
+}
+
+async function checkForUpdate() {
+  try {
+    const result = await sendMessage({ action: 'CHECK_LATEST_VERSION', workerUrl: DEFAULT_WORKER_URL });
+    if (!result?.ok || !result.latestVersion) return;
+
+    const current = chrome.runtime.getManifest().version;
+    if (!isVersionOlder(current, result.latestVersion)) return;
+
+    const banner = $('update-banner');
+    const link = $('update-banner-link');
+    if (result.downloadUrl) link.href = result.downloadUrl;
+    banner.hidden = false;
+  } catch (_) {}
+}
+
 // ── Init ──────────────────────────────────────────────────────────────────────
 
 $('ticket-details').innerHTML =
@@ -1539,6 +1569,7 @@ $('ticket-details').innerHTML =
 
 (async () => {
   await initTheme();
+  checkForUpdate();
   const status = await checkAuth();
   if (status === 'AUTHENTICATED') await detectAndLoadBooking();
 })();

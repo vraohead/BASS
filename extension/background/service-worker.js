@@ -96,6 +96,22 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
   }
 
 
+  if (request.action === 'CHECK_LATEST_VERSION') {
+    const { workerUrl } = request;
+    (async () => {
+      try {
+        const res = await fetch(`${workerUrl.replace(/\/$/, '')}/latest-version`);
+        const data = await res.json().catch(() => ({}));
+        sendResponse(res.ok
+          ? { ok: true, latestVersion: data.latestVersion || null, downloadUrl: data.downloadUrl || null }
+          : { ok: false, error: data.error || 'Worker error' });
+      } catch (err) {
+        sendResponse({ ok: false, error: err.message });
+      }
+    })();
+    return true;
+  }
+
   if (request.action === 'VERIFY_DAILY_CODE') {
     const { code, workerUrl } = request;
     (async () => {

@@ -21,8 +21,9 @@
 //                            imageBase64?, mimeType?, verifiedAt }
 //                          -> { ok: true, steps: [...], screenshotError? }
 //   GET  /admin/daily-code?password=...       -> { code, date } (admin-only)
-//   GET  /admin/send-daily-code?password=...  -> manually trigger the Slack DM (for testing)
+//   GET  /admin/send-daily-code?password=...  -> manually trigger the Slack post (for testing)
 //   POST /verify-code      { code } -> { valid: true|false }
+//   GET  /latest-version   -> { latestVersion, downloadUrl } — not secret, no auth
 //
 // Every meaningful operation (Slack calls, OpenAI calls) appends a
 // {step, ok, detail, at} entry to a `steps` array that's returned in the
@@ -38,15 +39,26 @@
 // HMAC(DAILY_CODE_SECRET, today's IST date), so it's deterministic for the
 // whole day and automatically different tomorrow with zero extra state.
 //
-// Daily Slack DM: this Worker also exports a `scheduled` handler that DMs
-// the admin (SLACK_ADMIN_USER_ID below) today's code automatically. Wire it
-// up once in the Cloudflare Dashboard: Workers & Pages -> this worker ->
+// Daily Slack post: this Worker also exports a `scheduled` handler that
+// posts today's code to DAILY_CODE_CHANNEL_ID automatically. Wire it up
+// once in the Cloudflare Dashboard: Workers & Pages -> this worker ->
 // Settings -> Triggers -> Cron Triggers -> Add Cron Trigger -> schedule
 // "35 18 * * *" (that's 00:05 IST, i.e. just after the code rolls over).
+//
+// Team update push: add a plain (non-secret) Variable named LATEST_VERSION
+// in the Dashboard (Settings -> Variables) whenever you want everyone's
+// extension to show an "update available" banner — set it to the new
+// version number (must match the manifest.json you're asking people to
+// install, e.g. "10.1.0"). Every extension checks it on open and shows the
+// banner only while its own installed version is older; there's nothing to
+// turn back off — just leave the variable set (or delete it to stop
+// announcing). Not a push in the literal sense (nothing reaches an
+// already-open extension instantly) — it's checked next time each agent
+// opens the panel, same as everything else this Worker serves.
 
 // Bump this string whenever you paste a new version into the dashboard —
 // visiting GET /debug-env instantly confirms whether a deploy took effect.
-const WORKER_VERSION = '2026-09-10-02';
+const WORKER_VERSION = '2026-09-10-03';
 
 // Formats an ISO timestamp as a clean IST string, e.g. "6 Sep 2026, 10:44 PM IST".
 function formatIST(isoString) {
@@ -67,6 +79,10 @@ function formatIST(isoString) {
 // change these if the target Slack channels ever change.
 const SLACK_CHANNEL_ID = 'C0BV91K7F70';
 const DAILY_CODE_CHANNEL_ID = 'C0BKUTZ4ADN';
+
+// Where everyone downloads the extension from — the shared Drive folder,
+// kept up to date in place rather than a new link per release.
+const DOWNLOAD_URL = 'https://drive.google.com/drive/folders/19IvY2URiuri53L_eajvxjuGx2zl-ojZV';
 
 export default {
   async fetch(request, env) {
@@ -107,6 +123,16 @@ export default {
 
     if (request.method === 'POST' && url.pathname === '/verify-code') {
       return handleVerifyCode(request, env);
+    }
+
+    if (request.method === 'GET' && url.pathname === '/latest-version') {
+      // Not secret — the version number and download link are fine to
+      // expose with no auth. Absence of the LATEST_VERSION variable means
+      // "no update being announced right now".
+      return cors(JSON.stringify({
+        latestVersion: env.LATEST_VERSION || null,
+        downloadUrl: DOWNLOAD_URL,
+      }), 200);
     }
 
     return cors(JSON.stringify({ error: 'Not found', version: WORKER_VERSION }), 404);
