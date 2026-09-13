@@ -23,6 +23,7 @@
 //   GET  /admin/daily-code?password=...       -> { code, date } (admin-only)
 //   GET  /admin/send-daily-code?password=...  -> manually trigger the Slack post (for testing)
 //   POST /verify-code      { code } -> { valid: true|false }
+//   POST /verify-admin-code { code } -> { valid: true|false }
 //   GET  /latest-version   -> { latestVersion, downloadUrl } — not secret, no auth
 //
 // Every meaningful operation (Slack calls, OpenAI calls) appends a
@@ -45,6 +46,19 @@
 // Settings -> Triggers -> Cron Triggers -> Add Cron Trigger -> schedule
 // "35 18 * * *" (that's 00:05 IST, i.e. just after the code rolls over).
 //
+// Admin/testing master code: requires one more secret —
+//   wrangler secret put ADMIN_MASTER_CODE   <- pick something with at least
+//                                               one letter in it (e.g.
+//                                               "BASSADMIN2026"), so it can
+//                                               never collide with the
+//                                               all-numeric daily code.
+// Unlike the daily code this never rotates on its own — change the secret
+// value in the Dashboard any time you want to invalidate it. Typed as
+// "<bookingId>-<masterCode>" into the Booking ID box, it flips a
+// persistent "admin mode" in the extension (chrome.storage.local, not this
+// Worker) that bypasses every display gate — Past booking, Booking due
+// soon, Instructions withheld — from then on, for testing.
+//
 // Team update push: add a plain (non-secret) Variable named LATEST_VERSION
 // in the Dashboard (Settings -> Variables) whenever you want everyone's
 // extension to show an "update available" banner — set it to the new
@@ -58,7 +72,7 @@
 
 // Bump this string whenever you paste a new version into the dashboard —
 // visiting GET /debug-env instantly confirms whether a deploy took effect.
-const WORKER_VERSION = '2026-09-10-03';
+const WORKER_VERSION = '2026-09-13-01';
 
 // Formats an ISO timestamp as a clean IST string, e.g. "6 Sep 2026, 10:44 PM IST".
 function formatIST(isoString) {
@@ -100,6 +114,7 @@ export default {
         hasOpenAiKey: !!env.OPENAI_API_KEY,
         hasAdminPassword: !!env.ADMIN_PASSWORD,
         hasDailyCodeSecret: !!env.DAILY_CODE_SECRET,
+        hasAdminMasterCode: !!env.ADMIN_MASTER_CODE,
         slackChannelId: SLACK_CHANNEL_ID,
         dailyCodeChannelId: DAILY_CODE_CHANNEL_ID,
       }), 200);
@@ -123,6 +138,10 @@ export default {
 
     if (request.method === 'POST' && url.pathname === '/verify-code') {
       return handleVerifyCode(request, env);
+    }
+
+    if (request.method === 'POST' && url.pathname === '/verify-admin-code') {
+      return handleVerifyAdminCode(request, env);
     }
 
     if (request.method === 'GET' && url.pathname === '/latest-version') {
@@ -244,6 +263,22 @@ async function handleVerifyCode(request, env) {
   const submitted = String(body.code || '').trim();
   const expected = await computeDailyCode(env, todayIST());
   return cors(JSON.stringify({ valid: submitted.length > 0 && submitted === expected }), 200);
+}
+
+// Static admin/testing master code — unlike the daily code, this never
+// rotates on its own; rotate it by changing the ADMIN_MASTER_CODE secret.
+async function handleVerifyAdminCode(request, env) {
+  if (!env.ADMIN_MASTER_CODE) {
+    return cors(JSON.stringify({ error: 'Worker misconfigured — set the ADMIN_MASTER_CODE secret' }), 500);
+  }
+  let body;
+  try {
+    body = await request.json();
+  } catch (err) {
+    return cors(JSON.stringify({ error: 'Invalid JSON body' }), 400);
+  }
+  const submitted = String(body.code || '').trim();
+  return cors(JSON.stringify({ valid: submitted.length > 0 && submitted === env.ADMIN_MASTER_CODE }), 200);
 }
 
 // ── /verify — AI screenshot verification ──────────────────────────────────────
