@@ -8,14 +8,8 @@ compatibility_date = "2024-09-23"
 crons = ["35 18 * * *"]
 
 # Release-control config (LATEST_VERSION, UPDATE_REQUIRED), read/written by
-# the admin page at Worker root ("/"). IMPORTANT — wrangler deploys are
-# declarative: once Git-based deploys are turned on, this file becomes the
-# full source of truth for bindings, and a deploy with this block missing
-# or wrong will DETACH the existing CONFIG KV binding you set up via the
-# Dashboard (breaking Release Control, though the old plain-Variable
-# fallback still works). Before connecting this repo in the Dashboard,
-# replace the id below with the real one: Dashboard -> Workers & Pages ->
-# KV -> (your namespace) -> copy the ID shown there.
+# the admin page at Worker root ("/"). This is the "Booking Assistant" KV
+# namespace bound to this Worker as CONFIG.
 [[kv_namespaces]]
 binding = "CONFIG"
-id = "REPLACE_WITH_YOUR_CONFIG_KV_NAMESPACE_ID"
+id = "81fab074760c4400b8ce1a1b45ad0745"
