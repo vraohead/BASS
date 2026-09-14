@@ -95,7 +95,12 @@
 // this is same-origin to the Worker's own API. It can view + set
 // LATEST_VERSION and UPDATE_REQUIRED, view today's daily code, and
 // trigger the Slack post on demand, all through the /admin/* endpoints
-// above (same ADMIN_PASSWORD secret as everything else admin-only).
+// above (same ADMIN_PASSWORD secret as everything else admin-only). It
+// also renders a live mini-preview of the extension's own UI (header,
+// search bar, update banner / hard-block screen) that updates as you type
+// — before you even hit Save — so you can see exactly what the team will
+// see for a given Latest version / Update required combination, against a
+// simulated installed version you enter.
 //
 // LATEST_VERSION/UPDATE_REQUIRED written from the page persist in a
 // Workers KV namespace (the plain Variables are still read as a fallback
@@ -107,7 +112,7 @@
 
 // Bump this string whenever you paste a new version into the dashboard —
 // visiting GET /debug-env instantly confirms whether a deploy took effect.
-const WORKER_VERSION = '2026-09-14-04';
+const WORKER_VERSION = '2026-09-14-05';
 
 // Formats an ISO timestamp as a clean IST string, e.g. "6 Sep 2026, 10:44 PM IST".
 function formatIST(isoString) {
@@ -777,12 +782,19 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
   body {
-    margin: 0; padding: 24px 16px 48px; background: #0f1115; color: #e6e6ea;
+    margin: 0; padding: 24px 16px 64px; background: #0f1115; color: #e6e6ea;
     font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif;
   }
-  .wrap { max-width: 560px; margin: 0 auto; }
   h1 { font-size: 18px; margin: 0 0 4px; }
   .sub { color: #8b8b95; margin: 0 0 24px; font-size: 13px; }
+  .login-wrap { max-width: 420px; margin: 40px auto 0; }
+  .layout { max-width: 1080px; margin: 0 auto; display: flex; gap: 20px; align-items: flex-start; }
+  .col-left { flex: 1 1 480px; min-width: 0; }
+  .col-right { flex: 0 0 380px; position: sticky; top: 24px; }
+  @media (max-width: 900px) {
+    .layout { flex-direction: column; }
+    .col-right { position: static; width: 100%; }
+  }
   .card {
     background: #1a1c23; border: 1px solid #2a2c35; border-radius: 10px;
     padding: 18px; margin-bottom: 16px;
@@ -804,6 +816,7 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
   button:disabled { background: #33353f; color: #75757f; cursor: not-allowed; }
   button.secondary { background: #2a2c35; }
   button.secondary:hover { background: #33353f; }
+  button.tiny { padding: 4px 10px; font-size: 12px; }
   .status-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 16px; font-size: 13px; }
   .status-grid div { display: flex; justify-content: space-between; }
   .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
@@ -816,53 +829,175 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
     background: #3a2c0f; border: 1px solid #6b4f14; color: #f0c674;
     border-radius: 8px; padding: 10px 12px; font-size: 12px; margin-bottom: 16px;
   }
+  .live-line {
+    display: flex; justify-content: space-between; align-items: center;
+    background: #14151a; border: 1px solid #2a2c35; border-radius: 7px;
+    padding: 8px 10px; font-size: 12px; color: #b0b0ba; margin-bottom: 14px;
+  }
+  .live-line b { color: #e6e6ea; }
   #dashboard { display: none; }
   a { color: #5865f2; }
+
+  /* ── Extension preview — a scaled-down faithful copy of popup.css ──── */
+  .preview-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+  .preview-head h2 { margin: 0; }
+  .preview-theme-toggle { display: flex; gap: 4px; }
+  .preview-verdict {
+    font-size: 12.5px; color: #b0b0ba; margin-top: 12px; line-height: 1.55;
+    background: #14151a; border: 1px solid #2a2c35; border-radius: 7px; padding: 10px 12px;
+  }
+  .preview-verdict b { color: #e6e6ea; }
+  .ext-frame {
+    width: 100%; max-width: 360px; margin: 0 auto;
+    border-radius: 14px; overflow: hidden; border: 1px solid #000;
+    box-shadow: 0 8px 30px rgba(0,0,0,0.35);
+    font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  }
+  .ext-frame[data-theme="light"] {
+    --x-bg: #f4f2fb; --x-surface: #ffffff; --x-surface2: #f6f3fd; --x-border: #e8e3f3;
+    --x-accent: #7c2ff0; --x-accent3: #6311cb; --x-green: #1a9d6e; --x-red: #e5484d;
+    --x-text: #1c1535; --x-muted: #8a84a0; --x-header-bg: rgba(255,255,255,0.96);
+  }
+  .ext-frame[data-theme="dark"] {
+    --x-bg: #130d22; --x-surface: rgba(32,24,52,0.88); --x-surface2: rgba(43,33,66,0.92); --x-border: rgba(255,255,255,0.07);
+    --x-accent: #a979ff; --x-accent3: #8b5cf6; --x-green: #35d39b; --x-red: #f87171;
+    --x-text: #ece8f6; --x-muted: #a8a2c4; --x-header-bg: rgba(19,13,34,0.95);
+  }
+  .ext-frame { background: var(--x-bg); color: var(--x-text); }
+  .ext-header {
+    background: var(--x-header-bg); border-bottom: 1px solid var(--x-border);
+    padding: 8px 12px; display: flex; align-items: center; justify-content: space-between;
+  }
+  .ext-title { font-size: 12px; font-weight: 800; }
+  .ext-sub { font-size: 9px; color: var(--x-muted); text-transform: uppercase; letter-spacing: .1em; font-weight: 600; }
+  .ext-auth-pill {
+    font-size: 10px; font-weight: 700; padding: 3px 9px; border-radius: 20px;
+    border: 1px solid var(--x-border); background: rgba(26,157,110,0.10); color: var(--x-green);
+  }
+  .ext-searchbar {
+    padding: 7px 10px; background: var(--x-surface2); border-bottom: 1px solid var(--x-border);
+    display: flex; gap: 6px; align-items: center;
+  }
+  .ext-input {
+    flex: 1; min-width: 0; padding: 7px 10px; background: var(--x-bg); border: 1px solid var(--x-border);
+    border-radius: 8px; color: var(--x-muted); font-size: 12px; font-family: 'JetBrains Mono', monospace;
+  }
+  .ext-btn {
+    padding: 7px 10px; border: none; border-radius: 8px; font-size: 11px; font-weight: 700;
+    white-space: nowrap;
+  }
+  .ext-btn-primary { background: linear-gradient(135deg, var(--x-accent), var(--x-accent3)); color: #fff; }
+  .ext-btn-danger { background: transparent; color: var(--x-red); border: 1px solid var(--x-border); }
+  .ext-update-banner {
+    padding: 8px 12px; font-size: 11px; line-height: 1.5;
+    background: rgba(229,72,77,0.08); border-bottom: 2px solid var(--x-red); color: var(--x-red); font-weight: 600;
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  }
+  .ext-banner-link {
+    color: #fff; background: var(--x-red); flex-shrink: 0; padding: 3px 9px; border-radius: 6px;
+    font-size: 10px; font-weight: 700; white-space: nowrap;
+  }
+  .ext-update-banner[hidden] { display: none !important; }
+  .ext-body { min-height: 260px; display: flex; flex-direction: column; }
+  .ext-placeholder {
+    flex: 1; display: flex; align-items: center; justify-content: center; text-align: center;
+    padding: 40px 20px; color: var(--x-muted); font-size: 12px; line-height: 1.6;
+  }
+  .ext-gate {
+    flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    text-align: center; padding: 40px 20px; gap: 8px;
+  }
+  .ext-gate-icon { font-size: 36px; line-height: 1; margin-bottom: 4px; }
+  .ext-gate-title { font-size: 14px; font-weight: 800; }
+  .ext-gate-sub { font-size: 11.5px; color: var(--x-muted); line-height: 1.6; max-width: 250px; }
+  .ext-gate-sub a { color: var(--x-accent); font-weight: 600; text-decoration: none; }
 </style>
 </head>
 <body>
-<div class="wrap">
   <h1>Booking Assistant — Admin</h1>
   <p class="sub">Worker: <span id="worker-version">—</span></p>
 
-  <div id="login-card" class="card">
+  <div id="login-card" class="card login-wrap">
     <h2>Unlock</h2>
     <input type="password" id="password-input" placeholder="Admin password" autocomplete="off" />
     <button id="unlock-btn">Unlock</button>
     <p class="msg" id="login-msg"></p>
   </div>
 
-  <div id="dashboard">
-    <div id="kv-warning" class="warn-banner" style="display:none">
-      No CONFIG KV namespace bound yet — Release Control is read-only (showing values from the plain env Variables). Bind one in Settings → Bindings → KV Namespace → name it <b>CONFIG</b> to make this page able to write changes.
-    </div>
-
-    <div class="card">
-      <h2>Release control</h2>
-      <label for="version-input">Latest version</label>
-      <input type="text" id="version-input" placeholder="e.g. 10.5.0" />
-      <div class="checkbox-row">
-        <input type="checkbox" id="required-input" />
-        <label for="required-input" style="margin:0">Update required (hard block instead of banner)</label>
+  <div id="dashboard" class="layout">
+    <div class="col-left">
+      <div id="kv-warning" class="warn-banner" style="display:none">
+        No CONFIG KV namespace bound yet — Release Control is read-only (showing values from the plain env Variables). Bind one in Settings → Bindings → KV Namespace → name it <b>CONFIG</b> to make this page able to write changes.
       </div>
-      <button id="save-config-btn">Save</button>
-      <p class="msg" id="config-msg"></p>
+
+      <div class="card">
+        <h2>Release control</h2>
+        <div class="live-line">
+          <span>Currently live for the team:</span>
+          <span><b id="live-version">—</b> · <b id="live-required">—</b></span>
+        </div>
+        <label for="version-input">Latest version</label>
+        <input type="text" id="version-input" placeholder="e.g. 10.5.0" />
+        <div class="checkbox-row">
+          <input type="checkbox" id="required-input" />
+          <label for="required-input" style="margin:0">Update required (hard block instead of banner)</label>
+        </div>
+        <button id="save-config-btn">Save</button>
+        <p class="msg" id="config-msg"></p>
+      </div>
+
+      <div class="card">
+        <h2>Daily instructions-unlock code</h2>
+        <div class="code-display" id="daily-code">——————</div>
+        <p class="muted" id="daily-code-date"></p>
+        <button class="secondary" id="send-slack-btn">Send to Slack now</button>
+        <p class="msg" id="slack-msg"></p>
+      </div>
+
+      <div class="card">
+        <h2>Status</h2>
+        <div class="status-grid" id="status-grid"></div>
+      </div>
     </div>
 
-    <div class="card">
-      <h2>Daily instructions-unlock code</h2>
-      <div class="code-display" id="daily-code">——————</div>
-      <p class="muted" id="daily-code-date"></p>
-      <button class="secondary" id="send-slack-btn">Send to Slack now</button>
-      <p class="msg" id="slack-msg"></p>
-    </div>
+    <div class="col-right">
+      <div class="card">
+        <div class="preview-head">
+          <h2 style="margin:0">Live preview</h2>
+          <div class="preview-theme-toggle">
+            <button type="button" class="tiny secondary" id="preview-theme-light">☀️</button>
+            <button type="button" class="tiny secondary" id="preview-theme-dark">🌙</button>
+          </div>
+        </div>
+        <label for="sim-version-input">Simulate an installed version</label>
+        <input type="text" id="sim-version-input" placeholder="e.g. 10.2.0 (blank = behind)" />
 
-    <div class="card">
-      <h2>Status</h2>
-      <div class="status-grid" id="status-grid"></div>
+        <div class="ext-frame" id="ext-frame" data-theme="dark">
+          <div class="ext-header">
+            <div>
+              <div class="ext-title">Booking Assistant</div>
+              <div class="ext-sub">Box Office Tool</div>
+            </div>
+            <span class="ext-auth-pill">✓ authenticated</span>
+          </div>
+          <div class="ext-searchbar">
+            <input class="ext-input" value="Booking ID…" disabled />
+            <button class="ext-btn ext-btn-primary">⟳ Fetch</button>
+            <button class="ext-btn ext-btn-danger">✕ Clear</button>
+          </div>
+          <div class="ext-update-banner" id="ext-update-banner" hidden>
+            <span>🚨 A new version is available — please download the latest update.</span>
+            <span class="ext-banner-link">Download</span>
+          </div>
+          <div class="ext-body" id="ext-body">
+            <div class="ext-placeholder">Booking details would show here as normal.</div>
+          </div>
+        </div>
+
+        <p class="preview-verdict" id="preview-verdict"></p>
+      </div>
     </div>
   </div>
-</div>
 
 <script>
 (function () {
@@ -871,10 +1006,74 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
   var dashboard = document.getElementById('dashboard');
   var loginCard = document.getElementById('login-card');
   var password = null;
+  var liveConfig = { latestVersion: null, updateRequired: false };
+  var previewTheme = 'dark';
 
   function statusRow(label, ok) {
     return '<div><span>' + label + '</span><span><span class="dot ' + (ok ? 'ok' : 'bad') + '"></span>' + (ok ? 'yes' : 'no') + '</span></div>';
   }
+
+  // Same numeric per-segment comparison as the extension's isVersionOlder,
+  // so the preview matches real behaviour exactly (e.g. 10.9.0 < 10.10.0).
+  function isVersionOlder(a, b) {
+    var pa = String(a || '0').split('.').map(function (n) { return parseInt(n, 10) || 0; });
+    var pb = String(b || '0').split('.').map(function (n) { return parseInt(n, 10) || 0; });
+    for (var i = 0; i < Math.max(pa.length, pb.length); i++) {
+      var na = pa[i] || 0, nb = pb[i] || 0;
+      if (na !== nb) return na < nb;
+    }
+    return false;
+  }
+
+  function escHtml(s) {
+    return String(s || '').replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
+  function renderPreview() {
+    var latestVersion = document.getElementById('version-input').value.trim();
+    var updateRequired = document.getElementById('required-input').checked;
+    var simRaw = document.getElementById('sim-version-input').value.trim();
+    var sim = simRaw || '0.0.0'; // blank = "assume it's behind", the common case being demoed
+    var frame = document.getElementById('ext-frame');
+    var banner = document.getElementById('ext-update-banner');
+    var body = document.getElementById('ext-body');
+    var verdict = document.getElementById('preview-verdict');
+
+    frame.setAttribute('data-theme', previewTheme);
+
+    if (!latestVersion || !isVersionOlder(sim, latestVersion)) {
+      banner.hidden = true;
+      body.innerHTML = '<div class="ext-placeholder">Booking details would show here as normal — no update prompt.</div>';
+      verdict.innerHTML = !latestVersion
+        ? 'No <b>Latest version</b> set — nothing is announced right now.'
+        : 'Simulated install <b>' + escHtml(simRaw || '(blank)') + '</b> is not behind <b>' + escHtml(latestVersion) + '</b> — extension looks completely normal.';
+      return;
+    }
+
+    if (updateRequired) {
+      banner.hidden = true;
+      body.innerHTML =
+        '<div class="ext-gate">' +
+          '<div class="ext-gate-icon">🚨</div>' +
+          '<div class="ext-gate-title">Update required</div>' +
+          '<div class="ext-gate-sub">Version ' + escHtml(latestVersion) + ' is required to keep using Booking Assistant.<br><a>Download the latest version</a>, then reload the extension.</div>' +
+        '</div>';
+      verdict.innerHTML = 'Simulated install <b>' + escHtml(simRaw || '(behind)') + '</b> is behind <b>' + escHtml(latestVersion) + '</b> and <b>Update required</b> is ON → full-screen block, extension unusable until updated. (The Booking ID box itself stays enabled the whole time — only the admin master code still works through it.)';
+    } else {
+      banner.hidden = false;
+      body.innerHTML = '<div class="ext-placeholder">Booking details would still show here as normal — the banner is dismissable by updating, not blocking.</div>';
+      verdict.innerHTML = 'Simulated install <b>' + escHtml(simRaw || '(behind)') + '</b> is behind <b>' + escHtml(latestVersion) + '</b> and <b>Update required</b> is OFF → dismissable red banner only, extension stays fully usable.';
+    }
+  }
+
+  document.getElementById('preview-theme-light').addEventListener('click', function () { previewTheme = 'light'; renderPreview(); });
+  document.getElementById('preview-theme-dark').addEventListener('click', function () { previewTheme = 'dark'; renderPreview(); });
+  ['version-input', 'sim-version-input'].forEach(function (id) {
+    document.getElementById(id).addEventListener('input', renderPreview);
+  });
+  document.getElementById('required-input').addEventListener('change', renderPreview);
 
   function render(cfg) {
     document.getElementById('worker-version').textContent = cfg.workerVersion || '—';
@@ -890,6 +1089,11 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
       statusRow('Daily code secret', cfg.hasDailyCodeSecret) +
       statusRow('Admin master code', cfg.hasAdminMasterCode) +
       statusRow('CONFIG KV bound', cfg.hasConfigKv);
+
+    liveConfig = { latestVersion: cfg.latestVersion || null, updateRequired: !!cfg.updateRequired };
+    document.getElementById('live-version').textContent = liveConfig.latestVersion || 'none set';
+    document.getElementById('live-required').textContent = liveConfig.updateRequired ? 'hard block ON' : 'banner only';
+    renderPreview();
   }
 
   function unlock(pw, opts) {
@@ -905,7 +1109,7 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
         password = pw;
         try { sessionStorage.setItem('bassAdminPw', pw); } catch (_) {}
         loginCard.style.display = 'none';
-        dashboard.style.display = 'block';
+        dashboard.style.display = 'flex';
         render(r.data);
         return true;
       })
@@ -937,7 +1141,7 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
       .then(function (res) { return res.json().then(function (data) { return { ok: res.ok, data: data }; }); })
       .then(function (r) {
         if (!r.ok) { msg.textContent = r.data.error || 'Save failed'; msg.className = 'msg err'; return; }
-        msg.textContent = 'Saved.'; msg.className = 'msg ok';
+        msg.textContent = 'Saved — now live for the whole team.'; msg.className = 'msg ok';
         render(Object.assign({ workerVersion: document.getElementById('worker-version').textContent }, r.data));
       })
       .catch(function (err) { msg.textContent = 'Request failed: ' + err.message; msg.className = 'msg err'; });
