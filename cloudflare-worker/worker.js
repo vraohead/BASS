@@ -76,7 +76,10 @@
 // installed version is behind LATEST_VERSION then gets a full-screen
 // "Update Required" block (no booking lookup, no tabs) until they install
 // the new version. Set UPDATE_REQUIRED back to "false" (or delete it) to
-// drop back to the soft banner for the same LATEST_VERSION.
+// drop back to the soft banner for the same LATEST_VERSION. Admin mode
+// (the ID-masterCode bypass, extension-side) is exempt from the hard
+// block, so testing a new version never locks the admin out of their own
+// device — they still see the soft banner as a reminder.
 
 // Bump this string whenever you paste a new version into the dashboard —
 // visiting GET /debug-env instantly confirms whether a deploy took effect.

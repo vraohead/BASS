@@ -1606,7 +1606,10 @@ function showUpdateRequiredGate(downloadUrl, latestVersion) {
 }
 
 // Returns { blocked: boolean } — blocked means a hard update gate was shown
-// and the rest of init (auth check, booking load) should be skipped.
+// and the rest of init (auth check, booking load) should be skipped. Admin
+// mode (loadAdminMode() runs before this in init) bypasses the hard block
+// so testing a new version never locks Vivek out of his own device; the
+// soft banner still shows for admin so he sees the nudge too.
 async function checkForUpdate() {
   try {
     const result = await sendMessage({ action: 'CHECK_LATEST_VERSION', workerUrl: DEFAULT_WORKER_URL });
@@ -1615,7 +1618,7 @@ async function checkForUpdate() {
     const current = chrome.runtime.getManifest().version;
     if (!isVersionOlder(current, result.latestVersion)) return { blocked: false };
 
-    if (result.updateRequired) {
+    if (result.updateRequired && !adminModeEnabled) {
       showUpdateRequiredGate(result.downloadUrl || 'https://drive.google.com/drive/folders/19IvY2URiuri53L_eajvxjuGx2zl-ojZV', result.latestVersion);
       return { blocked: true };
     }
