@@ -772,6 +772,19 @@ document.addEventListener('paste', e => {
   }
 });
 
+// Cheap, free, local substring-based matching against a captured tab's raw
+// text — no AI call needed. Used both by the standalone "Capture Response"
+// pane and to cross-check the AI Verify result when both were captured.
+function computeTextChecks(text, { date, time, pax, price, product }) {
+  return [
+    { label: 'Date',      expected: date,    found: date    ? text.includes(date)  : null },
+    { label: 'Time',      expected: time,    found: time    ? text.includes(time.substring(0,5)) : null },
+    { label: 'Pax',       expected: pax,     found: pax     ? new RegExp(`\\b${pax}\\b`).test(text) : null },
+    { label: 'Net Price', expected: price,   found: price   ? text.includes(price) : null },
+    { label: 'Product',   expected: product, found: product ? text.toLowerCase().includes(product.toLowerCase()) : null },
+  ].filter(c => c.expected && c.found !== null);
+}
+
 function renderVerifyRow(c, i) {
   const matched = c.found;
   const skipId = `vr-skip-${i}`;
@@ -817,6 +830,10 @@ function _setVerifyImage(sec, dataUrl) {
   sec.querySelector('.verify-ai-row').hidden = false;
   sec.querySelector('.verify-ai-results').hidden = true;
   sec.querySelector('.verify-ai-results').innerHTML = '';
+  // A new image invalidates any previously captured tab text — the
+  // "Capture Current Tab" handler re-populates this right after, if it
+  // succeeds; a pasted/dropped/uploaded image has no associated tab text.
+  sec._capturedResponseText = null;
 }
 
 function _getVerifyFacts(flat, guestData) {
@@ -952,6 +969,14 @@ function buildVerifySection(flat, guestData) {
     btn.textContent = '📸 Capture Current Tab';
     if (result?.ok) {
       _setVerifyImage(sec, result.dataUrl);
+      // Also grab the tab's text content in the same action, so AI Verify
+      // can cross-check the screenshot against it automatically. Silently
+      // skip if the page can't be read this way — the screenshot alone is
+      // still enough to run AI Verify.
+      try {
+        const respResult = await sendMessage({ action: 'CAPTURE_RESPONSE' });
+        if (respResult?.ok) sec._capturedResponseText = respResult.text;
+      } catch (_) {}
     } else {
       errEl.innerHTML = `<p class="verify-result-error">Screenshot failed: ${escHtml(result?.error || 'unknown')}</p>`;
       errEl.hidden = false;
@@ -1010,20 +1035,43 @@ function buildVerifySection(flat, guestData) {
       return;
     }
 
-    const checks = result.checks || [];
-    const checkoutBanner = result.isCheckoutPage
-      ? `<p class="verify-checkout-flag">🛒 This looks like a checkout/cart/payment page, not a confirmed ticket${result.checkoutPageNote ? ` — ${escHtml(result.checkoutPageNote)}` : ''}. Capture the actual booking confirmation instead.</p>`
+    // If a tab response was also captured (same click, or an earlier
+    // manual Capture Response), cross-check it too and merge: a field
+    // counts as found if either the AI (on the image) or the plain text
+    // match confirms it — combining both catches more real matches than
+    // either alone, which is the point (fewer false "not found" flags).
+    let checks = result.checks || [];
+    let crossCheckedNote = '';
+    if (sec._capturedResponseText) {
+      const textChecks = computeTextChecks(sec._capturedResponseText, { date, time, pax, price, product });
+      const byLabel = new Map(checks.map(c => [c.label, { ...c }]));
+      for (const tc of textChecks) {
+        const existing = byLabel.get(tc.label);
+        if (existing) existing.found = existing.found || tc.found;
+        else byLabel.set(tc.label, tc);
+      }
+      checks = [...byLabel.values()];
+      crossCheckedNote = '<p class="verify-cross-checked">✓ Cross-checked against the page\'s text content too.</p>';
+    }
+
+    // isCheckoutPage:false means this is an already-issued/confirmed ticket
+    // rather than the checkout/cart/payment page we expect agents to
+    // capture — checking only after a booking is already placed defeats
+    // the purpose of catching mistakes before they happen, so flag it.
+    const checkoutBanner = result.isCheckoutPage === false
+      ? `<p class="verify-checkout-flag">⚠️ This looks like an already-issued ticket, not a checkout/cart/payment page${result.checkoutPageNote ? ` — ${escHtml(result.checkoutPageNote)}` : ''}. Capture the checkout page before the booking is confirmed instead.</p>`
       : '';
 
     if (!checks.length) {
       resultsEl.innerHTML = checkoutBanner || '<p class="verify-result-error">No results returned from AI.</p>';
     } else {
-      resultsEl.innerHTML = checkoutBanner + checks.map((c, i) => renderVerifyRow(c, i)).join('');
+      resultsEl.innerHTML = checkoutBanner + crossCheckedNote + checks.map((c, i) => renderVerifyRow(c, i)).join('');
       const { totalMismatches } = wireSkipBoxes(resultsEl, confirmRow);
       // Perfect match, nothing to skip — confirm automatically instead of
       // waiting on a click that has nothing left to gate. Never auto-confirm
-      // a checkout page though, even if every field happens to match.
-      if (totalMismatches === 0 && !result.isCheckoutPage) confirmBtn.click();
+      // an already-issued ticket though (isCheckoutPage:false) — that case
+      // needs a human to notice the process was done out of order.
+      if (totalMismatches === 0 && result.isCheckoutPage !== false) confirmBtn.click();
     }
     resultsEl.hidden = false;
   });
@@ -1044,14 +1092,8 @@ function buildVerifySection(flat, guestData) {
       return;
     }
 
-    const text = result.text;
-    const checks = [
-      { label: 'Date',      expected: date,    found: date    ? text.includes(date)  : null },
-      { label: 'Time',      expected: time,    found: time    ? text.includes(time.substring(0,5)) : null },
-      { label: 'Pax',       expected: pax,     found: pax     ? new RegExp(`\\b${pax}\\b`).test(text) : null },
-      { label: 'Net Price', expected: price,   found: price   ? text.includes(price) : null },
-      { label: 'Product',   expected: product, found: product ? text.toLowerCase().includes(product.toLowerCase()) : null },
-    ].filter(c => c.expected && c.found !== null);
+    sec._capturedResponseText = result.text;
+    const checks = computeTextChecks(result.text, { date, time, pax, price, product });
 
     if (!checks.length) {
       resultsEl.innerHTML = '<p class="verify-result-error">No booking values to match against.</p>';

@@ -19,6 +19,10 @@
 //   GET  /debug-env      -> { hasSlackToken, hasOpenAiKey, slackChannelId, version }
 //   POST /verify          { imageBase64, mimeType, facts: {date,time,pax,price,product} }
 //                          -> { checks: [...], isCheckoutPage, checkoutPageNote }
+//                             isCheckoutPage:false is the flagged case — the
+//                             screenshot is expected to be a checkout/cart/
+//                             payment page (pre-confirmation), not an
+//                             already-issued ticket
 //   POST /confirm-flag     { bookingId, agentEmail, confirmed, skipped,
 //                            imageBase64?, mimeType?, verifiedAt }
 //                          -> { ok: true, steps: [...], screenshotError? }
@@ -103,7 +107,7 @@
 
 // Bump this string whenever you paste a new version into the dashboard —
 // visiting GET /debug-env instantly confirms whether a deploy took effect.
-const WORKER_VERSION = '2026-09-14-03';
+const WORKER_VERSION = '2026-09-14-04';
 
 // Formats an ISO timestamp as a clean IST string, e.g. "6 Sep 2026, 10:44 PM IST".
 function formatIST(isoString) {
@@ -446,7 +450,7 @@ async function handleVerify(request, env) {
   // Deliberately verbose and explicit — the aim is to eliminate manual
   // re-checking entirely, not just catch the easy cases. Every rule below
   // exists because a naive exact-string-match prompt used to miss it.
-  const prompt = `You are a meticulous booking-verification assistant. You are checking whether a screenshot proves a real, already-confirmed booking that matches an internal booking record. Getting this wrong in either direction causes real problems — a false "found: true" lets a bad or unconfirmed booking through, and a false "found: false" creates needless manual review — so read carefully and think about what's actually shown before answering.
+  const prompt = `You are a meticulous booking-verification assistant. Agents capture this screenshot BEFORE finalizing a booking on a vendor site, to catch mistakes (wrong date, wrong pax, wrong tour) while they can still be fixed — so it should show the CHECKOUT / CART / PAYMENT page with the booking details entered but not yet confirmed, not an already-issued ticket. Getting the field checks wrong in either direction causes real problems — a false "found: true" lets a mistake through, and a false "found: false" creates needless manual review — so read carefully and think about what's actually shown before answering.
 
 Booking record to match against the screenshot:
 ${factLines}
@@ -459,16 +463,16 @@ How to judge each field:
 5. Product / experience name: compare the tour/experience/product name shown in the screenshot against the expected name. Minor wording differences (abbreviations, punctuation, added suffixes like "- with hotel pickup", capitalization) still count as a match if it is clearly the same experience. A genuinely different tour or activity is not a match.
 
 Separately — always answer this regardless of the fields above:
-6. Page type: determine whether this screenshot shows a CHECKOUT / CART / PAYMENT page (e.g. "Pay now", "Proceed to payment", an editable cart, empty or partial guest details, a payment form) rather than an actual issued ticket or booking confirmation (e.g. a booking/ticket/confirmation number, a QR/barcode, "Booking Confirmed", a voucher). A checkout or cart page is NOT valid proof of a completed booking, even if the details on it match — flag this clearly and separately from the field checks above.
+6. Page type: this screenshot is EXPECTED to be a CHECKOUT / CART / PAYMENT page — showing the booking being entered and about to be confirmed on the vendor's site (an editable cart, guest/date/time selection, a "Pay now" or "Proceed to payment" button, a price breakdown), NOT an already-issued ticket or booking confirmation (a booking/ticket/confirmation number, a QR/barcode, "Booking Confirmed", a voucher). Checking the details only AFTER the booking is already placed defeats the entire purpose of catching mistakes before they happen, so this must be flagged whenever it happens.
 
 Reply ONLY with valid JSON in this exact shape — no markdown, no extra text:
-{"checks":[{"label":"Date","expected":"${date}","found":true},{"label":"Time","expected":"${time}","found":false}],"isCheckoutPage":false,"checkoutPageNote":""}
+{"checks":[{"label":"Date","expected":"${date}","found":true},{"label":"Time","expected":"${time}","found":false}],"isCheckoutPage":true,"checkoutPageNote":""}
 
 Rules:
 - Only include a check for a field if its expected value above is non-empty.
 - Set found to true only when the value is unambiguously present after applying the format-tolerance rules above.
-- isCheckoutPage must be true whenever the screenshot is a checkout/cart/payment page rather than a confirmed ticket or booking confirmation.
-- checkoutPageNote: if isCheckoutPage is true, a short (under 15 words) reason why (e.g. "Shows cart totals and a Pay Now button, no confirmation number"); otherwise an empty string.`;
+- isCheckoutPage must be true when the screenshot is the expected checkout/cart/payment page, and false when it instead shows an already-confirmed/issued ticket (the case that needs to be flagged).
+- checkoutPageNote: if isCheckoutPage is false, a short (under 15 words) reason why (e.g. "Shows a confirmed booking number and QR code — this is an issued ticket, not a checkout page"); otherwise an empty string.`;
 
   // Structured Outputs: a strict JSON Schema makes OpenAI's API layer itself
   // guarantee the response is valid JSON matching this exact shape — the
