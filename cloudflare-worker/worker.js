@@ -15,12 +15,15 @@
 //   wrangler secret put SLACK_BOT_TOKEN  <- paste Slack bot token when prompted
 //
 // Endpoints:
+//   GET  /               -> the admin control page (see "Admin page" below)
 //   GET  /debug-env      -> { hasSlackToken, hasOpenAiKey, slackChannelId, version }
 //   POST /verify          { imageBase64, mimeType, facts } -> { checks: [...] }
 //   POST /confirm-flag     { bookingId, agentEmail, confirmed, skipped,
 //                            imageBase64?, mimeType?, verifiedAt }
 //                          -> { ok: true, steps: [...], screenshotError? }
 //   GET  /admin/send-daily-code?password=...  -> manually trigger the Slack post (for testing)
+//   GET  /admin/config?password=...           -> current config + today's code + secret status (admin-only)
+//   POST /admin/set-config { password, latestVersion?, updateRequired? } -> write config (admin-only)
 //   POST /verify-code      { code } -> { valid: true|false }
 //   POST /verify-admin-code { code } -> { valid: true|false }
 //   GET  /latest-version   -> { latestVersion, downloadUrl, updateRequired } — not secret, no auth
@@ -80,10 +83,26 @@
 // (the ID-masterCode bypass, extension-side) is exempt from the hard
 // block, so testing a new version never locks the admin out of their own
 // device — they still see the soft banner as a reminder.
+//
+// Admin page: visiting this Worker's own URL in a browser (e.g.
+// https://bass-verify.vivek-rao.workers.dev/) now serves a small
+// password-gated control page — no separate site or Artifact needed, since
+// this is same-origin to the Worker's own API. It can view + set
+// LATEST_VERSION and UPDATE_REQUIRED, view today's daily code, and
+// trigger the Slack post on demand, all through the /admin/* endpoints
+// above (same ADMIN_PASSWORD secret as everything else admin-only).
+//
+// LATEST_VERSION/UPDATE_REQUIRED written from the page persist in a
+// Workers KV namespace (the plain Variables are still read as a fallback
+// if KV isn't set up, so nothing breaks before you add it) — one-time
+// setup: Dashboard -> this worker -> Settings -> Bindings -> Add ->
+// KV Namespace -> create a namespace (any name) -> bind it as variable
+// name CONFIG. Until that binding exists, the page's status panel says so
+// and the Save button on Release Control is disabled.
 
 // Bump this string whenever you paste a new version into the dashboard —
 // visiting GET /debug-env instantly confirms whether a deploy took effect.
-const WORKER_VERSION = '2026-09-14-01';
+const WORKER_VERSION = '2026-09-14-02';
 
 // Formats an ISO timestamp as a clean IST string, e.g. "6 Sep 2026, 10:44 PM IST".
 function formatIST(isoString) {
@@ -118,7 +137,12 @@ export default {
 
     const url = new URL(request.url);
 
+    if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '/admin')) {
+      return htmlResponse(ADMIN_PAGE_HTML);
+    }
+
     if (request.method === 'GET' && url.pathname === '/debug-env') {
+      const config = await getConfig(env);
       return cors(JSON.stringify({
         version: WORKER_VERSION,
         hasSlackToken: !!env.SLACK_BOT_TOKEN,
@@ -126,10 +150,11 @@ export default {
         hasAdminPassword: !!env.ADMIN_PASSWORD,
         hasDailyCodeSecret: !!env.DAILY_CODE_SECRET,
         hasAdminMasterCode: !!env.ADMIN_MASTER_CODE,
+        hasConfigKv: !!env.CONFIG,
         slackChannelId: SLACK_CHANNEL_ID,
         dailyCodeChannelId: DAILY_CODE_CHANNEL_ID,
-        latestVersion: env.LATEST_VERSION || null,
-        updateRequired: env.UPDATE_REQUIRED === 'true',
+        latestVersion: config.latestVersion,
+        updateRequired: config.updateRequired,
       }), 200);
     }
 
@@ -145,6 +170,14 @@ export default {
       return handleAdminSendDailyCode(request, env, url);
     }
 
+    if (request.method === 'GET' && url.pathname === '/admin/config') {
+      return handleAdminGetConfig(request, env, url);
+    }
+
+    if (request.method === 'POST' && url.pathname === '/admin/set-config') {
+      return handleAdminSetConfig(request, env);
+    }
+
     if (request.method === 'POST' && url.pathname === '/verify-code') {
       return handleVerifyCode(request, env);
     }
@@ -155,12 +188,13 @@ export default {
 
     if (request.method === 'GET' && url.pathname === '/latest-version') {
       // Not secret — the version number and download link are fine to
-      // expose with no auth. Absence of the LATEST_VERSION variable means
-      // "no update being announced right now".
+      // expose with no auth. Absence of a configured version means "no
+      // update being announced right now".
+      const config = await getConfig(env);
       return cors(JSON.stringify({
-        latestVersion: env.LATEST_VERSION || null,
+        latestVersion: config.latestVersion,
         downloadUrl: DOWNLOAD_URL,
-        updateRequired: env.UPDATE_REQUIRED === 'true',
+        updateRequired: config.updateRequired,
       }), 200);
     }
 
@@ -243,6 +277,96 @@ async function handleAdminSendDailyCode(request, env, url) {
   }
   const result = await sendDailyCodeToSlack(env);
   return cors(JSON.stringify(result), result.ok ? 200 : 502);
+}
+
+// ── Admin config (Release Control) ──────────────────────────────────────────
+// Read/write LATEST_VERSION + UPDATE_REQUIRED at runtime via a Workers KV
+// binding (env.CONFIG) so the admin page can change them without touching
+// the Dashboard. Falls back to the plain env Variables when KV isn't bound
+// yet or has no value for a key, so nothing breaks before that's set up.
+async function getConfig(env) {
+  let latestVersion = null;
+  let updateRequired = false;
+  let kvHasVersion = false;
+  let kvHasRequired = false;
+
+  if (env.CONFIG) {
+    try {
+      const [lv, ur] = await Promise.all([
+        env.CONFIG.get('latestVersion'),
+        env.CONFIG.get('updateRequired'),
+      ]);
+      if (lv !== null) { latestVersion = lv; kvHasVersion = true; }
+      if (ur !== null) { updateRequired = ur === 'true'; kvHasRequired = true; }
+    } catch (_) {
+      // KV read failed — fall through to the plain-Variable fallback below.
+    }
+  }
+
+  if (!kvHasVersion && env.LATEST_VERSION) latestVersion = env.LATEST_VERSION;
+  if (!kvHasRequired && env.UPDATE_REQUIRED === 'true') updateRequired = true;
+
+  return { latestVersion, updateRequired };
+}
+
+async function handleAdminGetConfig(request, env, url) {
+  if (!env.ADMIN_PASSWORD) {
+    return cors(JSON.stringify({ error: 'Worker misconfigured — set the ADMIN_PASSWORD secret' }), 500);
+  }
+  const password = url.searchParams.get('password') || '';
+  if (password !== env.ADMIN_PASSWORD) {
+    return cors(JSON.stringify({ error: 'Wrong password' }), 401);
+  }
+
+  const config = await getConfig(env);
+  let dailyCode = null, dailyCodeDate = null;
+  if (env.DAILY_CODE_SECRET) {
+    dailyCodeDate = todayIST();
+    dailyCode = await computeDailyCode(env, dailyCodeDate);
+  }
+
+  return cors(JSON.stringify({
+    ...config,
+    dailyCode,
+    dailyCodeDate,
+    workerVersion: WORKER_VERSION,
+    hasConfigKv: !!env.CONFIG,
+    hasSlackToken: !!env.SLACK_BOT_TOKEN,
+    hasOpenAiKey: !!env.OPENAI_API_KEY,
+    hasDailyCodeSecret: !!env.DAILY_CODE_SECRET,
+    hasAdminMasterCode: !!env.ADMIN_MASTER_CODE,
+    dailyCodeChannelId: DAILY_CODE_CHANNEL_ID,
+  }), 200);
+}
+
+async function handleAdminSetConfig(request, env) {
+  if (!env.ADMIN_PASSWORD) {
+    return cors(JSON.stringify({ error: 'Worker misconfigured — set the ADMIN_PASSWORD secret' }), 500);
+  }
+  let body;
+  try {
+    body = await request.json();
+  } catch (err) {
+    return cors(JSON.stringify({ error: 'Invalid JSON body' }), 400);
+  }
+  if (body.password !== env.ADMIN_PASSWORD) {
+    return cors(JSON.stringify({ error: 'Wrong password' }), 401);
+  }
+  if (!env.CONFIG) {
+    return cors(JSON.stringify({
+      error: 'No CONFIG KV namespace bound — add one in Settings -> Bindings -> KV Namespace, bind it as CONFIG',
+    }), 500);
+  }
+
+  if (typeof body.latestVersion === 'string') {
+    await env.CONFIG.put('latestVersion', body.latestVersion.trim());
+  }
+  if (typeof body.updateRequired === 'boolean') {
+    await env.CONFIG.put('updateRequired', body.updateRequired ? 'true' : 'false');
+  }
+
+  const config = await getConfig(env);
+  return cors(JSON.stringify({ ok: true, ...config }), 200);
 }
 
 async function handleVerifyCode(request, env) {
@@ -610,3 +734,209 @@ function cors(body, status) {
     },
   });
 }
+
+function htmlResponse(body) {
+  return new Response(body, { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+}
+
+// ── Admin page — served at GET / on this Worker's own domain, so its
+// fetch() calls to /admin/* are same-origin (no CORS, no external API
+// needed — the earlier idea of a separate hosted page couldn't do this).
+// Password is kept in sessionStorage only (cleared when the tab closes),
+// never localStorage — it's re-sent on every admin fetch, never persisted
+// server-side.
+const ADMIN_PAGE_HTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Booking Assistant — Admin</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px 16px 48px; background: #0f1115; color: #e6e6ea;
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif;
+  }
+  .wrap { max-width: 560px; margin: 0 auto; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  .sub { color: #8b8b95; margin: 0 0 24px; font-size: 13px; }
+  .card {
+    background: #1a1c23; border: 1px solid #2a2c35; border-radius: 10px;
+    padding: 18px; margin-bottom: 16px;
+  }
+  .card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: #9a9aa5; margin: 0 0 14px; }
+  label { display: block; font-size: 12px; color: #b0b0ba; margin-bottom: 6px; }
+  input[type=password], input[type=text] {
+    width: 100%; padding: 9px 10px; border-radius: 7px; border: 1px solid #33353f;
+    background: #0f1115; color: #e6e6ea; font-size: 14px; margin-bottom: 10px;
+  }
+  .row { display: flex; gap: 10px; align-items: center; }
+  .checkbox-row { display: flex; align-items: center; gap: 8px; margin: 4px 0 14px; }
+  .checkbox-row input { width: 16px; height: 16px; }
+  button {
+    background: #5865f2; color: #fff; border: none; border-radius: 7px;
+    padding: 9px 16px; font-size: 14px; font-weight: 600; cursor: pointer;
+  }
+  button:hover { background: #4752c4; }
+  button:disabled { background: #33353f; color: #75757f; cursor: not-allowed; }
+  button.secondary { background: #2a2c35; }
+  button.secondary:hover { background: #33353f; }
+  .status-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 16px; font-size: 13px; }
+  .status-grid div { display: flex; justify-content: space-between; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+  .dot.ok { background: #3ba55c; } .dot.bad { background: #ed4245; }
+  .code-display { font: 700 22px/1 "JetBrains Mono", monospace; letter-spacing: .06em; color: #5865f2; margin: 6px 0; }
+  .muted { color: #8b8b95; font-size: 12px; }
+  .msg { font-size: 13px; margin-top: 10px; min-height: 18px; }
+  .msg.err { color: #ed4245; } .msg.ok { color: #3ba55c; }
+  .warn-banner {
+    background: #3a2c0f; border: 1px solid #6b4f14; color: #f0c674;
+    border-radius: 8px; padding: 10px 12px; font-size: 12px; margin-bottom: 16px;
+  }
+  #dashboard { display: none; }
+  a { color: #5865f2; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Booking Assistant — Admin</h1>
+  <p class="sub">Worker: <span id="worker-version">—</span></p>
+
+  <div id="login-card" class="card">
+    <h2>Unlock</h2>
+    <input type="password" id="password-input" placeholder="Admin password" autocomplete="off" />
+    <button id="unlock-btn">Unlock</button>
+    <p class="msg" id="login-msg"></p>
+  </div>
+
+  <div id="dashboard">
+    <div id="kv-warning" class="warn-banner" style="display:none">
+      No CONFIG KV namespace bound yet — Release Control is read-only (showing values from the plain env Variables). Bind one in Settings → Bindings → KV Namespace → name it <b>CONFIG</b> to make this page able to write changes.
+    </div>
+
+    <div class="card">
+      <h2>Release control</h2>
+      <label for="version-input">Latest version</label>
+      <input type="text" id="version-input" placeholder="e.g. 10.5.0" />
+      <div class="checkbox-row">
+        <input type="checkbox" id="required-input" />
+        <label for="required-input" style="margin:0">Update required (hard block instead of banner)</label>
+      </div>
+      <button id="save-config-btn">Save</button>
+      <p class="msg" id="config-msg"></p>
+    </div>
+
+    <div class="card">
+      <h2>Daily instructions-unlock code</h2>
+      <div class="code-display" id="daily-code">——————</div>
+      <p class="muted" id="daily-code-date"></p>
+      <button class="secondary" id="send-slack-btn">Send to Slack now</button>
+      <p class="msg" id="slack-msg"></p>
+    </div>
+
+    <div class="card">
+      <h2>Status</h2>
+      <div class="status-grid" id="status-grid"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  var pwInput = document.getElementById('password-input');
+  var loginMsg = document.getElementById('login-msg');
+  var dashboard = document.getElementById('dashboard');
+  var loginCard = document.getElementById('login-card');
+  var password = null;
+
+  function statusRow(label, ok) {
+    return '<div><span>' + label + '</span><span><span class="dot ' + (ok ? 'ok' : 'bad') + '"></span>' + (ok ? 'yes' : 'no') + '</span></div>';
+  }
+
+  function render(cfg) {
+    document.getElementById('worker-version').textContent = cfg.workerVersion || '—';
+    document.getElementById('version-input').value = cfg.latestVersion || '';
+    document.getElementById('required-input').checked = !!cfg.updateRequired;
+    document.getElementById('daily-code').textContent = cfg.dailyCode || 'not configured';
+    document.getElementById('daily-code-date').textContent = cfg.dailyCodeDate ? ('for ' + cfg.dailyCodeDate + ' (IST) — posts automatically to the Slack channel via the cron trigger') : '';
+    document.getElementById('kv-warning').style.display = cfg.hasConfigKv ? 'none' : 'block';
+    document.getElementById('save-config-btn').disabled = !cfg.hasConfigKv;
+    document.getElementById('status-grid').innerHTML =
+      statusRow('Slack token', cfg.hasSlackToken) +
+      statusRow('OpenAI key', cfg.hasOpenAiKey) +
+      statusRow('Daily code secret', cfg.hasDailyCodeSecret) +
+      statusRow('Admin master code', cfg.hasAdminMasterCode) +
+      statusRow('CONFIG KV bound', cfg.hasConfigKv);
+  }
+
+  function unlock(pw, opts) {
+    opts = opts || {};
+    return fetch('/admin/config?password=' + encodeURIComponent(pw))
+      .then(function (res) { return res.json().then(function (data) { return { ok: res.ok, data: data }; }); })
+      .then(function (r) {
+        if (!r.ok) {
+          if (!opts.silent) loginMsg.textContent = r.data.error || 'Wrong password';
+          loginMsg.className = 'msg err';
+          return false;
+        }
+        password = pw;
+        try { sessionStorage.setItem('bassAdminPw', pw); } catch (_) {}
+        loginCard.style.display = 'none';
+        dashboard.style.display = 'block';
+        render(r.data);
+        return true;
+      })
+      .catch(function (err) {
+        if (!opts.silent) { loginMsg.textContent = 'Request failed: ' + err.message; loginMsg.className = 'msg err'; }
+        return false;
+      });
+  }
+
+  document.getElementById('unlock-btn').addEventListener('click', function () {
+    var pw = pwInput.value.trim();
+    if (!pw) return;
+    unlock(pw);
+  });
+  pwInput.addEventListener('keydown', function (e) { if (e.key === 'Enter') document.getElementById('unlock-btn').click(); });
+
+  document.getElementById('save-config-btn').addEventListener('click', function () {
+    var msg = document.getElementById('config-msg');
+    msg.textContent = 'Saving…'; msg.className = 'msg';
+    fetch('/admin/set-config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        password: password,
+        latestVersion: document.getElementById('version-input').value.trim(),
+        updateRequired: document.getElementById('required-input').checked,
+      }),
+    })
+      .then(function (res) { return res.json().then(function (data) { return { ok: res.ok, data: data }; }); })
+      .then(function (r) {
+        if (!r.ok) { msg.textContent = r.data.error || 'Save failed'; msg.className = 'msg err'; return; }
+        msg.textContent = 'Saved.'; msg.className = 'msg ok';
+        render(Object.assign({ workerVersion: document.getElementById('worker-version').textContent }, r.data));
+      })
+      .catch(function (err) { msg.textContent = 'Request failed: ' + err.message; msg.className = 'msg err'; });
+  });
+
+  document.getElementById('send-slack-btn').addEventListener('click', function () {
+    var msg = document.getElementById('slack-msg');
+    msg.textContent = 'Sending…'; msg.className = 'msg';
+    fetch('/admin/send-daily-code?password=' + encodeURIComponent(password))
+      .then(function (res) { return res.json().then(function (data) { return { ok: res.ok, data: data }; }); })
+      .then(function (r) {
+        if (!r.ok || !r.data.ok) { msg.textContent = (r.data && r.data.error) || 'Failed'; msg.className = 'msg err'; return; }
+        msg.textContent = 'Posted to Slack.'; msg.className = 'msg ok';
+      })
+      .catch(function (err) { msg.textContent = 'Request failed: ' + err.message; msg.className = 'msg err'; });
+  });
+
+  var savedPw = null;
+  try { savedPw = sessionStorage.getItem('bassAdminPw'); } catch (_) {}
+  if (savedPw) unlock(savedPw, { silent: true });
+})();
+</script>
+</body>
+</html>`;
