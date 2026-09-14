@@ -1,3 +1,17 @@
+# ⚠️ INCIDENT (2026-09-14): connecting this repo to Cloudflare Workers
+# Builds (Git-based auto-deploy) wiped all Secrets that had been set by
+# hand via the Dashboard (SLACK_BOT_TOKEN, OPENAI_API_KEY, ADMIN_PASSWORD,
+# DAILY_CODE_SECRET, ADMIN_MASTER_CODE) on the very first CI-driven
+# `wrangler deploy`. Secrets are never declared here (by design — this
+# file is committed to git), so they must be re-added via Dashboard ->
+# Settings -> Variables and Secrets after ANY incident like this.
+# Before trusting Git-based deploys again: re-add every secret, push one
+# trivial change, and confirm in /debug-env that hasSlackToken/
+# hasOpenAiKey/hasAdminPassword/hasDailyCodeSecret/hasAdminMasterCode are
+# all still true afterward. If a deploy ever wipes them again, disconnect
+# Builds (Settings -> Builds -> Disconnect) and go back to pasting
+# worker.js into the Dashboard's "Edit code" flow — that path never
+# touches secrets at all.
 name = "bass-verify"
 main = "worker.js"
 compatibility_date = "2024-09-23"
