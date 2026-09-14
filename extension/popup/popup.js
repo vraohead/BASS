@@ -231,8 +231,20 @@ async function doSearch() {
       return;
     }
     await setAdminMode(true);
+    updateBlocked = false; // admin mode bypasses a hard update block too
     id = bookingId;
     $('booking-id').value = bookingId;
+  } else if (updateBlocked) {
+    // A hard update block only exempts the admin-code path above — every
+    // other lookup (including the daily code) stays blocked until updated.
+    // The top of doSearch already cleared ticket-details, so redraw the
+    // gate rather than leaving a blank panel behind the error message.
+    $('loading-spinner').hidden = true;
+    if (_updateGateArgs) showUpdateRequiredGate(..._updateGateArgs);
+    const errEl = $('error-message');
+    errEl.textContent = 'Update required — download the latest version before continuing.';
+    errEl.hidden = false;
+    return;
   }
 
   // "<code>-<bookingId>" typed into the same box unlocks gated instructions
@@ -811,6 +823,7 @@ function _getVerifyFacts(flat, guestData) {
   const date  = flat.inventoryDate || flat.bookingDate || '';
   const time  = flat.inventoryTime || '';
   const price = flat.netPrice != null ? String(flat.netPrice) : '';
+  const product = flat.productName || '';
   let pax = flat.totalPax != null ? String(flat.totalPax) : '';
   if (!pax && guestData?.paxDetails?.length) {
     const t = guestData.paxDetails.reduce((s, p) => s + (p.count || 0), 0);
@@ -820,11 +833,11 @@ function _getVerifyFacts(flat, guestData) {
     const t = (flat.guestNumbers || []).reduce((s, g) => s + (g.persons || 0), 0);
     if (t) pax = String(t);
   }
-  return { date, time, pax: pax || '', price };
+  return { date, time, pax: pax || '', price, product };
 }
 
 function buildVerifySection(flat, guestData) {
-  const { date, time, pax, price } = _getVerifyFacts(flat, guestData);
+  const { date, time, pax, price, product } = _getVerifyFacts(flat, guestData);
   const cur2 = flat.currency || flat.currencyName || flat.tourCurrency || '';
   const displayPrice = price ? `${cur2} ${price}`.trim() : '—';
 
@@ -834,6 +847,7 @@ function buildVerifySection(flat, guestData) {
       <div class="verify-fact"><div class="verify-fact-label">Time</div><div class="verify-fact-value">${escHtml(time || '—')}</div></div>
       <div class="verify-fact"><div class="verify-fact-label">Pax</div><div class="verify-fact-value">${escHtml(pax || '—')}</div></div>
       <div class="verify-fact"><div class="verify-fact-label">Net</div><div class="verify-fact-value">${escHtml(displayPrice)}</div></div>
+      <div class="verify-fact verify-fact--wide"><div class="verify-fact-label">Product</div><div class="verify-fact-value">${escHtml(product || '—')}</div></div>
     </div>
 
     <div class="verify-mode-btns">
@@ -972,7 +986,7 @@ function buildVerifySection(flat, guestData) {
       action: 'VERIFY_IMAGE',
       imageBase64,
       mimeType,
-      facts: { date, time, pax, price },
+      facts: { date, time, pax, price, product },
       workerUrl,
     });
 
@@ -997,14 +1011,19 @@ function buildVerifySection(flat, guestData) {
     }
 
     const checks = result.checks || [];
+    const checkoutBanner = result.isCheckoutPage
+      ? `<p class="verify-checkout-flag">🛒 This looks like a checkout/cart/payment page, not a confirmed ticket${result.checkoutPageNote ? ` — ${escHtml(result.checkoutPageNote)}` : ''}. Capture the actual booking confirmation instead.</p>`
+      : '';
+
     if (!checks.length) {
-      resultsEl.innerHTML = '<p class="verify-result-error">No results returned from AI.</p>';
+      resultsEl.innerHTML = checkoutBanner || '<p class="verify-result-error">No results returned from AI.</p>';
     } else {
-      resultsEl.innerHTML = checks.map((c, i) => renderVerifyRow(c, i)).join('');
+      resultsEl.innerHTML = checkoutBanner + checks.map((c, i) => renderVerifyRow(c, i)).join('');
       const { totalMismatches } = wireSkipBoxes(resultsEl, confirmRow);
       // Perfect match, nothing to skip — confirm automatically instead of
-      // waiting on a click that has nothing left to gate.
-      if (totalMismatches === 0) confirmBtn.click();
+      // waiting on a click that has nothing left to gate. Never auto-confirm
+      // a checkout page though, even if every field happens to match.
+      if (totalMismatches === 0 && !result.isCheckoutPage) confirmBtn.click();
     }
     resultsEl.hidden = false;
   });
@@ -1027,10 +1046,11 @@ function buildVerifySection(flat, guestData) {
 
     const text = result.text;
     const checks = [
-      { label: 'Date',      expected: date,  found: date  ? text.includes(date)  : null },
-      { label: 'Time',      expected: time,  found: time  ? text.includes(time.substring(0,5)) : null },
-      { label: 'Pax',       expected: pax,   found: pax   ? new RegExp(`\\b${pax}\\b`).test(text) : null },
-      { label: 'Net Price', expected: price, found: price ? text.includes(price) : null },
+      { label: 'Date',      expected: date,    found: date    ? text.includes(date)  : null },
+      { label: 'Time',      expected: time,    found: time    ? text.includes(time.substring(0,5)) : null },
+      { label: 'Pax',       expected: pax,     found: pax     ? new RegExp(`\\b${pax}\\b`).test(text) : null },
+      { label: 'Net Price', expected: price,   found: price   ? text.includes(price) : null },
+      { label: 'Product',   expected: product, found: product ? text.toLowerCase().includes(product.toLowerCase()) : null },
     ].filter(c => c.expected && c.found !== null);
 
     if (!checks.length) {
@@ -1421,12 +1441,12 @@ async function buildInstructionsSection(flat, vendors, vendorTourData = []) {
   `;
 
   // Instructions exist, but the booking's state says they shouldn't matter
-  // anymore — show why, and point at the Booking ID box, where typing
-  // "<code>-<bookingId>" unlocks it (no separate code field here).
+  // anymore — show why. The override (typing a code into the Booking ID
+  // box) is intentionally not mentioned here — only the admin needs to
+  // know it exists.
   const html = gateReason
     ? `<div class="instr-gate">
          <p class="instruction-empty">${escHtml(gateReason)}</p>
-         <p class="instruction-empty">To view anyway, re-fetch this booking as <strong>&lt;code&gt;-${escHtml(flat.bookingId || '')}</strong> in the Booking ID box above, using today's code.</p>
        </div>
        <div class="instr-real-content" hidden>${contentHtml}</div>`
     : contentHtml;
@@ -1588,9 +1608,18 @@ function isVersionOlder(a, b) {
   return false;
 }
 
+// Set while a hard update block is showing. Deliberately does NOT disable
+// booking-id/search-btn — the Booking ID box is also where the admin master
+// code is typed, and disabling it would permanently lock out anyone who
+// hasn't already enabled admin mode on that device (chicken-and-egg: can't
+// type the bypass code into a disabled box). doSearch() checks this flag
+// itself and blocks everything except a successful admin-code match.
+let updateBlocked = false;
+let _updateGateArgs = null;
+
 function showUpdateRequiredGate(downloadUrl, latestVersion) {
-  $('booking-id').disabled  = true;
-  $('search-btn').disabled  = true;
+  updateBlocked = true;
+  _updateGateArgs = [downloadUrl, latestVersion];
   $('auth-warning').hidden  = true;
   $('error-message').hidden = true;
   $('booking-summary').hidden = true;

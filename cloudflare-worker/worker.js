@@ -17,7 +17,8 @@
 // Endpoints:
 //   GET  /               -> the admin control page (see "Admin page" below)
 //   GET  /debug-env      -> { hasSlackToken, hasOpenAiKey, slackChannelId, version }
-//   POST /verify          { imageBase64, mimeType, facts } -> { checks: [...] }
+//   POST /verify          { imageBase64, mimeType, facts: {date,time,pax,price,product} }
+//                          -> { checks: [...], isCheckoutPage, checkoutPageNote }
 //   POST /confirm-flag     { bookingId, agentEmail, confirmed, skipped,
 //                            imageBase64?, mimeType?, verifiedAt }
 //                          -> { ok: true, steps: [...], screenshotError? }
@@ -102,7 +103,7 @@
 
 // Bump this string whenever you paste a new version into the dashboard —
 // visiting GET /debug-env instantly confirms whether a deploy took effect.
-const WORKER_VERSION = '2026-09-14-02';
+const WORKER_VERSION = '2026-09-14-03';
 
 // Formats an ISO timestamp as a clean IST string, e.g. "6 Sep 2026, 10:44 PM IST".
 function formatIST(isoString) {
@@ -432,27 +433,42 @@ async function handleVerify(request, env) {
   }
   logStep('check_openai_key', true, null);
 
-  const { date = '', time = '', pax = '', price = '' } = facts;
+  const { date = '', time = '', pax = '', price = '', product = '' } = facts;
 
   const factLines = [
-    date  ? `Date: ${date}`        : null,
-    time  ? `Time: ${time}`        : null,
-    pax   ? `Pax (guests): ${pax}` : null,
-    price ? `Net price: ${price}`  : null,
+    date    ? `Date: ${date}`             : null,
+    time    ? `Time: ${time}`             : null,
+    pax     ? `Total pax (guests): ${pax}` : null,
+    price   ? `Net price: ${price}`       : null,
+    product ? `Product / experience name: ${product}` : null,
   ].filter(Boolean).join('\n');
 
-  const prompt = `You are checking a ticket or booking confirmation screenshot against a booking record.
+  // Deliberately verbose and explicit — the aim is to eliminate manual
+  // re-checking entirely, not just catch the easy cases. Every rule below
+  // exists because a naive exact-string-match prompt used to miss it.
+  const prompt = `You are a meticulous booking-verification assistant. You are checking whether a screenshot proves a real, already-confirmed booking that matches an internal booking record. Getting this wrong in either direction causes real problems — a false "found: true" lets a bad or unconfirmed booking through, and a false "found: false" creates needless manual review — so read carefully and think about what's actually shown before answering.
 
-Booking record:
+Booking record to match against the screenshot:
 ${factLines}
 
-For each field above, determine whether the exact value (or a clearly matching representation) is visible in the screenshot. Reply ONLY with valid JSON in this exact shape — no markdown, no extra text:
-{"checks":[{"label":"Date","expected":"${date}","found":true},{"label":"Time","expected":"${time}","found":false}]}
+How to judge each field:
+1. Date: dates are often written in completely different formats between the booking record and the screenshot (e.g. "14 Sep 2026", "2026-09-14", "Sep 14, 2026", "14/09/2026" can all be the SAME date). Parse both and compare the actual calendar date, not the text formatting. Only mark found:false if the calendar date shown is genuinely different, missing, or illegible.
+2. Time: same principle — "3:00 PM", "15:00", and "3 PM" are the same time of day. Allow for a different timezone label as long as the underlying time is consistent with the booking; only mark found:false if the actual time of day is genuinely different or not shown.
+3. Total pax (guests): look for the TOTAL guest/pax/ticket count shown in the screenshot. If the screenshot breaks pax down by type (e.g. "2 Adults, 1 Child"), add them up yourself and compare the sum to the expected total — do not mark found:false just because no single number matches if the breakdown sums to the expected total.
+4. Net price: ignore currency symbol, comma, and decimal-formatting differences; compare the numeric amount itself.
+5. Product / experience name: compare the tour/experience/product name shown in the screenshot against the expected name. Minor wording differences (abbreviations, punctuation, added suffixes like "- with hotel pickup", capitalization) still count as a match if it is clearly the same experience. A genuinely different tour or activity is not a match.
+
+Separately — always answer this regardless of the fields above:
+6. Page type: determine whether this screenshot shows a CHECKOUT / CART / PAYMENT page (e.g. "Pay now", "Proceed to payment", an editable cart, empty or partial guest details, a payment form) rather than an actual issued ticket or booking confirmation (e.g. a booking/ticket/confirmation number, a QR/barcode, "Booking Confirmed", a voucher). A checkout or cart page is NOT valid proof of a completed booking, even if the details on it match — flag this clearly and separately from the field checks above.
+
+Reply ONLY with valid JSON in this exact shape — no markdown, no extra text:
+{"checks":[{"label":"Date","expected":"${date}","found":true},{"label":"Time","expected":"${time}","found":false}],"isCheckoutPage":false,"checkoutPageNote":""}
 
 Rules:
-- Only include a check for a field if expected is non-empty.
-- Set found to true only when the value is unambiguously readable in the image.
-- For numeric pax/price, a match is true if the number appears clearly (ignore currency symbols for price match).`;
+- Only include a check for a field if its expected value above is non-empty.
+- Set found to true only when the value is unambiguously present after applying the format-tolerance rules above.
+- isCheckoutPage must be true whenever the screenshot is a checkout/cart/payment page rather than a confirmed ticket or booking confirmation.
+- checkoutPageNote: if isCheckoutPage is true, a short (under 15 words) reason why (e.g. "Shows cart totals and a Pay Now button, no confirmation number"); otherwise an empty string.`;
 
   // Structured Outputs: a strict JSON Schema makes OpenAI's API layer itself
   // guarantee the response is valid JSON matching this exact shape — the
@@ -478,8 +494,10 @@ Rules:
             additionalProperties: false,
           },
         },
+        isCheckoutPage:   { type: 'boolean' },
+        checkoutPageNote: { type: 'string' },
       },
-      required: ['checks'],
+      required: ['checks', 'isCheckoutPage', 'checkoutPageNote'],
       additionalProperties: false,
     },
   };

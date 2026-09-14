@@ -658,6 +658,12 @@ details.instr-block:not([open]) .instr-block__header { border-bottom: none; }
   font-size: 12px; font-weight: 700; color: var(--text);
   font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+.verify-fact--wide { grid-column: 1 / -1; }
+.verify-checkout-flag {
+  background: rgba(240,166,35,0.12); border: 1px solid rgba(240,166,35,0.35);
+  color: var(--text); border-radius: 8px; padding: 8px 10px;
+  font-size: 12px; font-weight: 600; line-height: 1.4; margin-bottom: 8px;
+}
 .verify-mode-btns {
   display: flex; gap: 6px; margin-bottom: 12px;
 }
