@@ -1,3 +1,21 @@
 name = "bass-verify"
 main = "worker.js"
 compatibility_date = "2024-09-23"
+
+# Daily code Slack post — same schedule as configured in the Dashboard
+# under Settings -> Triggers -> Cron Triggers ("35 18 * * *" = 00:05 IST).
+[triggers]
+crons = ["35 18 * * *"]
+
+# Release-control config (LATEST_VERSION, UPDATE_REQUIRED), read/written by
+# the admin page at Worker root ("/"). IMPORTANT — wrangler deploys are
+# declarative: once Git-based deploys are turned on, this file becomes the
+# full source of truth for bindings, and a deploy with this block missing
+# or wrong will DETACH the existing CONFIG KV binding you set up via the
+# Dashboard (breaking Release Control, though the old plain-Variable
+# fallback still works). Before connecting this repo in the Dashboard,
+# replace the id below with the real one: Dashboard -> Workers & Pages ->
+# KV -> (your namespace) -> copy the ID shown there.
+[[kv_namespaces]]
+binding = "CONFIG"
+id = "REPLACE_WITH_YOUR_CONFIG_KV_NAMESPACE_ID"
