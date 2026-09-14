@@ -20,11 +20,10 @@
 //   POST /confirm-flag     { bookingId, agentEmail, confirmed, skipped,
 //                            imageBase64?, mimeType?, verifiedAt }
 //                          -> { ok: true, steps: [...], screenshotError? }
-//   GET  /admin/daily-code?password=...       -> { code, date } (admin-only)
 //   GET  /admin/send-daily-code?password=...  -> manually trigger the Slack post (for testing)
 //   POST /verify-code      { code } -> { valid: true|false }
 //   POST /verify-admin-code { code } -> { valid: true|false }
-//   GET  /latest-version   -> { latestVersion, downloadUrl } — not secret, no auth
+//   GET  /latest-version   -> { latestVersion, downloadUrl, updateRequired } — not secret, no auth
 //
 // Every meaningful operation (Slack calls, OpenAI calls) appends a
 // {step, ok, detail, at} entry to a `steps` array that's returned in the
@@ -34,8 +33,8 @@
 //
 // Daily instructions-unlock code: requires two new Cloudflare secrets —
 //   wrangler secret put DAILY_CODE_SECRET   <- any random string, never shared
-//   wrangler secret put ADMIN_PASSWORD      <- the password you'll type into
-//                                               the admin page to view today's code
+//   wrangler secret put ADMIN_PASSWORD      <- password for the manual
+//                                               /admin/send-daily-code test-trigger
 // The code itself is never stored anywhere — it's recomputed on demand from
 // HMAC(DAILY_CODE_SECRET, today's IST date), so it's deterministic for the
 // whole day and automatically different tomorrow with zero extra state.
@@ -69,10 +68,19 @@
 // announcing). Not a push in the literal sense (nothing reaches an
 // already-open extension instantly) — it's checked next time each agent
 // opens the panel, same as everything else this Worker serves.
+//
+// Soft banner vs. hard block: by default a stale LATEST_VERSION only shows
+// the dismissable-by-updating banner (extension still fully usable). To
+// force everyone to update before they can use it at all, also add a plain
+// Variable named UPDATE_REQUIRED set to the string "true" — anyone whose
+// installed version is behind LATEST_VERSION then gets a full-screen
+// "Update Required" block (no booking lookup, no tabs) until they install
+// the new version. Set UPDATE_REQUIRED back to "false" (or delete it) to
+// drop back to the soft banner for the same LATEST_VERSION.
 
 // Bump this string whenever you paste a new version into the dashboard —
 // visiting GET /debug-env instantly confirms whether a deploy took effect.
-const WORKER_VERSION = '2026-09-13-01';
+const WORKER_VERSION = '2026-09-14-01';
 
 // Formats an ISO timestamp as a clean IST string, e.g. "6 Sep 2026, 10:44 PM IST".
 function formatIST(isoString) {
@@ -117,6 +125,8 @@ export default {
         hasAdminMasterCode: !!env.ADMIN_MASTER_CODE,
         slackChannelId: SLACK_CHANNEL_ID,
         dailyCodeChannelId: DAILY_CODE_CHANNEL_ID,
+        latestVersion: env.LATEST_VERSION || null,
+        updateRequired: env.UPDATE_REQUIRED === 'true',
       }), 200);
     }
 
@@ -126,10 +136,6 @@ export default {
 
     if (request.method === 'POST' && url.pathname === '/verify') {
       return handleVerify(request, env);
-    }
-
-    if (request.method === 'GET' && url.pathname === '/admin/daily-code') {
-      return handleAdminDailyCode(request, env, url);
     }
 
     if (request.method === 'GET' && url.pathname === '/admin/send-daily-code') {
@@ -151,6 +157,7 @@ export default {
       return cors(JSON.stringify({
         latestVersion: env.LATEST_VERSION || null,
         downloadUrl: DOWNLOAD_URL,
+        updateRequired: env.UPDATE_REQUIRED === 'true',
       }), 200);
     }
 
@@ -187,21 +194,6 @@ async function computeDailyCode(env, dateStr) {
 
 function todayIST() {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date()); // YYYY-MM-DD
-}
-
-async function handleAdminDailyCode(request, env, url) {
-  if (!env.ADMIN_PASSWORD || !env.DAILY_CODE_SECRET) {
-    return cors(JSON.stringify({
-      error: 'Worker misconfigured — set the ADMIN_PASSWORD and DAILY_CODE_SECRET secrets',
-    }), 500);
-  }
-  const password = url.searchParams.get('password') || '';
-  if (password !== env.ADMIN_PASSWORD) {
-    return cors(JSON.stringify({ error: 'Wrong password' }), 401);
-  }
-  const date = todayIST();
-  const code = await computeDailyCode(env, date);
-  return cors(JSON.stringify({ code, date }), 200);
 }
 
 // Posts today's code to the Slack channel. Shared by the daily cron trigger

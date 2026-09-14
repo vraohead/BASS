@@ -103,7 +103,7 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
         const res = await fetch(`${workerUrl.replace(/\/$/, '')}/latest-version`);
         const data = await res.json().catch(() => ({}));
         sendResponse(res.ok
-          ? { ok: true, latestVersion: data.latestVersion || null, downloadUrl: data.downloadUrl || null }
+          ? { ok: true, latestVersion: data.latestVersion || null, downloadUrl: data.downloadUrl || null, updateRequired: !!data.updateRequired }
           : { ok: false, error: data.error || 'Worker error' });
       } catch (err) {
         sendResponse({ ok: false, error: err.message });

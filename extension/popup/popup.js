@@ -1588,19 +1588,46 @@ function isVersionOlder(a, b) {
   return false;
 }
 
+function showUpdateRequiredGate(downloadUrl, latestVersion) {
+  $('booking-id').disabled  = true;
+  $('search-btn').disabled  = true;
+  $('auth-warning').hidden  = true;
+  $('error-message').hidden = true;
+  $('booking-summary').hidden = true;
+  $('tab-nav').hidden = true;
+  $('ticket-details').innerHTML = `
+    <div class="auth-gate">
+      <div class="auth-gate-icon">🚨</div>
+      <p class="auth-gate-title">Update required</p>
+      <p class="auth-gate-sub">Version ${escHtml(latestVersion)} is required to keep using Booking Assistant.<br>
+        <a href="${escHtml(downloadUrl)}" target="_blank" rel="noopener">Download the latest version</a>, then reload the extension.</p>
+    </div>
+  `;
+}
+
+// Returns { blocked: boolean } — blocked means a hard update gate was shown
+// and the rest of init (auth check, booking load) should be skipped.
 async function checkForUpdate() {
   try {
     const result = await sendMessage({ action: 'CHECK_LATEST_VERSION', workerUrl: DEFAULT_WORKER_URL });
-    if (!result?.ok || !result.latestVersion) return;
+    if (!result?.ok || !result.latestVersion) return { blocked: false };
 
     const current = chrome.runtime.getManifest().version;
-    if (!isVersionOlder(current, result.latestVersion)) return;
+    if (!isVersionOlder(current, result.latestVersion)) return { blocked: false };
+
+    if (result.updateRequired) {
+      showUpdateRequiredGate(result.downloadUrl || 'https://drive.google.com/drive/folders/19IvY2URiuri53L_eajvxjuGx2zl-ojZV', result.latestVersion);
+      return { blocked: true };
+    }
 
     const banner = $('update-banner');
     const link = $('update-banner-link');
     if (result.downloadUrl) link.href = result.downloadUrl;
     banner.hidden = false;
-  } catch (_) {}
+    return { blocked: false };
+  } catch (_) {
+    return { blocked: false };
+  }
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
@@ -1611,7 +1638,8 @@ $('ticket-details').innerHTML =
 (async () => {
   await initTheme();
   await loadAdminMode();
-  checkForUpdate();
+  const updateStatus = await checkForUpdate();
+  if (updateStatus.blocked) return;
   const status = await checkAuth();
   if (status === 'AUTHENTICATED') await detectAndLoadBooking();
 })();
