@@ -205,6 +205,17 @@ function clearResults() {
   clearLastBooking();
 }
 
+// Shown when a hard update block is up and the current input isn't a valid
+// admin-mode code — redraws the gate (doSearch already cleared
+// ticket-details) instead of leaving a blank panel behind the error.
+function renderUpdateBlockedError() {
+  $('loading-spinner').hidden = true;
+  if (_updateGateArgs) showUpdateRequiredGate(..._updateGateArgs);
+  const errEl = $('error-message');
+  errEl.textContent = 'Update required — download the latest version before continuing.';
+  errEl.hidden = false;
+}
+
 async function doSearch() {
   let id = $('booking-id').value.trim();
   if (!id) return;
@@ -215,55 +226,38 @@ async function doSearch() {
   $('tab-nav').hidden         = true;
   $('ticket-details').innerHTML = '';
 
-  // "<bookingId>-<masterCode>" (code contains a letter, unlike the daily
-  // code) turns on admin mode permanently — bypasses every display gate
-  // from then on, for testing. Checked before the daily-code pattern since
-  // the two are unambiguous but this one should win if somehow both match.
-  const adminMatch = id.match(/^(\d{6,})-([A-Za-z0-9]*[A-Za-z][A-Za-z0-9]*)$/);
-  if (adminMatch) {
-    const [, bookingId, masterCode] = adminMatch;
-    const adminResult = await sendMessage({ action: 'VERIFY_ADMIN_CODE', code: masterCode, workerUrl: DEFAULT_WORKER_URL });
-    if (!adminResult?.ok || !adminResult.valid) {
-      $('loading-spinner').hidden = true;
-      const errEl = $('error-message');
-      errEl.textContent = adminResult?.ok ? 'Incorrect master code.' : (adminResult?.error || 'Could not check code.');
-      errEl.hidden = false;
-      return;
-    }
-    await setAdminMode(true);
-    updateBlocked = false; // admin mode bypasses a hard update block too
-    id = bookingId;
-    $('booking-id').value = bookingId;
-  } else if (updateBlocked) {
-    // A hard update block only exempts the admin-code path above — every
-    // other lookup (including the daily code) stays blocked until updated.
-    // The top of doSearch already cleared ticket-details, so redraw the
-    // gate rather than leaving a blank panel behind the error message.
-    $('loading-spinner').hidden = true;
-    if (_updateGateArgs) showUpdateRequiredGate(..._updateGateArgs);
-    const errEl = $('error-message');
-    errEl.textContent = 'Update required — download the latest version before continuing.';
-    errEl.hidden = false;
-    return;
-  }
-
-  // "<code>-<bookingId>" typed into the same box unlocks gated instructions
-  // for the rest of the day, then proceeds with the real booking ID as if
-  // it had been typed alone — no separate code field anywhere.
-  const codeMatch = id.match(/^(\d{6})-(\d{6,})$/);
+  // "<bookingId>-<code>" — one shared format for both code kinds. The
+  // worker decides which pool (if either) matched and tells us via
+  // adminMode: true means a redeemed one-time admin code (flips a
+  // persistent bypass), false means the shared daily code (unlocks
+  // Instructions for the rest of today only).
+  const codeMatch = id.match(/^(\d{6,})-(\d{6})$/);
   if (codeMatch) {
-    const [, code, bookingId] = codeMatch;
-    const codeResult = await sendMessage({ action: 'VERIFY_DAILY_CODE', code, workerUrl: DEFAULT_WORKER_URL });
+    const [, bookingId, code] = codeMatch;
+    const codeResult = await sendMessage({ action: 'VERIFY_CODE', code, workerUrl: DEFAULT_WORKER_URL });
     if (!codeResult?.ok || !codeResult.valid) {
       $('loading-spinner').hidden = true;
       const errEl = $('error-message');
-      errEl.textContent = codeResult?.ok ? 'Incorrect daily code.' : (codeResult?.error || 'Could not check code.');
+      errEl.textContent = codeResult?.ok ? 'Incorrect or expired code.' : (codeResult?.error || 'Could not check code.');
       errEl.hidden = false;
       return;
     }
-    await setInstrUnlockedToday();
+    if (codeResult.adminMode) {
+      await setAdminMode(true);
+      updateBlocked = false; // admin mode bypasses a hard update block too
+    } else if (updateBlocked) {
+      // The shared daily code doesn't bypass a hard update block — only a
+      // redeemed admin code does.
+      renderUpdateBlockedError();
+      return;
+    } else {
+      await setInstrUnlockedToday();
+    }
     id = bookingId;
     $('booking-id').value = bookingId;
+  } else if (updateBlocked) {
+    renderUpdateBlockedError();
+    return;
   }
 
   const result = await sendMessage({ action: 'FETCH_BOOKING', bookingId: id });
@@ -1385,10 +1379,10 @@ async function setInstrUnlockedToday() {
 }
 
 // Admin/testing mode — a persistent, non-expiring bypass for every display
-// gate (Past booking, Booking due soon, Instructions withheld), unlocked
-// via the master code. Cached in memory after load so the synchronous gate
-// checks (isPastPendingBooking, isImminentPendingBooking) don't need to be
-// made async just for this.
+// gate (Past booking, Booking due soon, Instructions withheld), unlocked by
+// redeeming a one-time admin code requested from the admin page. Cached in
+// memory after load so the synchronous gate checks (isPastPendingBooking,
+// isImminentPendingBooking) don't need to be made async just for this.
 let adminModeEnabled = false;
 async function loadAdminMode() {
   try {

@@ -29,8 +29,11 @@
 //   GET  /admin/send-daily-code?password=...  -> manually trigger the Slack post (for testing)
 //   GET  /admin/config?password=...           -> current config + today's code + secret status (admin-only)
 //   POST /admin/set-config { password, latestVersion?, updateRequired? } -> write config (admin-only)
-//   POST /verify-code      { code } -> { valid: true|false }
-//   POST /verify-admin-code { code } -> { valid: true|false }
+//   POST /admin/request-code { password } -> generate + Slack-post a one-time
+//                                             admin code (admin-only)
+//   POST /verify-code      { code } -> { valid: true|false, adminMode: true|false }
+//                             adminMode is true only for a redeemed one-time
+//                             admin code — false for the shared daily code
 //   GET  /latest-version   -> { latestVersion, downloadUrl, updateRequired, message } — not secret, no auth
 //                             message is the admin's custom update text, only
 //                             sent when enabled — null falls back to the
@@ -42,32 +45,33 @@
 // step name, HTTP status, and raw response body instead of a generic
 // "something went wrong".
 //
-// Daily instructions-unlock code: requires two new Cloudflare secrets —
-//   wrangler secret put DAILY_CODE_SECRET   <- any random string, never shared
-//   wrangler secret put ADMIN_PASSWORD      <- password for the manual
-//                                               /admin/send-daily-code test-trigger
-// The code itself is never stored anywhere — it's recomputed on demand from
-// HMAC(DAILY_CODE_SECRET, today's IST date), so it's deterministic for the
-// whole day and automatically different tomorrow with zero extra state.
+// Codes — one shared format everywhere: "<bookingId>-<code>" typed into the
+// Booking ID box (booking ID first, always). Two kinds of code both use
+// this same box and the same /verify-code endpoint; the response's
+// adminMode field tells the extension which one just got redeemed:
 //
-// Daily Slack post: this Worker also exports a `scheduled` handler that
-// posts today's code to DAILY_CODE_CHANNEL_ID automatically. Wire it up
-// once in the Cloudflare Dashboard: Workers & Pages -> this worker ->
-// Settings -> Triggers -> Cron Triggers -> Add Cron Trigger -> schedule
-// "35 18 * * *" (that's 00:05 IST, i.e. just after the code rolls over).
+// 1. Daily code — the shared, all-day code for unlocking gated Instructions.
+//    Requires two Cloudflare secrets:
+//      wrangler secret put DAILY_CODE_SECRET   <- any random string, never shared
+//      wrangler secret put ADMIN_PASSWORD      <- gates /admin/* endpoints
+//    Never stored — recomputed on demand from HMAC(DAILY_CODE_SECRET,
+//    today's IST date), so it's the same all day and different tomorrow
+//    with zero extra state. Reusable by anyone, all day. Posts
+//    automatically once a day via this Worker's `scheduled` handler to
+//    DAILY_CODE_CHANNEL_ID — wire the cron up once in the Dashboard:
+//    Settings -> Triggers -> Cron Triggers -> "35 18 * * *" (00:05 IST).
 //
-// Admin/testing master code: requires one more secret —
-//   wrangler secret put ADMIN_MASTER_CODE   <- pick something with at least
-//                                               one letter in it (e.g.
-//                                               "BASSADMIN2026"), so it can
-//                                               never collide with the
-//                                               all-numeric daily code.
-// Unlike the daily code this never rotates on its own — change the secret
-// value in the Dashboard any time you want to invalidate it. Typed as
-// "<bookingId>-<masterCode>" into the Booking ID box, it flips a
-// persistent "admin mode" in the extension (chrome.storage.local, not this
-// Worker) that bypasses every display gate — Past booking, Booking due
-// soon, Instructions withheld — from then on, for testing.
+// 2. One-time admin code — replaces the old static admin master code.
+//    Generated on demand via the admin page's "Request admin code" button
+//    (POST /admin/request-code), posted to the SAME Slack channel as the
+//    daily code, and stored in the CONFIG KV namespace with a 5-minute TTL
+//    (Cloudflare expires it automatically). The first successful redemption
+//    deletes it immediately — single-use, even if time remains — and
+//    flips a persistent "admin mode" in the extension (chrome.storage.local,
+//    not this Worker) that bypasses every display gate — Past booking,
+//    Booking due soon, Instructions withheld, Update required — from then
+//    on, for testing. Request a fresh one from the admin page any time you
+//    need admin access again.
 //
 // Team update push: add a plain (non-secret) Variable named LATEST_VERSION
 // in the Dashboard (Settings -> Variables) whenever you want everyone's
@@ -88,7 +92,7 @@
 // "Update Required" block (no booking lookup, no tabs) until they install
 // the new version. Set UPDATE_REQUIRED back to "false" (or delete it) to
 // drop back to the soft banner for the same LATEST_VERSION. Admin mode
-// (the ID-masterCode bypass, extension-side) is exempt from the hard
+// (the one-time admin code bypass, extension-side) is exempt from the hard
 // block, so testing a new version never locks the admin out of their own
 // device — they still see the soft banner as a reminder.
 //
@@ -115,7 +119,7 @@
 
 // Bump this string whenever you paste a new version into the dashboard —
 // visiting GET /debug-env instantly confirms whether a deploy took effect.
-const WORKER_VERSION = '2026-09-17-01';
+const WORKER_VERSION = '2026-09-17-02';
 
 // Formats an ISO timestamp as a clean IST string, e.g. "6 Sep 2026, 10:44 PM IST".
 function formatIST(isoString) {
@@ -162,7 +166,6 @@ export default {
         hasOpenAiKey: !!env.OPENAI_API_KEY,
         hasAdminPassword: !!env.ADMIN_PASSWORD,
         hasDailyCodeSecret: !!env.DAILY_CODE_SECRET,
-        hasAdminMasterCode: !!env.ADMIN_MASTER_CODE,
         hasConfigKv: !!env.CONFIG,
         slackChannelId: SLACK_CHANNEL_ID,
         dailyCodeChannelId: DAILY_CODE_CHANNEL_ID,
@@ -191,12 +194,12 @@ export default {
       return handleAdminSetConfig(request, env);
     }
 
-    if (request.method === 'POST' && url.pathname === '/verify-code') {
-      return handleVerifyCode(request, env);
+    if (request.method === 'POST' && url.pathname === '/admin/request-code') {
+      return handleAdminRequestCode(request, env);
     }
 
-    if (request.method === 'POST' && url.pathname === '/verify-admin-code') {
-      return handleVerifyAdminCode(request, env);
+    if (request.method === 'POST' && url.pathname === '/verify-code') {
+      return handleVerifyCode(request, env);
     }
 
     if (request.method === 'GET' && url.pathname === '/latest-version') {
@@ -264,7 +267,7 @@ async function sendDailyCodeToSlack(env) {
 
   const date = todayIST();
   const code = await computeDailyCode(env, date);
-  const text = `:key: *Today's Booking Assistant instructions code:* \`${code}\`\n_Valid for ${date} (IST) only — type it as \`${code}-<booking ID>\` in the Booking ID box to unlock a gated booking's instructions._`;
+  const text = `:key: *Today's Booking Assistant instructions code:* \`${code}\`\n_Valid for ${date} (IST) only — type it as \`<booking ID>-${code}\` in the Booking ID box to unlock a gated booking's instructions._`;
 
   try {
     const res = await fetch('https://slack.com/api/chat.postMessage', {
@@ -357,7 +360,6 @@ async function handleAdminGetConfig(request, env, url) {
     hasSlackToken: !!env.SLACK_BOT_TOKEN,
     hasOpenAiKey: !!env.OPENAI_API_KEY,
     hasDailyCodeSecret: !!env.DAILY_CODE_SECRET,
-    hasAdminMasterCode: !!env.ADMIN_MASTER_CODE,
     dailyCodeChannelId: DAILY_CODE_CHANNEL_ID,
   }), 200);
 }
@@ -398,27 +400,18 @@ async function handleAdminSetConfig(request, env) {
   return cors(JSON.stringify({ ok: true, ...config }), 200);
 }
 
-async function handleVerifyCode(request, env) {
-  if (!env.DAILY_CODE_SECRET) {
-    return cors(JSON.stringify({ error: 'Worker misconfigured — set the DAILY_CODE_SECRET secret' }), 500);
-  }
-  let body;
-  try {
-    body = await request.json();
-  } catch (err) {
-    return cors(JSON.stringify({ error: 'Invalid JSON body' }), 400);
-  }
-  const submitted = String(body.code || '').trim();
-  const expected = await computeDailyCode(env, todayIST());
-  return cors(JSON.stringify({ valid: submitted.length > 0 && submitted === expected }), 200);
+// A one-time admin code is stored as a CONFIG KV key that expires on its
+// own via expirationTtl — presence means "valid and unused", absence means
+// "never existed, already redeemed, or expired". 5 minutes, per spec.
+const REQUEST_CODE_TTL_SECONDS = 300;
+function requestCodeKey(code) {
+  return `reqcode:${code}`;
 }
 
-// Static admin/testing master code — unlike the daily code, this never
-// rotates on its own; rotate it by changing the ADMIN_MASTER_CODE secret.
-async function handleVerifyAdminCode(request, env) {
-  if (!env.ADMIN_MASTER_CODE) {
-    return cors(JSON.stringify({ error: 'Worker misconfigured — set the ADMIN_MASTER_CODE secret' }), 500);
-  }
+// Checks a submitted code against both pools and reports which one (if
+// either) matched. adminMode:true only for a redeemed one-time code — the
+// shared daily code never grants more than the Instructions unlock.
+async function handleVerifyCode(request, env) {
   let body;
   try {
     body = await request.json();
@@ -426,7 +419,90 @@ async function handleVerifyAdminCode(request, env) {
     return cors(JSON.stringify({ error: 'Invalid JSON body' }), 400);
   }
   const submitted = String(body.code || '').trim();
-  return cors(JSON.stringify({ valid: submitted.length > 0 && submitted === env.ADMIN_MASTER_CODE }), 200);
+  if (!submitted) {
+    return cors(JSON.stringify({ valid: false, adminMode: false }), 200);
+  }
+
+  if (env.DAILY_CODE_SECRET) {
+    const expected = await computeDailyCode(env, todayIST());
+    if (submitted === expected) {
+      return cors(JSON.stringify({ valid: true, adminMode: false }), 200);
+    }
+  }
+
+  if (env.CONFIG) {
+    const key = requestCodeKey(submitted);
+    const found = await env.CONFIG.get(key);
+    if (found !== null) {
+      // Delete immediately so this exact code can never be redeemed twice,
+      // even if its 5-minute TTL hasn't elapsed yet.
+      await env.CONFIG.delete(key);
+      return cors(JSON.stringify({ valid: true, adminMode: true }), 200);
+    }
+  }
+
+  return cors(JSON.stringify({ valid: false, adminMode: false }), 200);
+}
+
+// Generates a fresh one-time admin code, stores it (5-minute auto-expiry),
+// and posts it to the same Slack channel as the daily code. Replaces the
+// old static ADMIN_MASTER_CODE secret entirely — request a new one from
+// the admin page any time admin access is needed.
+async function handleAdminRequestCode(request, env) {
+  if (!env.ADMIN_PASSWORD) {
+    return cors(JSON.stringify({ error: 'Worker misconfigured — set the ADMIN_PASSWORD secret' }), 500);
+  }
+  let body;
+  try {
+    body = await request.json();
+  } catch (err) {
+    return cors(JSON.stringify({ error: 'Invalid JSON body' }), 400);
+  }
+  if (body.password !== env.ADMIN_PASSWORD) {
+    return cors(JSON.stringify({ error: 'Wrong password' }), 401);
+  }
+  if (!env.CONFIG) {
+    return cors(JSON.stringify({
+      error: 'No CONFIG KV namespace bound — one-time codes need it to track single-use/expiry',
+    }), 500);
+  }
+  if (!env.SLACK_BOT_TOKEN) {
+    return cors(JSON.stringify({ error: 'Worker misconfigured — set the SLACK_BOT_TOKEN secret' }), 500);
+  }
+
+  const bytes = new Uint8Array(4);
+  crypto.getRandomValues(bytes);
+  let num = 0;
+  for (let i = 0; i < 4; i++) num = (num << 8) | bytes[i];
+  num = (num >>> 0) % 1000000;
+  const code = String(num).padStart(6, '0');
+
+  await env.CONFIG.put(requestCodeKey(code), '1', { expirationTtl: REQUEST_CODE_TTL_SECONDS });
+
+  const steps = [];
+  const logStep = (step, ok, detail) => steps.push({ step, ok, detail, at: new Date().toISOString() });
+  const text = `:zap: *One-time admin code:* \`${code}\`\n_Valid for the next 5 minutes, single-use — type it as \`<booking ID>-${code}\` in the Booking ID box to unlock admin mode on this device._`;
+
+  try {
+    const res = await fetch('https://slack.com/api/chat.postMessage', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${env.SLACK_BOT_TOKEN}`,
+        'Content-Type': 'application/json; charset=utf-8',
+      },
+      body: JSON.stringify({ channel: DAILY_CODE_CHANNEL_ID, text }),
+    });
+    const data = await res.json();
+    logStep('slack_chat_postMessage', data.ok === true, `HTTP ${res.status} — ${JSON.stringify(data).slice(0, 500)}`);
+    if (!data.ok) {
+      return cors(JSON.stringify({ ok: false, error: data.error, steps }), 502);
+    }
+  } catch (err) {
+    logStep('slack_chat_postMessage', false, `Exception: ${err.message}`);
+    return cors(JSON.stringify({ ok: false, error: err.message, steps }), 502);
+  }
+
+  return cors(JSON.stringify({ ok: true, code, expiresInSeconds: REQUEST_CODE_TTL_SECONDS, steps }), 200);
 }
 
 // ── /verify — AI screenshot verification ──────────────────────────────────────
@@ -1013,6 +1089,16 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
 
       <div class="card">
         <div class="card-head">
+          <h2>⚡ One-time admin code</h2>
+          <button type="button" class="info-btn" data-info="admin-code">i</button>
+        </div>
+        <p class="sub-label" style="margin:0 0 12px">Replaces the old static master code — request one whenever you need admin access. Posted to the same Slack channel, valid 5 minutes, single-use.</p>
+        <button id="request-code-btn">Request admin code</button>
+        <p class="msg" id="request-code-msg"></p>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
           <h2>🩺 Status</h2>
           <button type="button" class="info-btn" data-info="status">i</button>
         </div>
@@ -1081,9 +1167,10 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
   // on the same button.
   var INFO_TEXT = {
     'release-control': 'Controls what your team\\'s extension shows for updates. Set Latest version to the version you want everyone on, then Save — every extension checks this the next time its panel opens.',
-    'update-required': 'Off (default): a dismissable red banner nudges people to update, but the extension keeps working. On: anyone behind Latest version is fully blocked \\u2014 no booking lookup at all \\u2014 until they install the new version. Your own device stays exempt via the admin master code.',
+    'update-required': 'Off (default): a dismissable red banner nudges people to update, but the extension keeps working. On: anyone behind Latest version is fully blocked \\u2014 no booking lookup at all \\u2014 until they install the new version. Your own device stays exempt via admin mode (a redeemed one-time admin code).',
     'update-message': 'By default the banner/block screen uses a fixed built-in sentence. Turn this on to replace it with your own wording (e.g. pointing at a specific fix, or a deadline) \\u2014 leave it off to just use the default, even while typing a draft here.',
-    'daily-code': 'A 6-digit code that changes automatically every day, computed from a secret key \\u2014 nothing is stored, so it\\'s unpredictable without that key. It posts to Slack daily via a scheduled job. Typing it as code-bookingID in the Booking ID box unlocks that day\\'s gated Instructions for whoever has it.',
+    'daily-code': 'A 6-digit code that changes automatically every day, computed from a secret key \\u2014 nothing is stored, so it\\'s unpredictable without that key. It posts to Slack daily via a scheduled job. Typing it as bookingID-code in the Booking ID box unlocks that day\\'s gated Instructions for whoever has it \\u2014 reusable by anyone, all day.',
+    'admin-code': 'Generates a random code, posts it to the same Slack channel as the daily code, and stores it for 5 minutes. Typed as bookingID-code, the first successful use consumes it \\u2014 dead after that, even before 5 minutes are up \\u2014 and flips a permanent admin-mode bypass on your device for every display gate (Past booking, Booking due soon, Instructions, Update required). Request a fresh one whenever you need admin access again.',
     'status': 'Shows which Cloudflare secrets and bindings this Worker can see \\u2014 never the values themselves, just whether each is configured. A red dot here usually explains a broken feature (e.g. no Slack token means Confirm & Flag can\\'t post).',
     'live-preview': 'A faithful mini-copy of the real extension UI. It updates as you type in Release control \\u2014 before you hit Save \\u2014 so you can check exactly what the team will see for a given Latest version / Update required / message combination.',
   };
@@ -1170,7 +1257,7 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
           '<div class="ext-gate-title">Update required</div>' +
           '<div class="ext-gate-sub">' + gateBody + '<br><a>Download the latest version</a>, then reload the extension.</div>' +
         '</div>';
-      verdict.innerHTML = 'Simulated install <b>' + escHtml(simRaw || '(behind)') + '</b> is behind <b>' + escHtml(latestVersion) + '</b> and <b>Update required</b> is ON → full-screen block' + messageNote + ', extension unusable until updated. (The Booking ID box itself stays enabled the whole time — only the admin master code still works through it.)';
+      verdict.innerHTML = 'Simulated install <b>' + escHtml(simRaw || '(behind)') + '</b> is behind <b>' + escHtml(latestVersion) + '</b> and <b>Update required</b> is ON → full-screen block' + messageNote + ', extension unusable until updated. (The Booking ID box itself stays enabled the whole time — only a valid admin code still works through it.)';
     } else {
       banner.hidden = false;
       bannerText.textContent = effectiveMessage || DEFAULT_BANNER_TEXT;
@@ -1212,7 +1299,6 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
       statusRow('Slack token', cfg.hasSlackToken) +
       statusRow('OpenAI key', cfg.hasOpenAiKey) +
       statusRow('Daily code secret', cfg.hasDailyCodeSecret) +
-      statusRow('Admin master code', cfg.hasAdminMasterCode) +
       statusRow('CONFIG KV bound', cfg.hasConfigKv);
 
     liveConfig = { latestVersion: cfg.latestVersion || null, updateRequired: !!cfg.updateRequired };
@@ -1284,6 +1370,29 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
         msg.textContent = 'Posted to Slack.'; msg.className = 'msg ok';
       })
       .catch(function (err) { msg.textContent = 'Request failed: ' + err.message; msg.className = 'msg err'; });
+  });
+
+  document.getElementById('request-code-btn').addEventListener('click', function () {
+    var btn = this;
+    var msg = document.getElementById('request-code-msg');
+    btn.disabled = true;
+    msg.textContent = 'Requesting…'; msg.className = 'msg';
+    fetch('/admin/request-code', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: password }),
+    })
+      .then(function (res) { return res.json().then(function (data) { return { ok: res.ok, data: data }; }); })
+      .then(function (r) {
+        btn.disabled = false;
+        if (!r.ok || !r.data.ok) { msg.textContent = (r.data && r.data.error) || 'Failed'; msg.className = 'msg err'; return; }
+        msg.textContent = 'Sent — code ' + r.data.code + ', valid for the next 5 minutes, single-use.';
+        msg.className = 'msg ok';
+      })
+      .catch(function (err) {
+        btn.disabled = false;
+        msg.textContent = 'Request failed: ' + err.message; msg.className = 'msg err';
+      });
   });
 
   var savedPw = null;

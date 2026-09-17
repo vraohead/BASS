@@ -112,25 +112,10 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
     return true;
   }
 
-  if (request.action === 'VERIFY_ADMIN_CODE') {
-    const { code, workerUrl } = request;
-    (async () => {
-      try {
-        const res = await fetch(`${workerUrl.replace(/\/$/, '')}/verify-admin-code`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ code }),
-        });
-        const data = await res.json().catch(() => ({}));
-        sendResponse(res.ok ? { ok: true, valid: !!data.valid } : { ok: false, error: data.error || 'Worker error' });
-      } catch (err) {
-        sendResponse({ ok: false, error: err.message });
-      }
-    })();
-    return true;
-  }
-
-  if (request.action === 'VERIFY_DAILY_CODE') {
+  // Handles both code kinds — the worker tells us via adminMode which pool
+  // (if either) matched: true for a redeemed one-time admin code, false
+  // for the shared daily code.
+  if (request.action === 'VERIFY_CODE') {
     const { code, workerUrl } = request;
     (async () => {
       try {
@@ -140,7 +125,9 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
           body: JSON.stringify({ code }),
         });
         const data = await res.json().catch(() => ({}));
-        sendResponse(res.ok ? { ok: true, valid: !!data.valid } : { ok: false, error: data.error || 'Worker error' });
+        sendResponse(res.ok
+          ? { ok: true, valid: !!data.valid, adminMode: !!data.adminMode }
+          : { ok: false, error: data.error || 'Worker error' });
       } catch (err) {
         sendResponse({ ok: false, error: err.message });
       }

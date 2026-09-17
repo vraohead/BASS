@@ -7,11 +7,12 @@
 # Settings -> Variables and Secrets after ANY incident like this.
 # Before trusting Git-based deploys again: re-add every secret, push one
 # trivial change, and confirm in /debug-env that hasSlackToken/
-# hasOpenAiKey/hasAdminPassword/hasDailyCodeSecret/hasAdminMasterCode are
-# all still true afterward. If a deploy ever wipes them again, disconnect
-# Builds (Settings -> Builds -> Disconnect) and go back to pasting
-# worker.js into the Dashboard's "Edit code" flow — that path never
-# touches secrets at all.
+# hasOpenAiKey/hasAdminPassword/hasDailyCodeSecret are all still true
+# afterward (ADMIN_MASTER_CODE itself is retired — see the codes section
+# below the endpoints list up top; no need to re-add it). If a deploy ever
+# wipes secrets again, disconnect Builds (Settings -> Builds -> Disconnect)
+# and go back to pasting worker.js into the Dashboard's "Edit code" flow —
+# that path never touches secrets at all.
 name = "bass-verify"
 main = "worker.js"
 compatibility_date = "2024-09-23"
