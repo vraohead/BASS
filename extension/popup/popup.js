@@ -228,9 +228,9 @@ async function doSearch() {
 
   // "<bookingId>-<code>" — one shared format for both code kinds. The
   // worker decides which pool (if either) matched and tells us via
-  // adminMode: true means a redeemed one-time admin code (flips a
-  // persistent bypass), false means the shared daily code (unlocks
-  // Instructions for the rest of today only).
+  // adminMode: true means a matched admin code (reusable all day, flips a
+  // persistent bypass), false means a matched instructions code (single-use
+  // — unlocks Instructions for this one booking only, then is consumed).
   const codeMatch = id.match(/^(\d{6,})-(\d{6})$/);
   if (codeMatch) {
     const [, bookingId, code] = codeMatch;
@@ -246,12 +246,12 @@ async function doSearch() {
       await setAdminMode(true);
       updateBlocked = false; // admin mode bypasses a hard update block too
     } else if (updateBlocked) {
-      // The shared daily code doesn't bypass a hard update block — only a
+      // The instructions code doesn't bypass a hard update block — only a
       // redeemed admin code does.
       renderUpdateBlockedError();
       return;
     } else {
-      await setInstrUnlockedToday();
+      unlockedBookingId = bookingId;
     }
     id = bookingId;
     $('booking-id').value = bookingId;
@@ -1360,23 +1360,12 @@ function isAutomationPending(flat) {
   return isAutomation && fulfilmentStatus === 'PENDING';
 }
 
-// Daily instructions-unlock code — once verified against the worker, cache
-// it for the rest of the (local) day so the agent doesn't re-enter it for
-// every gated booking they open.
-function todayLocalDateStr() {
-  return new Date().toISOString().slice(0, 10);
-}
-async function getInstrUnlockedToday() {
-  try {
-    const { instrUnlockedDate } = await chrome.storage.local.get('instrUnlockedDate');
-    return instrUnlockedDate === todayLocalDateStr();
-  } catch (_) {
-    return false;
-  }
-}
-async function setInstrUnlockedToday() {
-  try { await chrome.storage.local.set({ instrUnlockedDate: todayLocalDateStr() }); } catch (_) {}
-}
+// Instructions-unlock code — single-use on the worker (deleted the instant
+// it's redeemed), so it only ever unlocks the one booking being fetched in
+// that same action. Tracked in memory only (not chrome.storage.local) —
+// resets on next panel open, and deliberately does NOT unlock any other
+// booking, matching the code's single-use, per-booking scope.
+let unlockedBookingId = null;
 
 // Admin/testing mode — a persistent, non-expiring bypass for every display
 // gate (Past booking, Booking due soon, Instructions withheld), unlocked by
@@ -1404,7 +1393,7 @@ async function buildInstructionsSection(flat, vendors, vendorTourData = []) {
   } else if (isAutomationPending(flat)) {
     gateReason = 'Automated fulfilment is still pending — manual instructions withheld until needed.';
   }
-  if (gateReason && (adminModeEnabled || await getInstrUnlockedToday())) gateReason = null;
+  if (gateReason && (adminModeEnabled || unlockedBookingId === flat.bookingId)) gateReason = null;
 
   const blocks = [];
 
