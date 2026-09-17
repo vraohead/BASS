@@ -1659,18 +1659,25 @@ function isVersionOlder(a, b) {
 let updateBlocked = false;
 let _updateGateArgs = null;
 
-function showUpdateRequiredGate(downloadUrl, latestVersion) {
+const DEFAULT_UPDATE_BANNER_TEXT = '🚨 A new version is available — please download the latest update.';
+
+// `message` is the admin's optional custom text (set + enabled via the
+// admin page) — falls back to the built-in default wording when absent.
+function showUpdateRequiredGate(downloadUrl, latestVersion, message) {
   updateBlocked = true;
-  _updateGateArgs = [downloadUrl, latestVersion];
+  _updateGateArgs = [downloadUrl, latestVersion, message];
   $('auth-warning').hidden  = true;
   $('error-message').hidden = true;
   $('booking-summary').hidden = true;
   $('tab-nav').hidden = true;
+  const bodyText = message
+    ? escHtml(message)
+    : `Version ${escHtml(latestVersion)} is required to keep using Booking Assistant.`;
   $('ticket-details').innerHTML = `
     <div class="auth-gate">
       <div class="auth-gate-icon">🚨</div>
       <p class="auth-gate-title">Update required</p>
-      <p class="auth-gate-sub">Version ${escHtml(latestVersion)} is required to keep using Booking Assistant.<br>
+      <p class="auth-gate-sub">${bodyText}<br>
         <a href="${escHtml(downloadUrl)}" target="_blank" rel="noopener">Download the latest version</a>, then reload the extension.</p>
     </div>
   `;
@@ -1690,13 +1697,19 @@ async function checkForUpdate() {
     if (!isVersionOlder(current, result.latestVersion)) return { blocked: false };
 
     if (result.updateRequired && !adminModeEnabled) {
-      showUpdateRequiredGate(result.downloadUrl || 'https://drive.google.com/drive/folders/19IvY2URiuri53L_eajvxjuGx2zl-ojZV', result.latestVersion);
+      showUpdateRequiredGate(
+        result.downloadUrl || 'https://drive.google.com/drive/folders/19IvY2URiuri53L_eajvxjuGx2zl-ojZV',
+        result.latestVersion,
+        result.message
+      );
       return { blocked: true };
     }
 
     const banner = $('update-banner');
     const link = $('update-banner-link');
+    const text = $('update-banner-text');
     if (result.downloadUrl) link.href = result.downloadUrl;
+    text.textContent = result.message || DEFAULT_UPDATE_BANNER_TEXT;
     banner.hidden = false;
     return { blocked: false };
   } catch (_) {

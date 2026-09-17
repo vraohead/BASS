@@ -31,7 +31,10 @@
 //   POST /admin/set-config { password, latestVersion?, updateRequired? } -> write config (admin-only)
 //   POST /verify-code      { code } -> { valid: true|false }
 //   POST /verify-admin-code { code } -> { valid: true|false }
-//   GET  /latest-version   -> { latestVersion, downloadUrl, updateRequired } — not secret, no auth
+//   GET  /latest-version   -> { latestVersion, downloadUrl, updateRequired, message } — not secret, no auth
+//                             message is the admin's custom update text, only
+//                             sent when enabled — null falls back to the
+//                             extension's own default wording
 //
 // Every meaningful operation (Slack calls, OpenAI calls) appends a
 // {step, ok, detail, at} entry to a `steps` array that's returned in the
@@ -112,7 +115,7 @@
 
 // Bump this string whenever you paste a new version into the dashboard —
 // visiting GET /debug-env instantly confirms whether a deploy took effect.
-const WORKER_VERSION = '2026-09-14-05';
+const WORKER_VERSION = '2026-09-17-01';
 
 // Formats an ISO timestamp as a clean IST string, e.g. "6 Sep 2026, 10:44 PM IST".
 function formatIST(isoString) {
@@ -205,6 +208,10 @@ export default {
         latestVersion: config.latestVersion,
         downloadUrl: DOWNLOAD_URL,
         updateRequired: config.updateRequired,
+        // Only sent when the admin has both written AND enabled a custom
+        // message — otherwise null, so the extension falls back to its
+        // own built-in default wording.
+        message: (config.updateMessageEnabled && config.updateMessage) ? config.updateMessage : null,
       }), 200);
     }
 
@@ -297,17 +304,23 @@ async function handleAdminSendDailyCode(request, env, url) {
 async function getConfig(env) {
   let latestVersion = null;
   let updateRequired = false;
+  let updateMessage = '';
+  let updateMessageEnabled = false;
   let kvHasVersion = false;
   let kvHasRequired = false;
 
   if (env.CONFIG) {
     try {
-      const [lv, ur] = await Promise.all([
+      const [lv, ur, um, ume] = await Promise.all([
         env.CONFIG.get('latestVersion'),
         env.CONFIG.get('updateRequired'),
+        env.CONFIG.get('updateMessage'),
+        env.CONFIG.get('updateMessageEnabled'),
       ]);
       if (lv !== null) { latestVersion = lv; kvHasVersion = true; }
       if (ur !== null) { updateRequired = ur === 'true'; kvHasRequired = true; }
+      if (um !== null) updateMessage = um;
+      if (ume !== null) updateMessageEnabled = ume === 'true';
     } catch (_) {
       // KV read failed — fall through to the plain-Variable fallback below.
     }
@@ -316,7 +329,7 @@ async function getConfig(env) {
   if (!kvHasVersion && env.LATEST_VERSION) latestVersion = env.LATEST_VERSION;
   if (!kvHasRequired && env.UPDATE_REQUIRED === 'true') updateRequired = true;
 
-  return { latestVersion, updateRequired };
+  return { latestVersion, updateRequired, updateMessage, updateMessageEnabled };
 }
 
 async function handleAdminGetConfig(request, env, url) {
@@ -373,6 +386,12 @@ async function handleAdminSetConfig(request, env) {
   }
   if (typeof body.updateRequired === 'boolean') {
     await env.CONFIG.put('updateRequired', body.updateRequired ? 'true' : 'false');
+  }
+  if (typeof body.updateMessage === 'string') {
+    await env.CONFIG.put('updateMessage', body.updateMessage);
+  }
+  if (typeof body.updateMessageEnabled === 'boolean') {
+    await env.CONFIG.put('updateMessageEnabled', body.updateMessageEnabled ? 'true' : 'false');
   }
 
   const config = await getConfig(env);
@@ -799,11 +818,31 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
     background: #1a1c23; border: 1px solid #2a2c35; border-radius: 10px;
     padding: 18px; margin-bottom: 16px;
   }
-  .card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: #9a9aa5; margin: 0 0 14px; }
+  .card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: #9a9aa5; margin: 0; }
+  .card-head { display: flex; align-items: center; gap: 6px; margin-bottom: 14px; }
+  .info-btn {
+    background: transparent; border: 1px solid #33353f; color: #75757f;
+    width: 18px; height: 18px; padding: 0; border-radius: 50%;
+    font-size: 11px; font-weight: 700; line-height: 1; display: inline-flex;
+    align-items: center; justify-content: center; flex-shrink: 0;
+  }
+  .info-btn:hover { background: #24262e; color: #b0b0ba; border-color: #45475a; }
+  .info-popover {
+    position: fixed; max-width: 280px; background: #24262e; border: 1px solid #3a3d4a;
+    border-radius: 8px; padding: 10px 12px; font-size: 12.5px; line-height: 1.55;
+    color: #d6d6de; box-shadow: 0 8px 24px rgba(0,0,0,0.4); z-index: 50;
+  }
   label { display: block; font-size: 12px; color: #b0b0ba; margin-bottom: 6px; }
-  input[type=password], input[type=text] {
+  .sub-label { font-size: 11px; color: #75757f; margin: -6px 0 10px; }
+  input[type=password], input[type=text], textarea {
     width: 100%; padding: 9px 10px; border-radius: 7px; border: 1px solid #33353f;
     background: #0f1115; color: #e6e6ea; font-size: 14px; margin-bottom: 10px;
+    font-family: inherit;
+  }
+  textarea { resize: vertical; min-height: 56px; }
+  textarea:disabled { opacity: 0.4; cursor: not-allowed; }
+  .message-block {
+    border-top: 1px dashed #2a2c35; margin-top: 4px; padding-top: 14px;
   }
   .row { display: flex; gap: 10px; align-items: center; }
   .checkbox-row { display: flex; align-items: center; gap: 8px; margin: 4px 0 14px; }
@@ -915,7 +954,7 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
 </head>
 <body>
   <h1>Booking Assistant — Admin</h1>
-  <p class="sub">Worker: <span id="worker-version">—</span></p>
+  <p class="sub">Manage what the team's extension shows, test changes live before they go out, and check configuration health. · Worker: <span id="worker-version">—</span></p>
 
   <div id="login-card" class="card login-wrap">
     <h2>Unlock</h2>
@@ -931,7 +970,10 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
       </div>
 
       <div class="card">
-        <h2>Release control</h2>
+        <div class="card-head">
+          <h2>🚀 Release control</h2>
+          <button type="button" class="info-btn" data-info="release-control">i</button>
+        </div>
         <div class="live-line">
           <span>Currently live for the team:</span>
           <span><b id="live-version">—</b> · <b id="live-required">—</b></span>
@@ -941,13 +983,28 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
         <div class="checkbox-row">
           <input type="checkbox" id="required-input" />
           <label for="required-input" style="margin:0">Update required (hard block instead of banner)</label>
+          <button type="button" class="info-btn" data-info="update-required">i</button>
         </div>
+
+        <div class="message-block">
+          <div class="checkbox-row" style="margin-top:0">
+            <input type="checkbox" id="message-enabled-input" />
+            <label for="message-enabled-input" style="margin:0">Use a custom message</label>
+            <button type="button" class="info-btn" data-info="update-message">i</button>
+          </div>
+          <p class="sub-label" id="message-default-hint">Off — the team sees the default wording shown below.</p>
+          <textarea id="message-input" placeholder="🚨 A new version is available — please download the latest update." disabled></textarea>
+        </div>
+
         <button id="save-config-btn">Save</button>
         <p class="msg" id="config-msg"></p>
       </div>
 
       <div class="card">
-        <h2>Daily instructions-unlock code</h2>
+        <div class="card-head">
+          <h2>🔑 Daily instructions-unlock code</h2>
+          <button type="button" class="info-btn" data-info="daily-code">i</button>
+        </div>
         <div class="code-display" id="daily-code">——————</div>
         <p class="muted" id="daily-code-date"></p>
         <button class="secondary" id="send-slack-btn">Send to Slack now</button>
@@ -955,7 +1012,10 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
       </div>
 
       <div class="card">
-        <h2>Status</h2>
+        <div class="card-head">
+          <h2>🩺 Status</h2>
+          <button type="button" class="info-btn" data-info="status">i</button>
+        </div>
         <div class="status-grid" id="status-grid"></div>
       </div>
     </div>
@@ -963,7 +1023,10 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
     <div class="col-right">
       <div class="card">
         <div class="preview-head">
-          <h2 style="margin:0">Live preview</h2>
+          <div class="card-head" style="margin-bottom:0">
+            <h2>👁 Live preview</h2>
+            <button type="button" class="info-btn" data-info="live-preview">i</button>
+          </div>
           <div class="preview-theme-toggle">
             <button type="button" class="tiny secondary" id="preview-theme-light">☀️</button>
             <button type="button" class="tiny secondary" id="preview-theme-dark">🌙</button>
@@ -986,7 +1049,7 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
             <button class="ext-btn ext-btn-danger">✕ Clear</button>
           </div>
           <div class="ext-update-banner" id="ext-update-banner" hidden>
-            <span>🚨 A new version is available — please download the latest update.</span>
+            <span id="ext-banner-text">🚨 A new version is available — please download the latest update.</span>
             <span class="ext-banner-link">Download</span>
           </div>
           <div class="ext-body" id="ext-body">
@@ -1013,6 +1076,44 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
     return '<div><span>' + label + '</span><span><span class="dot ' + (ok ? 'ok' : 'bad') + '"></span>' + (ok ? 'yes' : 'no') + '</span></div>';
   }
 
+  // ── Info popovers — one shared element, positioned near whichever (i)
+  // button was clicked; closes on outside click, Escape, or a second click
+  // on the same button.
+  var INFO_TEXT = {
+    'release-control': 'Controls what your team\\'s extension shows for updates. Set Latest version to the version you want everyone on, then Save — every extension checks this the next time its panel opens.',
+    'update-required': 'Off (default): a dismissable red banner nudges people to update, but the extension keeps working. On: anyone behind Latest version is fully blocked \\u2014 no booking lookup at all \\u2014 until they install the new version. Your own device stays exempt via the admin master code.',
+    'update-message': 'By default the banner/block screen uses a fixed built-in sentence. Turn this on to replace it with your own wording (e.g. pointing at a specific fix, or a deadline) \\u2014 leave it off to just use the default, even while typing a draft here.',
+    'daily-code': 'A 6-digit code that changes automatically every day, computed from a secret key \\u2014 nothing is stored, so it\\'s unpredictable without that key. It posts to Slack daily via a scheduled job. Typing it as code-bookingID in the Booking ID box unlocks that day\\'s gated Instructions for whoever has it.',
+    'status': 'Shows which Cloudflare secrets and bindings this Worker can see \\u2014 never the values themselves, just whether each is configured. A red dot here usually explains a broken feature (e.g. no Slack token means Confirm & Flag can\\'t post).',
+    'live-preview': 'A faithful mini-copy of the real extension UI. It updates as you type in Release control \\u2014 before you hit Save \\u2014 so you can check exactly what the team will see for a given Latest version / Update required / message combination.',
+  };
+  var infoPopover = null;
+  function closeInfoPopover() {
+    if (infoPopover) { infoPopover.remove(); infoPopover = null; }
+  }
+  document.addEventListener('click', function (e) {
+    var btn = e.target.closest ? e.target.closest('.info-btn') : null;
+    if (!btn) { closeInfoPopover(); return; }
+    var wasOpenForThisBtn = infoPopover && infoPopover._forBtn === btn;
+    closeInfoPopover();
+    if (wasOpenForThisBtn) return;
+    var text = INFO_TEXT[btn.getAttribute('data-info')];
+    if (!text) return;
+    var pop = document.createElement('div');
+    pop.className = 'info-popover';
+    pop.textContent = text;
+    pop._forBtn = btn;
+    document.body.appendChild(pop);
+    var r = btn.getBoundingClientRect();
+    var top = r.bottom + 6;
+    var left = Math.min(r.left, window.innerWidth - pop.offsetWidth - 16);
+    pop.style.top = top + 'px';
+    pop.style.left = Math.max(8, left) + 'px';
+    infoPopover = pop;
+    e.stopPropagation();
+  });
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') closeInfoPopover(); });
+
   // Same numeric per-segment comparison as the extension's isVersionOlder,
   // so the preview matches real behaviour exactly (e.g. 10.9.0 < 10.10.0).
   function isVersionOlder(a, b) {
@@ -1031,13 +1132,19 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
     });
   }
 
+  var DEFAULT_BANNER_TEXT = '🚨 A new version is available — please download the latest update.';
+
   function renderPreview() {
     var latestVersion = document.getElementById('version-input').value.trim();
     var updateRequired = document.getElementById('required-input').checked;
+    var messageEnabled = document.getElementById('message-enabled-input').checked;
+    var messageText = document.getElementById('message-input').value.trim();
+    var effectiveMessage = (messageEnabled && messageText) ? messageText : '';
     var simRaw = document.getElementById('sim-version-input').value.trim();
     var sim = simRaw || '0.0.0'; // blank = "assume it's behind", the common case being demoed
     var frame = document.getElementById('ext-frame');
     var banner = document.getElementById('ext-update-banner');
+    var bannerText = document.getElementById('ext-banner-text');
     var body = document.getElementById('ext-body');
     var verdict = document.getElementById('preview-verdict');
 
@@ -1052,33 +1159,51 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
       return;
     }
 
+    var messageNote = effectiveMessage ? ' using your custom message' : ' using the default message';
+
     if (updateRequired) {
       banner.hidden = true;
+      var gateBody = effectiveMessage ? escHtml(effectiveMessage) : ('Version ' + escHtml(latestVersion) + ' is required to keep using Booking Assistant.');
       body.innerHTML =
         '<div class="ext-gate">' +
           '<div class="ext-gate-icon">🚨</div>' +
           '<div class="ext-gate-title">Update required</div>' +
-          '<div class="ext-gate-sub">Version ' + escHtml(latestVersion) + ' is required to keep using Booking Assistant.<br><a>Download the latest version</a>, then reload the extension.</div>' +
+          '<div class="ext-gate-sub">' + gateBody + '<br><a>Download the latest version</a>, then reload the extension.</div>' +
         '</div>';
-      verdict.innerHTML = 'Simulated install <b>' + escHtml(simRaw || '(behind)') + '</b> is behind <b>' + escHtml(latestVersion) + '</b> and <b>Update required</b> is ON → full-screen block, extension unusable until updated. (The Booking ID box itself stays enabled the whole time — only the admin master code still works through it.)';
+      verdict.innerHTML = 'Simulated install <b>' + escHtml(simRaw || '(behind)') + '</b> is behind <b>' + escHtml(latestVersion) + '</b> and <b>Update required</b> is ON → full-screen block' + messageNote + ', extension unusable until updated. (The Booking ID box itself stays enabled the whole time — only the admin master code still works through it.)';
     } else {
       banner.hidden = false;
+      bannerText.textContent = effectiveMessage || DEFAULT_BANNER_TEXT;
       body.innerHTML = '<div class="ext-placeholder">Booking details would still show here as normal — the banner is dismissable by updating, not blocking.</div>';
-      verdict.innerHTML = 'Simulated install <b>' + escHtml(simRaw || '(behind)') + '</b> is behind <b>' + escHtml(latestVersion) + '</b> and <b>Update required</b> is OFF → dismissable red banner only, extension stays fully usable.';
+      verdict.innerHTML = 'Simulated install <b>' + escHtml(simRaw || '(behind)') + '</b> is behind <b>' + escHtml(latestVersion) + '</b> and <b>Update required</b> is OFF → dismissable red banner only' + messageNote + ', extension stays fully usable.';
     }
   }
 
   document.getElementById('preview-theme-light').addEventListener('click', function () { previewTheme = 'light'; renderPreview(); });
   document.getElementById('preview-theme-dark').addEventListener('click', function () { previewTheme = 'dark'; renderPreview(); });
-  ['version-input', 'sim-version-input'].forEach(function (id) {
+  ['version-input', 'sim-version-input', 'message-input'].forEach(function (id) {
     document.getElementById(id).addEventListener('input', renderPreview);
   });
   document.getElementById('required-input').addEventListener('change', renderPreview);
+  document.getElementById('message-enabled-input').addEventListener('change', function () {
+    var on = this.checked;
+    document.getElementById('message-input').disabled = !on;
+    document.getElementById('message-default-hint').textContent = on
+      ? 'On — the team will see your text below instead of the default.'
+      : 'Off — the team sees the default wording shown below.';
+    renderPreview();
+  });
 
   function render(cfg) {
     document.getElementById('worker-version').textContent = cfg.workerVersion || '—';
     document.getElementById('version-input').value = cfg.latestVersion || '';
     document.getElementById('required-input').checked = !!cfg.updateRequired;
+    document.getElementById('message-input').value = cfg.updateMessage || '';
+    document.getElementById('message-enabled-input').checked = !!cfg.updateMessageEnabled;
+    document.getElementById('message-input').disabled = !cfg.updateMessageEnabled;
+    document.getElementById('message-default-hint').textContent = cfg.updateMessageEnabled
+      ? 'On — the team will see your text below instead of the default.'
+      : 'Off — the team sees the default wording shown below.';
     document.getElementById('daily-code').textContent = cfg.dailyCode || 'not configured';
     document.getElementById('daily-code-date').textContent = cfg.dailyCodeDate ? ('for ' + cfg.dailyCodeDate + ' (IST) — posts automatically to the Slack channel via the cron trigger') : '';
     document.getElementById('kv-warning').style.display = cfg.hasConfigKv ? 'none' : 'block';
@@ -1136,6 +1261,8 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
         password: password,
         latestVersion: document.getElementById('version-input').value.trim(),
         updateRequired: document.getElementById('required-input').checked,
+        updateMessage: document.getElementById('message-input').value.trim(),
+        updateMessageEnabled: document.getElementById('message-enabled-input').checked,
       }),
     })
       .then(function (res) { return res.json().then(function (data) { return { ok: res.ok, data: data }; }); })
