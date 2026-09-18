@@ -240,6 +240,15 @@ async function doSearch() {
     $('booking-id').value = bookingId;
   }
 
+  const mismatch = await detectBookingMismatch(id);
+  if (mismatch) {
+    $('loading-spinner').hidden = true;
+    const errEl = $('error-message');
+    errEl.textContent = `Box Office is showing booking ${mismatch}, but you're fetching ${id} — make sure you're on the right booking before continuing.`;
+    errEl.hidden = false;
+    return;
+  }
+
   const result = await sendMessage({ action: 'FETCH_BOOKING', bookingId: id });
 
   $('loading-spinner').hidden = true;
@@ -1112,6 +1121,15 @@ function buildVerifySection(flat, guestData) {
     confirmBtn.textContent = '⏳ Sending…';
     confirmStatus.textContent = '';
 
+    const tabMismatch = await detectBookingMismatch(bookingId);
+    if (tabMismatch) {
+      confirmBtn.disabled = false;
+      confirmBtn.textContent = '✓ Confirm & Flag';
+      confirmStatus.textContent = `Box Office is now showing booking ${tabMismatch}, not ${bookingId} — refusing to confirm the wrong booking.`;
+      confirmStatus.className = 'verify-confirm-status status-err';
+      return;
+    }
+
     const agentEmail = await getAgentEmail();
     if (!agentEmail) {
       confirmBtn.disabled = false;
@@ -1287,6 +1305,15 @@ function buildLateConfirmSection(flat) {
     confirmBtn.disabled = true;
     confirmBtn.textContent = '⏳ Sending…';
     confirmStatus.textContent = '';
+
+    const tabMismatch = await detectBookingMismatch(bookingId);
+    if (tabMismatch) {
+      confirmBtn.disabled = false;
+      confirmBtn.textContent = '✓ Confirm & Flag';
+      confirmStatus.textContent = `Box Office is now showing booking ${tabMismatch}, not ${bookingId} — refusing to confirm the wrong booking.`;
+      confirmStatus.className = 'verify-confirm-status late-confirm-status status-err';
+      return;
+    }
 
     const agentEmail = await getAgentEmail();
     if (!agentEmail) {
@@ -1620,6 +1647,18 @@ async function detectBookingIdFromActiveTab() {
   } catch (_) {
     return null;
   }
+}
+
+// Returns the active tab's booking ID if it's showing a *different* specific
+// booking than `expectedId` — the signal that the agent is about to fetch or
+// confirm the wrong booking (wrong tab, stale data, fat-fingered ID). Returns
+// null when there's nothing to contradict (Box Office is on a list/dashboard
+// page with no specific booking in the URL) so arbitrary lookups still work,
+// or when admin mode is bypassing gates for testing.
+async function detectBookingMismatch(expectedId) {
+  if (adminModeEnabled) return null;
+  const urlBookingId = await detectBookingIdFromActiveTab();
+  return (urlBookingId && urlBookingId !== expectedId) ? urlBookingId : null;
 }
 
 // Reconciles the restored (from storage) booking with whatever the active Box
