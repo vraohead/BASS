@@ -834,7 +834,11 @@ function _getVerifyFacts(flat, guestData) {
   const date  = flat.inventoryDate || flat.bookingDate || '';
   const time  = flat.inventoryTime || '';
   const price = flat.netPrice != null ? String(flat.netPrice) : '';
-  const product = flat.productName || '';
+  // Same fallback as the Booking tab: many bookings only carry the product
+  // name on the vendor record, not the top-level field — without this,
+  // `product` silently comes back empty and AI Verify skips matching the
+  // experience/product name entirely (no expected value to compare).
+  const product = flat.productName || getPrimaryVendor(flat)?.productName || '';
   let pax = flat.totalPax != null ? String(flat.totalPax) : '';
   if (!pax && guestData?.paxDetails?.length) {
     const t = guestData.paxDetails.reduce((s, p) => s + (p.count || 0), 0);
