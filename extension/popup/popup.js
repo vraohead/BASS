@@ -817,6 +817,11 @@ function _setVerifyImage(sec, dataUrl) {
   // "Capture Current Tab" handler re-populates this right after, if it
   // succeeds; a pasted/dropped/uploaded image has no associated tab text.
   sec._capturedResponseText = null;
+  // Auto-run AI Verify the moment any image lands here (capture, paste,
+  // drop, or upload) — usage tracking and the checkout-vs-ticket flag are
+  // recorded server-side as part of this call, so they must never depend on
+  // the agent separately remembering to press "AI Verify".
+  sec._runAiVerify?.();
 }
 
 function _getVerifyFacts(flat, guestData) {
@@ -955,15 +960,15 @@ function buildVerifySection(flat, guestData) {
     btn.disabled = false;
     btn.textContent = '📸 Capture Current Tab';
     if (result?.ok) {
-      _setVerifyImage(sec, result.dataUrl);
-      // Also grab the tab's text content in the same action, so AI Verify
-      // can cross-check the screenshot against it automatically. Silently
-      // skip if the page can't be read this way — the screenshot alone is
-      // still enough to run AI Verify.
+      // Grab the tab's text content BEFORE setting the image — setting the
+      // image now auto-triggers AI Verify (a slower OpenAI round-trip), so
+      // this has to be in place first or the cross-check below would race
+      // it instead of reliably having the text ready in time.
       try {
         const respResult = await sendMessage({ action: 'CAPTURE_RESPONSE' });
         if (respResult?.ok) sec._capturedResponseText = respResult.text;
       } catch (_) {}
+      _setVerifyImage(sec, result.dataUrl);
     } else {
       errEl.innerHTML = `<p class="verify-result-error">Screenshot failed: ${escHtml(result?.error || 'unknown')}</p>`;
       errEl.hidden = false;
@@ -979,8 +984,13 @@ function buildVerifySection(flat, guestData) {
     fileInput.value = '';
   });
 
-  // AI Verify
-  sec.querySelector('.verify-ai-btn').addEventListener('click', async () => {
+  // AI Verify — runs automatically the instant a screenshot is captured,
+  // pasted, or uploaded (see _setVerifyImage, which calls sec._runAiVerify),
+  // so usage tracking and the checkout-vs-ticket flag never depend on the
+  // agent remembering to press a separate button. The button stays wired to
+  // the same function for a manual re-run (e.g. after Capture Response, or
+  // to retry a failed check).
+  async function runAiVerify() {
     const workerUrl = DEFAULT_WORKER_URL;
     const imgEl = sec.querySelector('.verify-img');
     if (!imgEl.src || imgEl.src === window.location.href) return;
@@ -999,6 +1009,7 @@ function buildVerifySection(flat, guestData) {
       imageBase64,
       mimeType,
       facts: { date, time, pax, price, product },
+      bookingId,
       workerUrl,
     });
 
@@ -1018,7 +1029,7 @@ function buildVerifySection(flat, guestData) {
         ${rawDetails}
       `;
       resultsEl.hidden = false;
-      resultsEl.querySelector('.verify-retry-btn')?.addEventListener('click', () => aiBtn.click());
+      resultsEl.querySelector('.verify-retry-btn')?.addEventListener('click', () => runAiVerify());
       return;
     }
 
@@ -1061,7 +1072,10 @@ function buildVerifySection(flat, guestData) {
       if (totalMismatches === 0 && result.isCheckoutPage !== false) confirmBtn.click();
     }
     resultsEl.hidden = false;
-  });
+  }
+
+  sec.querySelector('.verify-ai-btn').addEventListener('click', runAiVerify);
+  sec._runAiVerify = runAiVerify;
 
   // Capture response
   sec.querySelector('.verify-capture-resp-btn').addEventListener('click', async () => {

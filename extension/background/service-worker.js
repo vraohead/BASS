@@ -120,13 +120,13 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
   }
 
   if (request.action === 'VERIFY_IMAGE') {
-    const { imageBase64, mimeType, facts, workerUrl } = request;
+    const { imageBase64, mimeType, facts, bookingId, workerUrl } = request;
     (async () => {
       try {
         const res = await fetch(`${workerUrl.replace(/\/$/, '')}/verify`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ imageBase64, mimeType, facts }),
+          body: JSON.stringify({ imageBase64, mimeType, facts, bookingId }),
         });
         const data = await res.json();
         sendResponse(res.ok

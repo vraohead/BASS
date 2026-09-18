@@ -17,22 +17,37 @@
 // Endpoints:
 //   GET  /               -> the admin control page (see "Admin page" below)
 //   GET  /debug-env      -> { hasSlackToken, hasOpenAiKey, slackChannelId, version }
-//   POST /verify          { imageBase64, mimeType, facts: {date,time,pax,price,product} }
+//   POST /verify          { imageBase64, mimeType, facts: {date,time,pax,price,product}, bookingId? }
 //                          -> { checks: [...], isCheckoutPage, checkoutPageNote }
 //                             isCheckoutPage:false is the flagged case — the
 //                             screenshot is expected to be a checkout/cart/
 //                             payment page (pre-confirmation), not an
-//                             already-issued ticket
+//                             already-issued ticket. bookingId (optional) is
+//                             only used to record the usage-report counters
+//                             below — omitting it just skips that tracking.
 //   POST /confirm-flag     { bookingId, agentEmail, confirmed, skipped,
 //                            imageBase64?, mimeType?, verifiedAt }
 //                          -> { ok: true, steps: [...], screenshotError? }
-//   GET  /admin/send-daily-code?password=...  -> manually trigger the Slack post (for testing)
+//   GET  /admin/send-daily-code?password=...    -> manually trigger the Slack post (for testing)
+//   GET  /admin/send-usage-report?password=...  -> manually trigger the usage report (for testing)
 //   GET  /admin/config?password=...           -> secret/binding status (admin-only)
 //   POST /admin/request-code { password } -> generate + Slack-post an admin
 //                                             code, reusable all day (admin-only)
 //   POST /verify-code      { code } -> { valid: true|false, adminMode: true|false }
 //                             adminMode is true only for a matched admin
 //                             code — false for a matched instructions code
+//
+// Usage report — posted automatically once a day (same cron as the
+// instructions code) to the confirm-flag Slack channel: how many unique
+// bookings have run AI Verify (all-time, from the verifyseen: KV keys), and
+// of those, how many were flagged for showing an already-issued ticket
+// instead of the expected checkout page (verifyticket: KV keys). Both are
+// recorded automatically by every /verify call that includes a bookingId —
+// there's no separate step or button an agent needs to remember, since the
+// extension runs AI Verify itself the instant a screenshot is captured,
+// pasted, or uploaded (not gated behind a manual "AI Verify" click). Counts
+// are cumulative since this shipped, not a daily/weekly delta — there's no
+// historical data from before this endpoint existed to backfill from.
 //
 // Every meaningful operation (Slack calls, OpenAI calls) appends a
 // {step, ok, detail, at} entry to a `steps` array that's returned in the
@@ -89,7 +104,7 @@
 
 // Bump this string whenever you paste a new version into the dashboard —
 // visiting GET /debug-env instantly confirms whether a deploy took effect.
-const WORKER_VERSION = '2026-09-18-02';
+const WORKER_VERSION = '2026-09-18-03';
 
 // Formats an ISO timestamp as a clean IST string, e.g. "6 Sep 2026, 10:44 PM IST".
 function formatIST(isoString) {
@@ -112,7 +127,7 @@ const SLACK_CHANNEL_ID = 'C0BV91K7F70';
 const DAILY_CODE_CHANNEL_ID = 'C0BKUTZ4ADN';
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     // CORS pre-flight — every route needs this handled first.
     if (request.method === 'OPTIONS') {
       return cors('', 204);
@@ -141,11 +156,15 @@ export default {
     }
 
     if (request.method === 'POST' && url.pathname === '/verify') {
-      return handleVerify(request, env);
+      return handleVerify(request, env, ctx);
     }
 
     if (request.method === 'GET' && url.pathname === '/admin/send-daily-code') {
       return handleAdminSendDailyCode(request, env, url);
+    }
+
+    if (request.method === 'GET' && url.pathname === '/admin/send-usage-report') {
+      return handleAdminSendUsageReport(request, env, url);
     }
 
     if (request.method === 'GET' && url.pathname === '/admin/config') {
@@ -170,6 +189,7 @@ export default {
   // manually and see the actual error).
   async scheduled(event, env, ctx) {
     ctx.waitUntil(sendDailyCodeToSlack(env));
+    ctx.waitUntil(sendUsageReportToSlack(env));
   },
 };
 
@@ -366,7 +386,7 @@ async function handleAdminRequestCode(request, env) {
 
 // ── /verify — AI screenshot verification ──────────────────────────────────────
 
-async function handleVerify(request, env) {
+async function handleVerify(request, env, ctx) {
   const steps = [];
   const logStep = (step, ok, detail) => steps.push({ step, ok, detail, at: new Date().toISOString() });
 
@@ -379,7 +399,7 @@ async function handleVerify(request, env) {
     return cors(JSON.stringify({ error: 'Invalid JSON body', steps }), 400);
   }
 
-  const { imageBase64, mimeType = 'image/png', facts = {} } = body;
+  const { imageBase64, mimeType = 'image/png', facts = {}, bookingId = '' } = body;
 
   if (!imageBase64) {
     logStep('validate_input', false, 'imageBase64 missing');
@@ -543,7 +563,98 @@ Rules:
     return cors(JSON.stringify({ error: lastError || 'AI Verify failed', raw: lastRaw, steps }), 502);
   }
 
+  // Fire-and-forget: marks this booking "used" for the usage report, and
+  // separately flags it when the AI found an already-issued ticket instead
+  // of the expected checkout page. Never blocks the response on this.
+  if (bookingId) ctx.waitUntil(recordVerifyUsage(env, String(bookingId), result.isCheckoutPage));
+
   return cors(JSON.stringify({ ...result, steps }), 200);
+}
+
+// ── Usage tracking + report ──────────────────────────────────────────────────
+// Every successful /verify call marks its booking as "used" via a permanent
+// KV key (put is idempotent per booking, so repeat checks on the same
+// booking never inflate the count), and separately marks it when the AI
+// found an already-issued ticket instead of the expected checkout page.
+// Both are all-time, cumulative counts — built by listing keys by prefix
+// rather than keeping a separate counter that could drift out of sync.
+function verifySeenKey(id) { return `verifyseen:${id}`; }
+function verifyTicketKey(id) { return `verifyticket:${id}`; }
+
+async function recordVerifyUsage(env, bookingId, isCheckoutPage) {
+  if (!env.CONFIG || !bookingId) return;
+  const now = new Date().toISOString();
+  await env.CONFIG.put(verifySeenKey(bookingId), now);
+  if (isCheckoutPage === false) {
+    await env.CONFIG.put(verifyTicketKey(bookingId), now);
+  }
+}
+
+// Cloudflare KV lists at most 1000 keys per call — page through with the
+// cursor so a growing history never silently under-counts.
+async function listKvIdsByPrefix(env, prefix) {
+  const ids = [];
+  let cursor;
+  do {
+    const page = await env.CONFIG.list({ prefix, cursor });
+    for (const k of page.keys) ids.push(k.name.slice(prefix.length));
+    cursor = page.list_complete ? undefined : page.cursor;
+  } while (cursor);
+  return ids;
+}
+
+// Posted automatically once a day via the cron `scheduled` handler below,
+// alongside the instructions code — see /admin/send-usage-report to trigger
+// it manually for testing without waiting for the schedule.
+async function sendUsageReportToSlack(env) {
+  const steps = [];
+  const logStep = (step, ok, detail) => steps.push({ step, ok, detail, at: new Date().toISOString() });
+
+  if (!env.SLACK_BOT_TOKEN || !env.CONFIG) {
+    logStep('check_config', false, 'SLACK_BOT_TOKEN secret or CONFIG KV binding missing');
+    return { ok: false, error: 'Worker misconfigured', steps };
+  }
+
+  const usedIds = await listKvIdsByPrefix(env, 'verifyseen:');
+  const ticketIds = await listKvIdsByPrefix(env, 'verifyticket:');
+
+  const MAX_LISTED = 30;
+  const ticketList = ticketIds.length
+    ? '\n' + ticketIds.slice(0, MAX_LISTED).join(', ') + (ticketIds.length > MAX_LISTED ? ` … +${ticketIds.length - MAX_LISTED} more` : '')
+    : '';
+
+  const text = `:bar_chart: *Booking Assistant — usage report*\n` +
+    `Unique bookings AI-verified (all-time): *${usedIds.length}*\n` +
+    `:rotating_light: Ticket screenshot used instead of checkout page (all-time): *${ticketIds.length}*${ticketList}`;
+
+  try {
+    const res = await fetch('https://slack.com/api/chat.postMessage', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${env.SLACK_BOT_TOKEN}`,
+        'Content-Type': 'application/json; charset=utf-8',
+      },
+      body: JSON.stringify({ channel: SLACK_CHANNEL_ID, text }),
+    });
+    const data = await res.json();
+    logStep('slack_chat_postMessage', data.ok === true, `HTTP ${res.status} — ${JSON.stringify(data).slice(0, 500)}`);
+    return { ok: data.ok === true, error: data.ok ? null : data.error, usedCount: usedIds.length, ticketCount: ticketIds.length, steps };
+  } catch (err) {
+    logStep('slack_chat_postMessage', false, `Exception: ${err.message}`);
+    return { ok: false, error: err.message, steps };
+  }
+}
+
+async function handleAdminSendUsageReport(request, env, url) {
+  if (!env.ADMIN_PASSWORD) {
+    return cors(JSON.stringify({ error: 'Worker misconfigured — set the ADMIN_PASSWORD secret' }), 500);
+  }
+  const password = url.searchParams.get('password') || '';
+  if (password !== env.ADMIN_PASSWORD) {
+    return cors(JSON.stringify({ error: 'Wrong password' }), 401);
+  }
+  const result = await sendUsageReportToSlack(env);
+  return cors(JSON.stringify(result), result.ok ? 200 : 502);
 }
 
 // ── /confirm-flag — post to Slack (message + screenshot, unified) ─────────────
