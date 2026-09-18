@@ -1129,6 +1129,13 @@ function buildVerifySection(flat, guestData) {
     confirmStatus.textContent = '';
 
     const agentEmail = await getAgentEmail();
+    if (!agentEmail) {
+      confirmBtn.disabled = false;
+      confirmBtn.textContent = '✓ Confirm & Flag';
+      confirmStatus.textContent = 'Your Box Office email is required before confirming — enter it when prompted.';
+      confirmStatus.className = 'verify-confirm-status status-err';
+      return;
+    }
 
     // Use whichever screenshot was already captured/uploaded for AI Verify —
     // not a fresh one taken at confirm-time.
@@ -1298,6 +1305,13 @@ function buildLateConfirmSection(flat) {
     confirmStatus.textContent = '';
 
     const agentEmail = await getAgentEmail();
+    if (!agentEmail) {
+      confirmBtn.disabled = false;
+      confirmBtn.textContent = '✓ Confirm & Flag';
+      confirmStatus.textContent = 'Your Box Office email is required before confirming — enter it when prompted.';
+      confirmStatus.className = 'verify-confirm-status late-confirm-status status-err';
+      return;
+    }
 
     let imageBase64 = null, mimeType = null;
     if (imgEl.src?.startsWith('data:')) {
