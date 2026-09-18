@@ -1574,6 +1574,36 @@ function buildCustomerSection(flat, guestData) {
   }
 
   if (!html) html = '<p class="instruction-empty">No customer details available.</p>';
+
+  // Hardcoded question-answer accordion — sourced from each vendor's
+  // productCode (a JSON-ENCODED STRING, not an object) under
+  // hardcodeQuestionIdToAnswer, e.g. {"nationality":"Japan","language":"ja_JP"}.
+  // Collapsed by default; shows a clear empty state rather than disappearing
+  // when a booking has none.
+  const hardcodedRows = [];
+  (flat.vendorsInfo || []).forEach(v => {
+    if (!v?.productCode) return;
+    let parsed;
+    try {
+      parsed = JSON.parse(v.productCode);
+    } catch (_) {
+      return; // productCode isn't valid JSON for this vendor — skip it
+    }
+    const qa = parsed?.hardcodeQuestionIdToAnswer;
+    if (qa && typeof qa === 'object') {
+      Object.entries(qa).forEach(([k, val]) => {
+        if (val != null && val !== '') hardcodedRows.push(fieldRow(humanise(k), val, true));
+      });
+    }
+  });
+  const hardcodedBody = hardcodedRows.length
+    ? hardcodedRows.join('')
+    : '<p class="instruction-empty">No hardcoded values for this booking.</p>';
+  html += `<details class="price-accordion">
+    <summary class="price-accordion-summary">Hardcoded Details ▾</summary>
+    <div class="price-accordion-body">${hardcodedBody}</div>
+  </details>`;
+
   const sec = buildSection('customer-details', 'Customer Details', '👤', html);
   wireCopyButtons(sec);
   return sec;
