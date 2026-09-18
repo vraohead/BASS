@@ -96,22 +96,6 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
   }
 
 
-  if (request.action === 'CHECK_LATEST_VERSION') {
-    const { workerUrl } = request;
-    (async () => {
-      try {
-        const res = await fetch(`${workerUrl.replace(/\/$/, '')}/latest-version`);
-        const data = await res.json().catch(() => ({}));
-        sendResponse(res.ok
-          ? { ok: true, latestVersion: data.latestVersion || null, downloadUrl: data.downloadUrl || null, updateRequired: !!data.updateRequired, message: data.message || null }
-          : { ok: false, error: data.error || 'Worker error' });
-      } catch (err) {
-        sendResponse({ ok: false, error: err.message });
-      }
-    })();
-    return true;
-  }
-
   // Handles both code kinds — the worker tells us via adminMode which pool
   // (if either) matched: true for a redeemed one-time admin code, false
   // for the shared daily code.

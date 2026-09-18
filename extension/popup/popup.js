@@ -205,17 +205,6 @@ function clearResults() {
   clearLastBooking();
 }
 
-// Shown when a hard update block is up and the current input isn't a valid
-// admin-mode code — redraws the gate (doSearch already cleared
-// ticket-details) instead of leaving a blank panel behind the error.
-function renderUpdateBlockedError() {
-  $('loading-spinner').hidden = true;
-  if (_updateGateArgs) showUpdateRequiredGate(..._updateGateArgs);
-  const errEl = $('error-message');
-  errEl.textContent = 'Update required — download the latest version before continuing.';
-  errEl.hidden = false;
-}
-
 async function doSearch() {
   let id = $('booking-id').value.trim();
   if (!id) return;
@@ -244,20 +233,11 @@ async function doSearch() {
     }
     if (codeResult.adminMode) {
       await setAdminMode(true);
-      updateBlocked = false; // admin mode bypasses a hard update block too
-    } else if (updateBlocked) {
-      // The instructions code doesn't bypass a hard update block — only a
-      // redeemed admin code does.
-      renderUpdateBlockedError();
-      return;
     } else {
       unlockedBookingId = bookingId;
     }
     id = bookingId;
     $('booking-id').value = bookingId;
-  } else if (updateBlocked) {
-    renderUpdateBlockedError();
-    return;
   }
 
   const result = await sendMessage({ action: 'FETCH_BOOKING', bookingId: id });
@@ -1666,88 +1646,6 @@ async function detectAndLoadBooking() {
   }
 }
 
-// ── Update banner ─────────────────────────────────────────────────────────────
-
-// Compares two "x.y.z" version strings numerically (not as plain strings,
-// so "10.10.0" correctly reads as newer than "10.9.0"). Returns true if
-// `a` is strictly older than `b`.
-function isVersionOlder(a, b) {
-  const pa = String(a || '0').split('.').map(n => parseInt(n, 10) || 0);
-  const pb = String(b || '0').split('.').map(n => parseInt(n, 10) || 0);
-  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-    const na = pa[i] || 0, nb = pb[i] || 0;
-    if (na !== nb) return na < nb;
-  }
-  return false;
-}
-
-// Set while a hard update block is showing. Deliberately does NOT disable
-// booking-id/search-btn — the Booking ID box is also where the admin master
-// code is typed, and disabling it would permanently lock out anyone who
-// hasn't already enabled admin mode on that device (chicken-and-egg: can't
-// type the bypass code into a disabled box). doSearch() checks this flag
-// itself and blocks everything except a successful admin-code match.
-let updateBlocked = false;
-let _updateGateArgs = null;
-
-const DEFAULT_UPDATE_BANNER_TEXT = '🚨 A new version is available — please download the latest update.';
-
-// `message` is the admin's optional custom text (set + enabled via the
-// admin page) — falls back to the built-in default wording when absent.
-function showUpdateRequiredGate(downloadUrl, latestVersion, message) {
-  updateBlocked = true;
-  _updateGateArgs = [downloadUrl, latestVersion, message];
-  $('auth-warning').hidden  = true;
-  $('error-message').hidden = true;
-  $('booking-summary').hidden = true;
-  $('tab-nav').hidden = true;
-  const bodyText = message
-    ? escHtml(message)
-    : `Version ${escHtml(latestVersion)} is required to keep using Booking Assistant.`;
-  $('ticket-details').innerHTML = `
-    <div class="auth-gate">
-      <div class="auth-gate-icon">🚨</div>
-      <p class="auth-gate-title">Update required</p>
-      <p class="auth-gate-sub">${bodyText}<br>
-        <a href="${escHtml(downloadUrl)}" target="_blank" rel="noopener">Download the latest version</a>, then reload the extension.</p>
-    </div>
-  `;
-}
-
-// Returns { blocked: boolean } — blocked means a hard update gate was shown
-// and the rest of init (auth check, booking load) should be skipped. Admin
-// mode (loadAdminMode() runs before this in init) bypasses the hard block
-// so testing a new version never locks Vivek out of his own device; the
-// soft banner still shows for admin so he sees the nudge too.
-async function checkForUpdate() {
-  try {
-    const result = await sendMessage({ action: 'CHECK_LATEST_VERSION', workerUrl: DEFAULT_WORKER_URL });
-    if (!result?.ok || !result.latestVersion) return { blocked: false };
-
-    const current = chrome.runtime.getManifest().version;
-    if (!isVersionOlder(current, result.latestVersion)) return { blocked: false };
-
-    if (result.updateRequired && !adminModeEnabled) {
-      showUpdateRequiredGate(
-        result.downloadUrl || 'https://drive.google.com/drive/folders/19IvY2URiuri53L_eajvxjuGx2zl-ojZV',
-        result.latestVersion,
-        result.message
-      );
-      return { blocked: true };
-    }
-
-    const banner = $('update-banner');
-    const link = $('update-banner-link');
-    const text = $('update-banner-text');
-    if (result.downloadUrl) link.href = result.downloadUrl;
-    text.textContent = result.message || DEFAULT_UPDATE_BANNER_TEXT;
-    banner.hidden = false;
-    return { blocked: false };
-  } catch (_) {
-    return { blocked: false };
-  }
-}
-
 // ── Init ──────────────────────────────────────────────────────────────────────
 
 $('ticket-details').innerHTML =
@@ -1756,8 +1654,6 @@ $('ticket-details').innerHTML =
 (async () => {
   await initTheme();
   await loadAdminMode();
-  const updateStatus = await checkForUpdate();
-  if (updateStatus.blocked) return;
   const status = await checkAuth();
   if (status === 'AUTHENTICATED') await detectAndLoadBooking();
 })();
