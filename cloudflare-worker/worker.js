@@ -17,15 +17,16 @@
 // Endpoints:
 //   GET  /               -> the admin control page (see "Admin page" below)
 //   GET  /debug-env      -> { hasSlackToken, hasOpenAiKey, slackChannelId, version }
-//   POST /verify          { imageBase64, mimeType, facts: {date,time,pax,price,product}, bookingId?, agentEmail? }
-//                          -> { checks: [...], isCheckoutPage, checkoutPageNote }
-//                             isCheckoutPage:false is the flagged case — the
-//                             screenshot is expected to be a checkout/cart/
-//                             payment page (pre-confirmation), not an
-//                             already-issued ticket. bookingId and agentEmail
-//                             (both optional) only feed the usage report
-//                             below — omitting either just skips that slice
-//                             of tracking, the AI check itself is unaffected.
+//   POST /verify          { imageBase64, mimeType, facts: {date,time,pax,price,product}, bookingId?, agentEmail?, vendor? }
+//                          -> { checks: [...], pageType, pageTypeNote }
+//                             pageType is "checkout" (expected), "ticket"
+//                             (already-issued ticket instead — the flagged
+//                             case), or "other" (neither — blank/error/
+//                             unrelated page). bookingId, agentEmail, and
+//                             vendor (all optional) only feed the usage
+//                             report below — omitting any just skips that
+//                             slice of tracking, the AI check itself is
+//                             unaffected.
 //   POST /confirm-flag     { bookingId, agentEmail, confirmed, skipped,
 //                            imageBase64?, mimeType?, verifiedAt }
 //                          -> { ok: true, steps: [...], screenshotError? }
@@ -35,10 +36,10 @@
 //   GET  /admin/send-agent-report?password=...  -> send the per-person report to Slack right now
 //                                                   (also wired to a button on the admin page)
 //   GET  /admin/usage-report-range?password=...&start=<ISO>&end=<ISO>
-//                          -> { uniqueBookingCount, ticketBookingCount, ticketBookingIds,
-//                               perPersonCheckCounts, perPersonUniqueBookings, totalEvents }
-//                             for exactly that window — doesn't post to Slack, rendered
-//                             inline on the admin page (its "Custom range report" card)
+//                          -> the full summarizeEvents() shape (see below) for exactly
+//                             that window — doesn't post to Slack, rendered inline on
+//                             the admin page (its "Custom range report" card), and is
+//                             the same shape a future dashboard would read from
 //   GET  /admin/config?password=...           -> secret/binding status (admin-only)
 //   POST /admin/request-code { password } -> generate + Slack-post an admin
 //                                             code, reusable all day (admin-only)
@@ -48,22 +49,25 @@
 //
 // Usage tracking — one permanent, append-only KV event log (verifylog: keys,
 // each a random-UUID key with the actual data in its KV metadata: bookingId,
-// email, isCheckoutPage, at). Every /verify call that carries a bookingId
-// and/or agentEmail writes one entry; nothing is ever overwritten, so any
-// report — all-time, last-24h, or an arbitrary custom range — is just a
-// filter + aggregation over this same log, computed at read time
-// (listVerifyEvents + summarizeEvents). There's no separate step or button
-// an agent needs to remember to generate this data, since the extension
-// runs AI Verify itself the instant a screenshot is captured, pasted, or
-// uploaded (not gated behind a manual "AI Verify" click).
+// email, vendor, product, pageType, totalChecks, mismatchedFields, at).
+// Every /verify call that carries a bookingId and/or agentEmail writes one
+// entry; nothing is ever overwritten, so any report — all-time, last-24h, or
+// an arbitrary custom range — is just a filter + aggregation over this same
+// log, computed at read time (listVerifyEvents + summarizeEvents). There's
+// no separate step or button an agent needs to remember to generate this
+// data, since the extension runs AI Verify itself the instant a screenshot
+// is captured, pasted, or uploaded (not gated behind a manual "AI Verify"
+// click).
 //
 // Three ways to read it, all admin-page buttons/cards plus a matching daily
 // cron post (except the custom range, which is on-demand only):
 //   1. Totals (sendUsageReportToSlack) — unique bookings that have run AI
-//      Verify, all-time, and of those, how many were flagged for showing an
-//      already-issued ticket instead of the expected checkout page. Both
-//      cumulative since this shipped, not a daily/weekly delta — there's no
-//      historical data from before this existed to backfill from.
+//      Verify, all-time; the pageType breakdown (checkout / ticket-instead /
+//      other); full-match vs. partial-match check counts and which field is
+//      most often mismatched; and the busiest vendors and experiences by
+//      unique bookings verified. All cumulative since this shipped, not a
+//      daily/weekly delta — there's no historical data from before this
+//      existed to backfill from.
 //   2. Per-person (sendAgentUsageReportToSlack) — who's using it: checks run
 //      per person over a true rolling last 24 hours (recomputed from the
 //      log at read time, not a calendar-day bucket), listing every person
@@ -129,7 +133,7 @@
 
 // Bump this string whenever you paste a new version into the dashboard —
 // visiting GET /debug-env instantly confirms whether a deploy took effect.
-const WORKER_VERSION = '2026-09-20-03';
+const WORKER_VERSION = '2026-09-20-04';
 
 // Formats an ISO timestamp as a clean IST string, e.g. "6 Sep 2026, 10:44 PM IST".
 function formatIST(isoString) {
@@ -433,7 +437,7 @@ async function handleVerify(request, env, ctx) {
     return cors(JSON.stringify({ error: 'Invalid JSON body', steps }), 400);
   }
 
-  const { imageBase64, mimeType = 'image/png', facts = {}, bookingId = '', agentEmail = '' } = body;
+  const { imageBase64, mimeType = 'image/png', facts = {}, bookingId = '', agentEmail = '', vendor = '' } = body;
 
   if (!imageBase64) {
     logStep('validate_input', false, 'imageBase64 missing');
@@ -476,16 +480,19 @@ How to judge each field:
 5. Product / experience name: compare the tour/experience/product name shown in the screenshot against the expected name. Minor wording differences (abbreviations, punctuation, added suffixes like "- with hotel pickup", capitalization) still count as a match if it is clearly the same experience. A genuinely different tour or activity is not a match.
 
 Separately — always answer this regardless of the fields above:
-6. Page type: this screenshot is EXPECTED to be a CHECKOUT / CART / PAYMENT page — showing the booking being entered and about to be confirmed on the vendor's site (an editable cart, guest/date/time selection, a "Pay now" or "Proceed to payment" button, a price breakdown), NOT an already-issued ticket or booking confirmation (a booking/ticket/confirmation number, a QR/barcode, "Booking Confirmed", a voucher). Checking the details only AFTER the booking is already placed defeats the entire purpose of catching mistakes before they happen, so this must be flagged whenever it happens.
+6. Page type: classify what the screenshot actually shows, as exactly one of:
+   - "checkout": the expected case — a CHECKOUT / CART / PAYMENT page on the vendor's site, showing the booking being entered and about to be confirmed (an editable cart, guest/date/time selection, a "Pay now" or "Proceed to payment" button, a price breakdown).
+   - "ticket": an already-confirmed/issued ticket or booking confirmation instead (a booking/ticket/confirmation number, a QR/barcode, "Booking Confirmed", a voucher) — checking details only AFTER the booking is already placed defeats the entire purpose of catching mistakes before they happen, so this must be flagged whenever it happens.
+   - "other": neither of the above — a blank/loading page, an error page, a login/session-expired screen, an unrelated page, or anything else that isn't a checkout page or a ticket. Use this rather than forcing a screenshot into "checkout" or "ticket" when it's genuinely neither.
 
 Reply ONLY with valid JSON in this exact shape — no markdown, no extra text:
-{"checks":[{"label":"Date","expected":"${date}","found":true},{"label":"Time","expected":"${time}","found":false}],"isCheckoutPage":true,"checkoutPageNote":""}
+{"checks":[{"label":"Date","expected":"${date}","found":true},{"label":"Time","expected":"${time}","found":false}],"pageType":"checkout","pageTypeNote":""}
 
 Rules:
 - Only include a check for a field if its expected value above is non-empty.
 - Set found to true only when the value is unambiguously present after applying the format-tolerance rules above.
-- isCheckoutPage must be true when the screenshot is the expected checkout/cart/payment page, and false when it instead shows an already-confirmed/issued ticket (the case that needs to be flagged).
-- checkoutPageNote: if isCheckoutPage is false, a short (under 15 words) reason why (e.g. "Shows a confirmed booking number and QR code — this is an issued ticket, not a checkout page"); otherwise an empty string.`;
+- pageType must be exactly one of "checkout", "ticket", or "other" per the definitions above.
+- pageTypeNote: if pageType is not "checkout", a short (under 15 words) reason why (e.g. "Shows a confirmed booking number and QR code — this is an issued ticket, not a checkout page", or "Blank/loading page — no booking content visible yet"); otherwise an empty string.`;
 
   // Structured Outputs: a strict JSON Schema makes OpenAI's API layer itself
   // guarantee the response is valid JSON matching this exact shape — the
@@ -511,10 +518,10 @@ Rules:
             additionalProperties: false,
           },
         },
-        isCheckoutPage:   { type: 'boolean' },
-        checkoutPageNote: { type: 'string' },
+        pageType:     { type: 'string', enum: ['checkout', 'ticket', 'other'] },
+        pageTypeNote: { type: 'string' },
       },
-      required: ['checks', 'isCheckoutPage', 'checkoutPageNote'],
+      required: ['checks', 'pageType', 'pageTypeNote'],
       additionalProperties: false,
     },
   };
@@ -598,10 +605,20 @@ Rules:
   }
 
   // Fire-and-forget: logs one permanent usage event for the reports below
-  // (booking-uniqueness, ticket-vs-checkout flag, per-person breakdowns, and
-  // custom date-range queries all derive from this same log). Never blocks
-  // the response on this.
-  ctx.waitUntil(recordVerifyEvent(env, { bookingId: bookingId || null, agentEmail: agentEmail || null, isCheckoutPage: result.isCheckoutPage }));
+  // (booking-uniqueness, page-type tag distribution, match-rate/field-skip
+  // stats, vendor/experience breakdowns, per-person breakdowns, and custom
+  // date-range queries all derive from this same log). Never blocks the
+  // response on this.
+  const mismatchedFields = (result.checks || []).filter(c => c.found === false).map(c => c.label);
+  ctx.waitUntil(recordVerifyEvent(env, {
+    bookingId: bookingId || null,
+    agentEmail: agentEmail || null,
+    vendor: vendor || null,
+    product: product || null,
+    pageType: result.pageType || null,
+    totalChecks: (result.checks || []).length,
+    mismatchedFields,
+  }));
 
   return cors(JSON.stringify({ ...result, steps }), 200);
 }
@@ -614,14 +631,20 @@ Rules:
 // Cheap at this team's scale (a few dozen entries a day at most).
 const VERIFY_LOG_PREFIX = 'verifylog:';
 
-async function recordVerifyEvent(env, { bookingId, agentEmail, isCheckoutPage }) {
+async function recordVerifyEvent(env, { bookingId, agentEmail, vendor, product, pageType, totalChecks, mismatchedFields }) {
   if (!env.CONFIG) return;
   if (!bookingId && !agentEmail) return; // nothing worth logging
+  // KV metadata is capped at 1024 bytes — keep this to short scalars/labels,
+  // never raw screenshot data or full AI output.
   await env.CONFIG.put(`${VERIFY_LOG_PREFIX}${crypto.randomUUID()}`, '1', {
     metadata: {
       bookingId: bookingId || null,
       email: agentEmail || null,
-      isCheckoutPage: isCheckoutPage !== false, // default true unless explicitly flagged false
+      vendor: vendor || null,
+      product: product || null,
+      pageType: pageType || null, // 'checkout' | 'ticket' | 'other' | null (unknown/older event)
+      totalChecks: totalChecks || 0,
+      mismatchedFields: mismatchedFields && mismatchedFields.length ? mismatchedFields : undefined,
       at: new Date().toISOString(),
     },
   });
@@ -653,15 +676,33 @@ async function listVerifyEvents(env, { start, end } = {}) {
 // endpoint, so "unique booking" / "per person" always mean the same thing.
 function summarizeEvents(events) {
   const bookingIds = new Set();
-  const ticketBookingIds = new Set();
+  const pageTypeBookingIds = { checkout: new Set(), ticket: new Set(), other: new Set() };
   const perPersonChecks = new Map();
-  const perPersonBookings = new Map(); // email -> Set(bookingId)
+  const perPersonBookings = new Map();     // email -> Set(bookingId)
+  const perVendorBookings = new Map();     // vendor -> Set(bookingId)
+  const perProductBookings = new Map();    // "vendor|product" -> Set(bookingId), plus a display label
+  const productLabels = new Map();
+  const fieldMismatchCounts = new Map();   // field label -> count of times it was mismatched
+  let fullMatchChecks = 0, partialMatchChecks = 0, checksWithData = 0;
 
   for (const e of events) {
     if (e.bookingId) {
       bookingIds.add(e.bookingId);
-      if (e.isCheckoutPage === false) ticketBookingIds.add(e.bookingId);
+      const bucket = pageTypeBookingIds[e.pageType];
+      if (bucket) bucket.add(e.bookingId);
+
+      if (e.vendor) {
+        if (!perVendorBookings.has(e.vendor)) perVendorBookings.set(e.vendor, new Set());
+        perVendorBookings.get(e.vendor).add(e.bookingId);
+      }
+      if (e.product) {
+        const key = `${e.vendor || '—'}|${e.product}`;
+        if (!perProductBookings.has(key)) perProductBookings.set(key, new Set());
+        perProductBookings.get(key).add(e.bookingId);
+        productLabels.set(key, { vendor: e.vendor || null, product: e.product });
+      }
     }
+
     if (e.email) {
       perPersonChecks.set(e.email, (perPersonChecks.get(e.email) || 0) + 1);
       if (e.bookingId) {
@@ -669,23 +710,49 @@ function summarizeEvents(events) {
         perPersonBookings.get(e.email).add(e.bookingId);
       }
     }
+
+    if (e.totalChecks) {
+      checksWithData++;
+      const mismatches = e.mismatchedFields || [];
+      if (mismatches.length === 0) fullMatchChecks++;
+      else partialMatchChecks++;
+      for (const label of mismatches) {
+        fieldMismatchCounts.set(label, (fieldMismatchCounts.get(label) || 0) + 1);
+      }
+    }
   }
+
+  const toSortedCounts = map => [...map.entries()]
+    .map(([key, set]) => [key, set.size])
+    .sort((a, b) => b[1] - a[1]);
 
   return {
     uniqueBookingCount: bookingIds.size,
-    ticketBookingIds: [...ticketBookingIds],
-    ticketBookingCount: ticketBookingIds.size,
+    ticketBookingIds: [...pageTypeBookingIds.ticket],
+    ticketBookingCount: pageTypeBookingIds.ticket.size,
+    otherPageBookingIds: [...pageTypeBookingIds.other],
+    otherPageBookingCount: pageTypeBookingIds.other.size,
+    checkoutBookingCount: pageTypeBookingIds.checkout.size,
+
+    checksWithData,
+    fullMatchChecks,
+    partialMatchChecks,
+    fieldMismatchCounts: [...fieldMismatchCounts.entries()].sort((a, b) => b[1] - a[1]),
+
     perPersonCheckCounts: [...perPersonChecks.entries()].sort((a, b) => b[1] - a[1]),
-    perPersonUniqueBookings: [...perPersonBookings.entries()]
-      .map(([email, set]) => [email, set.size])
-      .sort((a, b) => b[1] - a[1]),
+    perPersonUniqueBookings: toSortedCounts(perPersonBookings),
+    perVendorUniqueBookings: toSortedCounts(perVendorBookings),
+    perProductUniqueBookings: [...perProductBookings.entries()]
+      .map(([key, set]) => ({ ...productLabels.get(key), uniqueBookingCount: set.size }))
+      .sort((a, b) => b.uniqueBookingCount - a.uniqueBookingCount),
   };
 }
 
 // Posted automatically once a day via the cron `scheduled` handler below,
 // alongside the instructions code — also wired to the admin page's "Send
 // usage report now" button for an on-demand check any time. Covers overall
-// totals only; per-person activity is a separate report (see below).
+// totals, match-rate, and vendor/experience breakdowns; per-person activity
+// is a separate report (see below).
 async function sendUsageReportToSlack(env) {
   const steps = [];
   const logStep = (step, ok, detail) => steps.push({ step, ok, detail, at: new Date().toISOString() });
@@ -695,16 +762,39 @@ async function sendUsageReportToSlack(env) {
     return { ok: false, error: 'Worker misconfigured', steps };
   }
 
-  const { uniqueBookingCount, ticketBookingCount, ticketBookingIds } = summarizeEvents(await listVerifyEvents(env));
-
+  const s = summarizeEvents(await listVerifyEvents(env));
   const MAX_LISTED = 30;
-  const ticketList = ticketBookingIds.length
-    ? '\n' + ticketBookingIds.slice(0, MAX_LISTED).join(', ') + (ticketBookingIds.length > MAX_LISTED ? ` … +${ticketBookingIds.length - MAX_LISTED} more` : '')
+  const MAX_ROWS = 15;
+
+  const ticketList = s.ticketBookingIds.length
+    ? '\n' + s.ticketBookingIds.slice(0, MAX_LISTED).join(', ') + (s.ticketBookingIds.length > MAX_LISTED ? ` … +${s.ticketBookingIds.length - MAX_LISTED} more` : '')
+    : '';
+  const otherList = s.otherPageBookingIds.length
+    ? '\n' + s.otherPageBookingIds.slice(0, MAX_LISTED).join(', ') + (s.otherPageBookingIds.length > MAX_LISTED ? ` … +${s.otherPageBookingIds.length - MAX_LISTED} more` : '')
     : '';
 
-  const text = `:bar_chart: *Booking Assistant — usage report*\n` +
-    `Unique bookings AI-verified (all-time): *${uniqueBookingCount}*\n` +
-    `:rotating_light: Ticket screenshot used instead of checkout page (all-time): *${ticketBookingCount}*${ticketList}`;
+  const fieldLines = s.fieldMismatchCounts.length
+    ? s.fieldMismatchCounts.slice(0, MAX_ROWS).map(([label, count]) => `• ${label}: *${count}*`).join('\n')
+    : '_No mismatches recorded._';
+  const vendorLines = s.perVendorUniqueBookings.length
+    ? s.perVendorUniqueBookings.slice(0, MAX_ROWS).map(([vendor, count]) => `• ${vendor}: *${count}*`).join('\n')
+    : '_No vendor data recorded yet._';
+  const productLines = s.perProductUniqueBookings.length
+    ? s.perProductUniqueBookings.slice(0, MAX_ROWS).map(p => `• ${p.product} (${p.vendor || 'unknown vendor'}): *${p.uniqueBookingCount}*`).join('\n')
+    : '_No experience data recorded yet._';
+
+  const text = `:bar_chart: *Booking Assistant — usage report*\n\n` +
+    `*Overall*\n` +
+    `Unique bookings AI-verified (all-time): *${s.uniqueBookingCount}*\n` +
+    `Checkout page (expected, good): *${s.checkoutBookingCount}*\n` +
+    `:rotating_light: Ticket shown instead of checkout: *${s.ticketBookingCount}*${ticketList}\n` +
+    `:grey_question: Neither checkout nor ticket ("other" — blank/error/unrelated page): *${s.otherPageBookingCount}*${otherList}\n\n` +
+    `*Match rate* (of ${s.checksWithData} check(s) with field data)\n` +
+    `Full match (all fields found): *${s.fullMatchChecks}*\n` +
+    `Partial match (at least one field missing): *${s.partialMatchChecks}*\n\n` +
+    `*Most-mismatched fields:*\n${fieldLines}\n\n` +
+    `*Top vendors — unique bookings verified:*\n${vendorLines}\n\n` +
+    `*Top experiences — unique bookings verified:*\n${productLines}`;
 
   try {
     const res = await fetch('https://slack.com/api/chat.postMessage', {
@@ -719,7 +809,8 @@ async function sendUsageReportToSlack(env) {
     logStep('slack_chat_postMessage', data.ok === true, `HTTP ${res.status} — ${JSON.stringify(data).slice(0, 500)}`);
     return {
       ok: data.ok === true, error: data.ok ? null : data.error,
-      usedCount: uniqueBookingCount, ticketCount: ticketBookingCount, steps,
+      usedCount: s.uniqueBookingCount, ticketCount: s.ticketBookingCount, otherCount: s.otherPageBookingCount,
+      fullMatchChecks: s.fullMatchChecks, partialMatchChecks: s.partialMatchChecks, steps,
     };
   } catch (err) {
     logStep('slack_chat_postMessage', false, `Exception: ${err.message}`);
@@ -1367,8 +1458,12 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
           : '<div class="muted">No activity in this range.</div>';
         resultsEl.innerHTML =
           '<div><b>' + d.uniqueBookingCount + '</b> unique booking(s) verified</div>' +
-          '<div><b>' + d.ticketBookingCount + '</b> ticket-instead-of-checkout flag(s)</div>' +
-          '<div style="margin-top:8px"><b>Per person (unique bookings):</b></div>' + perPersonLines;
+          '<div><b>' + d.checkoutBookingCount + '</b> checkout page (expected)</div>' +
+          '<div><b>' + d.ticketBookingCount + '</b> ticket shown instead of checkout</div>' +
+          '<div><b>' + d.otherPageBookingCount + '</b> neither (other)</div>' +
+          '<div style="margin-top:8px"><b>' + d.fullMatchChecks + '</b> full match, <b>' + d.partialMatchChecks + '</b> partial match (of ' + d.checksWithData + ')</div>' +
+          '<div style="margin-top:8px"><b>Per person (unique bookings):</b></div>' + perPersonLines +
+          '<div class="muted" style="margin-top:10px">Full breakdown (vendors, experiences, mismatched fields) is on the dashboard.</div>';
         resultsEl.style.display = 'block';
       })
       .catch(function (err) {

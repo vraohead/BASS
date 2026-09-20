@@ -219,6 +219,7 @@ function clearResults() {
   clearLastBooking();
   currentBookingId = null;
   $('booking-mismatch-banner').hidden = true;
+  $('checkout-nudge-banner').hidden = true;
 }
 
 async function doSearch() {
@@ -865,6 +866,7 @@ function _getVerifyFacts(flat, guestData) {
 
 function buildVerifySection(flat, guestData) {
   const { date, time, pax, price, product } = _getVerifyFacts(flat, guestData);
+  const vendorName = getPrimaryVendor(flat)?.vendorName || '';
   const cur2 = flat.currency || flat.currencyName || flat.tourCurrency || '';
   const displayPrice = price ? `${cur2} ${price}`.trim() : '—';
 
@@ -1030,6 +1032,7 @@ function buildVerifySection(flat, guestData) {
       facts: { date, time, pax, price, product },
       bookingId,
       agentEmail,
+      vendor: vendorName,
       workerUrl,
     });
 
@@ -1072,12 +1075,17 @@ function buildVerifySection(flat, guestData) {
       crossCheckedNote = '<p class="verify-cross-checked">✓ Cross-checked against the page\'s text content too.</p>';
     }
 
-    // isCheckoutPage:false means this is an already-issued/confirmed ticket
+    // pageType 'ticket' means this is an already-issued/confirmed ticket
     // rather than the checkout/cart/payment page we expect agents to
-    // capture — checking only after a booking is already placed defeats
-    // the purpose of catching mistakes before they happen, so flag it.
-    const checkoutBanner = result.isCheckoutPage === false
-      ? `<p class="verify-checkout-flag">⚠️ This looks like an already-issued ticket, not a checkout/cart/payment page${result.checkoutPageNote ? ` — ${escHtml(result.checkoutPageNote)}` : ''}. Capture the checkout page before the booking is confirmed instead.</p>`
+    // capture — checking only after a booking is already placed defeats the
+    // purpose of catching mistakes before they happen. 'other' means it's
+    // neither a checkout page nor a ticket (blank/error/unrelated page) —
+    // flagged separately since it needs a different fix (go find the actual
+    // checkout page) than a ticket does.
+    const checkoutBanner = result.pageType === 'ticket'
+      ? `<p class="verify-checkout-flag">⚠️ This looks like an already-issued ticket, not a checkout/cart/payment page${result.pageTypeNote ? ` — ${escHtml(result.pageTypeNote)}` : ''}. Capture the checkout page before the booking is confirmed instead.</p>`
+      : result.pageType === 'other'
+      ? `<p class="verify-checkout-flag">❓ This doesn't look like a checkout page or an issued ticket${result.pageTypeNote ? ` — ${escHtml(result.pageTypeNote)}` : ''}. Make sure you're capturing the vendor's checkout/cart page.</p>`
       : '';
 
     if (!checks.length) {
@@ -1087,9 +1095,9 @@ function buildVerifySection(flat, guestData) {
       const { totalMismatches } = wireSkipBoxes(resultsEl, confirmRow);
       // Perfect match, nothing to skip — confirm automatically instead of
       // waiting on a click that has nothing left to gate. Never auto-confirm
-      // an already-issued ticket though (isCheckoutPage:false) — that case
-      // needs a human to notice the process was done out of order.
-      if (totalMismatches === 0 && result.isCheckoutPage !== false) confirmBtn.click();
+      // unless this is actually the expected checkout page — a ticket or an
+      // "other" page needs a human to notice something's off first.
+      if (totalMismatches === 0 && result.pageType === 'checkout') confirmBtn.click();
     }
     resultsEl.hidden = false;
   }
@@ -1748,18 +1756,94 @@ $('booking-mismatch-fetch-btn').addEventListener('click', () => {
   doSearch();
 });
 
-chrome.tabs.onUpdated.addListener((_tabId, changeInfo) => {
-  if (changeInfo.url || changeInfo.status === 'complete') checkLiveBookingMismatch();
+// ── Checkout-moment nudge ────────────────────────────────────────────────────
+// A cheap, local heuristic — no AI call — that suggests capturing a
+// screenshot when the active (non-Box-Office) tab looks like a vendor
+// checkout/cart page. Purely a suggestion: never captures anything itself.
+// Two or more weak signals, or one strong unambiguous phrase, count as a hit.
+const CHECKOUT_SIGNAL_PATTERNS = [
+  /proceed to (payment|checkout)/i,
+  /place (your )?order/i,
+  /complete (your )?booking/i,
+  /pay now/i,
+  /payment details/i,
+  /billing address/i,
+  /\bcheckout\b/i,
+  /\bcart\b/i,
+  /credit card/i,
+];
+const CHECKOUT_STRONG_PATTERN = /proceed to (payment|checkout)|place (your )?order|pay now/i;
+
+function looksLikeCheckoutPage(text) {
+  if (!text) return false;
+  if (CHECKOUT_STRONG_PATTERN.test(text)) return true;
+  let hits = 0;
+  for (const re of CHECKOUT_SIGNAL_PATTERNS) {
+    if (re.test(text) && ++hits >= 2) return true;
+  }
+  return false;
+}
+
+// Remembers the last URL the agent dismissed the nudge for, so dismissing
+// doesn't get immediately undone by the very next poll tick on that page.
+let checkoutNudgeDismissedForUrl = null;
+
+async function checkForCheckoutMoment() {
+  const banner = $('checkout-nudge-banner');
+  if (!currentBookingId) { banner.hidden = true; return; }
+  // Already captured for this Verify session — AI Verify already ran
+  // automatically, nothing left to nudge about.
+  const imgEl = _verifySection?.querySelector('.verify-img');
+  if (imgEl?.src?.startsWith('data:')) { banner.hidden = true; return; }
+
+  let tabs;
+  try {
+    tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  } catch (_) { banner.hidden = true; return; }
+  const url = tabs[0]?.url || '';
+  // Only a real vendor tab counts — Box Office itself is never the checkout
+  // page, and chrome:// / extension pages can't be read anyway.
+  if (!/^https?:\/\//.test(url) || /^https:\/\/box-office\.headout\.com\//.test(url)) {
+    banner.hidden = true;
+    return;
+  }
+  if (url === checkoutNudgeDismissedForUrl) { banner.hidden = true; return; }
+
+  const resp = await sendMessage({ action: 'CAPTURE_RESPONSE' });
+  const text = resp?.ok ? resp.text : '';
+  banner.hidden = !looksLikeCheckoutPage(text);
+}
+
+$('checkout-nudge-capture-btn').addEventListener('click', () => {
+  $('checkout-nudge-banner').hidden = true;
+  _verifySection?.querySelector('.verify-capture-tab-btn')?.click();
 });
-chrome.tabs.onActivated.addListener(() => checkLiveBookingMismatch());
+
+$('checkout-nudge-dismiss-btn').addEventListener('click', async () => {
+  $('checkout-nudge-banner').hidden = true;
+  try {
+    const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    checkoutNudgeDismissedForUrl = tabs[0]?.url || null;
+  } catch (_) {}
+});
+
+function checkLiveState() {
+  checkLiveBookingMismatch();
+  checkForCheckoutMoment();
+}
+
+chrome.tabs.onUpdated.addListener((_tabId, changeInfo) => {
+  if (changeInfo.url || changeInfo.status === 'complete') checkLiveState();
+});
+chrome.tabs.onActivated.addListener(() => checkLiveState());
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') checkLiveBookingMismatch();
+  if (document.visibilityState === 'visible') checkLiveState();
 });
 // Polling safety net — tab-update/activation events are the fast path, but
 // this guarantees the banner catches up within a few seconds regardless of
 // whether those events fire the way they're expected to in a side panel
 // (unverified in production; this makes correctness not depend on it).
-setInterval(checkLiveBookingMismatch, 3000);
+setInterval(checkLiveState, 3000);
 
 // Reconciles the restored (from storage) booking with whatever the active Box
 // Office tab is currently showing. If both exist and disagree, don't silently

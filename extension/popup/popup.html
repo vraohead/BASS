@@ -74,6 +74,15 @@
       <button id="booking-mismatch-fetch-btn" class="recheck-inline-btn">Fetch it</button>
     </div>
 
+    <!-- Checkout-moment nudge — a cheap heuristic scan of whatever tab is
+         active (not Box Office) suggests capturing when the page looks like
+         a vendor checkout/cart page. Suggestion only, never auto-captures. -->
+    <div id="checkout-nudge-banner" class="bms-info" hidden>
+      <span id="checkout-nudge-text">💡 This looks like a checkout page — good time to capture it.</span>
+      <button id="checkout-nudge-capture-btn" class="recheck-inline-btn">Capture now</button>
+      <button id="checkout-nudge-dismiss-btn" class="recheck-inline-btn">Dismiss</button>
+    </div>
+
     <!-- Loading -->
     <div id="loading-spinner" class="spinner-wrap hidden">
       <div class="spinner"></div>

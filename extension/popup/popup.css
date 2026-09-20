@@ -280,6 +280,9 @@ body > * { position: relative; z-index: 1; }
 .bms-warning { background: rgba(251,191,36,0.06); border-bottom: 2px solid var(--amber); color: var(--amber); display: flex; align-items: center; gap: 8px; }
 /* [hidden] beats flex override at higher specificity */
 .bms-warning[hidden] { display: none !important; }
+/* Informational variant — a helpful nudge, not a warning (e.g. "this looks
+   like a checkout page"). Same layout as .bms-warning, accent-colored. */
+.bms-info { background: rgba(124,47,240,0.06); border-bottom: 2px solid var(--accent); color: var(--accent); }
 .recheck-inline-btn {
   flex-shrink: 0; padding: 2px 8px; background: transparent;
   border: 1px solid currentColor; border-radius: 4px; font-size: 10px;
