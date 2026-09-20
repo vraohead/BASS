@@ -31,10 +31,11 @@
 //                            imageBase64?, mimeType?, verifiedAt }
 //                          -> { ok: true, steps: [...], screenshotError? }
 //   GET  /admin/send-daily-code?password=...    -> manually trigger the Slack post (for testing)
-//   GET  /admin/send-usage-report?password=...  -> send the totals report to Slack right now
-//                                                   (also wired to a button on the admin page)
-//   GET  /admin/send-agent-report?password=...  -> send the per-person report to Slack right now
-//                                                   (also wired to a button on the admin page)
+//   GET  /admin/send-usage-report?password=...&alsoMainChannel=  -> send the totals report to
+//                                                   the passcode channel right now (also wired to
+//                                                   a button on the admin page); alsoMainChannel=true
+//                                                   also posts to the main confirm-flag channel
+//   GET  /admin/send-agent-report?password=...&alsoMainChannel=  -> same, for the per-person report
 //   GET  /admin/usage-report-range?password=...&start=<ISO>&end=<ISO>
 //                          -> the full summarizeEvents() shape (see below) for exactly
 //                             that window — doesn't post to Slack, rendered inline on
@@ -60,7 +61,13 @@
 // click).
 //
 // Three ways to read it, all admin-page buttons/cards plus a matching daily
-// cron post (except the custom range, which is on-demand only):
+// cron post (except the custom range, which is on-demand only). Both Slack
+// reports post to DAILY_CODE_CHANNEL_ID (the passcode channel) by default —
+// deliberately not the main confirm-flag channel, since this is admin-level
+// data rather than something the whole team needs in their feed. Each
+// on-demand button has an "Also send to the main team channel" checkbox
+// (?alsoMainChannel=true) for when you want it there too; the automatic
+// daily cron post always stays passcode-channel-only:
 //   1. Totals (sendUsageReportToSlack) — unique bookings that have run AI
 //      Verify, all-time; the pageType breakdown (checkout / ticket-instead /
 //      other); full-match vs. partial-match check counts and which field is
@@ -76,7 +83,8 @@
 //      person has actioned, all-time.
 //   3. Custom range (handleAdminUsageReportRange) — the same totals and
 //      per-person breakdown as above, but for whatever start/end window is
-//      asked for instead of last-24h or all-time.
+//      asked for instead of last-24h or all-time. On-demand only, doesn't
+//      post to Slack at all — rendered inline on the admin page instead.
 //
 // Every meaningful operation (Slack calls, OpenAI calls) appends a
 // {step, ok, detail, at} entry to a `steps` array that's returned in the
@@ -133,7 +141,7 @@
 
 // Bump this string whenever you paste a new version into the dashboard —
 // visiting GET /debug-env instantly confirms whether a deploy took effect.
-const WORKER_VERSION = '2026-09-20-04';
+const WORKER_VERSION = '2026-09-20-05';
 
 // Formats an ISO timestamp as a clean IST string, e.g. "6 Sep 2026, 10:44 PM IST".
 function formatIST(isoString) {
@@ -748,12 +756,44 @@ function summarizeEvents(events) {
   };
 }
 
+// Posts `text` to the passcode/admin channel (DAILY_CODE_CHANNEL_ID) always,
+// and additionally to the main confirm-flag channel (SLACK_CHANNEL_ID) when
+// `alsoMainChannel` is true — shared by both usage reports so "which
+// channel(s)" is answered in exactly one place.
+async function postReportToSlack(env, text, alsoMainChannel, logStep) {
+  const channels = [DAILY_CODE_CHANNEL_ID];
+  if (alsoMainChannel) channels.push(SLACK_CHANNEL_ID);
+
+  let allOk = true, lastError = null;
+  for (const channel of channels) {
+    try {
+      const res = await fetch('https://slack.com/api/chat.postMessage', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${env.SLACK_BOT_TOKEN}`,
+          'Content-Type': 'application/json; charset=utf-8',
+        },
+        body: JSON.stringify({ channel, text }),
+      });
+      const data = await res.json();
+      logStep(`slack_chat_postMessage_${channel}`, data.ok === true, `HTTP ${res.status} — ${JSON.stringify(data).slice(0, 500)}`);
+      if (!data.ok) { allOk = false; lastError = data.error; }
+    } catch (err) {
+      logStep(`slack_chat_postMessage_${channel}`, false, `Exception: ${err.message}`);
+      allOk = false; lastError = err.message;
+    }
+  }
+  return { ok: allOk, error: lastError };
+}
+
 // Posted automatically once a day via the cron `scheduled` handler below,
 // alongside the instructions code — also wired to the admin page's "Send
 // usage report now" button for an on-demand check any time. Covers overall
 // totals, match-rate, and vendor/experience breakdowns; per-person activity
-// is a separate report (see below).
-async function sendUsageReportToSlack(env) {
+// is a separate report (see below). Posts to the passcode channel by
+// default (see postReportToSlack); pass alsoMainChannel:true to also post
+// to the main confirm-flag channel.
+async function sendUsageReportToSlack(env, alsoMainChannel = false) {
   const steps = [];
   const logStep = (step, ok, detail) => steps.push({ step, ok, detail, at: new Date().toISOString() });
 
@@ -796,26 +836,12 @@ async function sendUsageReportToSlack(env) {
     `*Top vendors — unique bookings verified:*\n${vendorLines}\n\n` +
     `*Top experiences — unique bookings verified:*\n${productLines}`;
 
-  try {
-    const res = await fetch('https://slack.com/api/chat.postMessage', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${env.SLACK_BOT_TOKEN}`,
-        'Content-Type': 'application/json; charset=utf-8',
-      },
-      body: JSON.stringify({ channel: SLACK_CHANNEL_ID, text }),
-    });
-    const data = await res.json();
-    logStep('slack_chat_postMessage', data.ok === true, `HTTP ${res.status} — ${JSON.stringify(data).slice(0, 500)}`);
-    return {
-      ok: data.ok === true, error: data.ok ? null : data.error,
-      usedCount: s.uniqueBookingCount, ticketCount: s.ticketBookingCount, otherCount: s.otherPageBookingCount,
-      fullMatchChecks: s.fullMatchChecks, partialMatchChecks: s.partialMatchChecks, steps,
-    };
-  } catch (err) {
-    logStep('slack_chat_postMessage', false, `Exception: ${err.message}`);
-    return { ok: false, error: err.message, steps };
-  }
+  const posted = await postReportToSlack(env, text, alsoMainChannel, logStep);
+  return {
+    ok: posted.ok, error: posted.error,
+    usedCount: s.uniqueBookingCount, ticketCount: s.ticketBookingCount, otherCount: s.otherPageBookingCount,
+    fullMatchChecks: s.fullMatchChecks, partialMatchChecks: s.partialMatchChecks, steps,
+  };
 }
 
 // Posted automatically once a day alongside the report above — also wired
@@ -823,8 +849,10 @@ async function sendUsageReportToSlack(env) {
 // distinct question (who's using it) from the totals report (how much has
 // been used overall). Lists every person who has EVER logged an event (the
 // "roster"), not just those active in the last 24h, so someone at 0 today
-// still shows up rather than silently disappearing from the list.
-async function sendAgentUsageReportToSlack(env) {
+// still shows up rather than silently disappearing from the list. Posts to
+// the passcode channel by default; pass alsoMainChannel:true to also post
+// to the main confirm-flag channel.
+async function sendAgentUsageReportToSlack(env, alsoMainChannel = false) {
   const steps = [];
   const logStep = (step, ok, detail) => steps.push({ step, ok, detail, at: new Date().toISOString() });
 
@@ -857,25 +885,11 @@ async function sendAgentUsageReportToSlack(env) {
     `*Checks run — last 24 hours (everyone, including 0):*\n${last24hLines}\n\n` +
     `*Unique bookings actioned — all-time:*\n${allTimeLines}`;
 
-  try {
-    const res = await fetch('https://slack.com/api/chat.postMessage', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${env.SLACK_BOT_TOKEN}`,
-        'Content-Type': 'application/json; charset=utf-8',
-      },
-      body: JSON.stringify({ channel: SLACK_CHANNEL_ID, text }),
-    });
-    const data = await res.json();
-    logStep('slack_chat_postMessage', data.ok === true, `HTTP ${res.status} — ${JSON.stringify(data).slice(0, 500)}`);
-    return {
-      ok: data.ok === true, error: data.ok ? null : data.error,
-      last24hUsage: last24hFull, allTimeUsage: allTime.perPersonUniqueBookings, steps,
-    };
-  } catch (err) {
-    logStep('slack_chat_postMessage', false, `Exception: ${err.message}`);
-    return { ok: false, error: err.message, steps };
-  }
+  const posted = await postReportToSlack(env, text, alsoMainChannel, logStep);
+  return {
+    ok: posted.ok, error: posted.error,
+    last24hUsage: last24hFull, allTimeUsage: allTime.perPersonUniqueBookings, steps,
+  };
 }
 
 async function handleAdminSendUsageReport(request, env, url) {
@@ -886,7 +900,8 @@ async function handleAdminSendUsageReport(request, env, url) {
   if (password !== env.ADMIN_PASSWORD) {
     return cors(JSON.stringify({ error: 'Wrong password' }), 401);
   }
-  const result = await sendUsageReportToSlack(env);
+  const alsoMainChannel = url.searchParams.get('alsoMainChannel') === 'true';
+  const result = await sendUsageReportToSlack(env, alsoMainChannel);
   return cors(JSON.stringify(result), result.ok ? 200 : 502);
 }
 
@@ -898,7 +913,8 @@ async function handleAdminSendAgentReport(request, env, url) {
   if (password !== env.ADMIN_PASSWORD) {
     return cors(JSON.stringify({ error: 'Wrong password' }), 401);
   }
-  const result = await sendAgentUsageReportToSlack(env);
+  const alsoMainChannel = url.searchParams.get('alsoMainChannel') === 'true';
+  const result = await sendAgentUsageReportToSlack(env, alsoMainChannel);
   return cors(JSON.stringify(result), result.ok ? 200 : 502);
 }
 
@@ -1218,7 +1234,11 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
         <h2>📊 Usage report</h2>
         <button type="button" class="info-btn" data-info="usage-report">i</button>
       </div>
-      <p class="sub-label" style="margin:0 0 12px">Posts automatically once a day. Click below to send it right now — unique bookings AI-verified (all-time), and tickets flagged instead of checkout (all-time).</p>
+      <p class="sub-label" style="margin:0 0 12px">Posts to the <b>passcode channel</b> automatically once a day — unique bookings AI-verified (all-time), and tickets flagged instead of checkout (all-time). Click below to send it right now.</p>
+      <div class="checkbox-row" style="margin:0 0 12px">
+        <input type="checkbox" id="usage-report-also-main">
+        <label for="usage-report-also-main" style="margin:0">Also send to the main team channel</label>
+      </div>
       <button class="secondary" id="send-usage-report-btn">Send usage report now</button>
       <p class="msg" id="usage-report-msg"></p>
     </div>
@@ -1228,7 +1248,11 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
         <h2>🧑‍💼 Per-person report</h2>
         <button type="button" class="info-btn" data-info="agent-report">i</button>
       </div>
-      <p class="sub-label" style="margin:0 0 12px">Posts automatically once a day. Click below to send it right now — who's using it: checks run in the last 24 hours, and total unique bookings actioned per person, all-time.</p>
+      <p class="sub-label" style="margin:0 0 12px">Posts to the <b>passcode channel</b> automatically once a day — who's using it: checks run in the last 24 hours, and total unique bookings actioned per person, all-time. Click below to send it right now.</p>
+      <div class="checkbox-row" style="margin:0 0 12px">
+        <input type="checkbox" id="agent-report-also-main">
+        <label for="agent-report-also-main" style="margin:0">Also send to the main team channel</label>
+      </div>
       <button class="secondary" id="send-agent-report-btn">Send per-person report now</button>
       <p class="msg" id="agent-report-msg"></p>
     </div>
@@ -1282,8 +1306,8 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
     'daily-code': 'A random 6-digit code, posted to Slack automatically once a day \\u2014 click Send to Slack now any time to send another. Typed as bookingID-code, it unlocks that ONE booking\\'s gated Instructions, then is consumed immediately \\u2014 valid 5 minutes, single-use, so the same code can\\'t unlock a second booking or be reused if that booking is fetched again.',
     'admin-code': 'Generates a random code, posts it to the same Slack channel as the instructions code, and stores it until the end of today (IST). Typed as bookingID-code, it flips a permanent admin-mode bypass on your device for every display gate (Past booking, Booking due soon, Instructions) \\u2014 reusable as many times as you like for the rest of the day, not consumed on use. Request a fresh one any day you need admin access.',
     'status': 'Shows which Cloudflare secrets and bindings this Worker can see \\u2014 never the values themselves, just whether each is configured. A red dot here usually explains a broken feature (e.g. no Slack token means Confirm & Flag can\\'t post).',
-    'usage-report': 'Posts to the same Slack channel as Confirm & Flag: unique bookings AI-verified all-time, and how many of those were flagged for an already-issued ticket instead of a checkout screenshot (also all-time). Posts automatically once a day; this button sends it on demand too.',
-    'agent-report': 'Posts to the same Slack channel: checks run per person over a true rolling last-24-hours window (not tied to calendar days), plus total unique bookings each person has actioned, all-time. Posts automatically once a day; this button sends it on demand too.',
+    'usage-report': 'Posts to the passcode channel (the same one the instructions/admin codes go to), not the main team channel — this is admin-level data, not something the whole team needs in their feed. Check "Also send to the main team channel" before clicking to post there too. Unique bookings AI-verified all-time, and how many of those were flagged for an already-issued ticket instead of a checkout screenshot (also all-time). Posts automatically once a day; this button sends it on demand too.',
+    'agent-report': 'Posts to the passcode channel by default, same as the usage report \\u2014 check the box first if you also want this in the main team channel. Checks run per person over a true rolling last-24-hours window (not tied to calendar days), plus total unique bookings each person has actioned, all-time. Posts automatically once a day; this button sends it on demand too.',
     'range-report': 'Pick any From/To window and fetch usage for exactly that period \\u2014 unique bookings, ticket-instead-of-checkout flags, and a per-person breakdown. Shown right here on the page, not posted to Slack, so you can explore freely without spamming the channel.',
   };
   var infoPopover = null;
@@ -1391,14 +1415,15 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
   document.getElementById('send-usage-report-btn').addEventListener('click', function () {
     var btn = this;
     var msg = document.getElementById('usage-report-msg');
+    var alsoMain = document.getElementById('usage-report-also-main').checked;
     btn.disabled = true;
     msg.textContent = 'Sending…'; msg.className = 'msg';
-    fetch('/admin/send-usage-report?password=' + encodeURIComponent(password))
+    fetch('/admin/send-usage-report?password=' + encodeURIComponent(password) + '&alsoMainChannel=' + alsoMain)
       .then(function (res) { return res.json().then(function (data) { return { ok: res.ok, data: data }; }); })
       .then(function (r) {
         btn.disabled = false;
         if (!r.ok || !r.data.ok) { msg.textContent = (r.data && r.data.error) || 'Failed'; msg.className = 'msg err'; return; }
-        msg.textContent = 'Sent — ' + r.data.usedCount + ' unique booking(s), ' + r.data.ticketCount + ' ticket flag(s).';
+        msg.textContent = 'Sent to the passcode channel' + (alsoMain ? ' and the main channel' : '') + ' — ' + r.data.usedCount + ' unique booking(s), ' + r.data.ticketCount + ' ticket flag(s).';
         msg.className = 'msg ok';
       })
       .catch(function (err) {
@@ -1410,16 +1435,17 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
   document.getElementById('send-agent-report-btn').addEventListener('click', function () {
     var btn = this;
     var msg = document.getElementById('agent-report-msg');
+    var alsoMain = document.getElementById('agent-report-also-main').checked;
     btn.disabled = true;
     msg.textContent = 'Sending…'; msg.className = 'msg';
-    fetch('/admin/send-agent-report?password=' + encodeURIComponent(password))
+    fetch('/admin/send-agent-report?password=' + encodeURIComponent(password) + '&alsoMainChannel=' + alsoMain)
       .then(function (res) { return res.json().then(function (data) { return { ok: res.ok, data: data }; }); })
       .then(function (r) {
         btn.disabled = false;
         if (!r.ok || !r.data.ok) { msg.textContent = (r.data && r.data.error) || 'Failed'; msg.className = 'msg err'; return; }
         var rosterCount = (r.data.last24hUsage || []).length;
         var allTimeCount = (r.data.allTimeUsage || []).length;
-        msg.textContent = 'Sent — ' + rosterCount + ' known agent(s) listed, ' + allTimeCount + ' with unique-booking history.';
+        msg.textContent = 'Sent to the passcode channel' + (alsoMain ? ' and the main channel' : '') + ' — ' + rosterCount + ' known agent(s) listed, ' + allTimeCount + ' with unique-booking history.';
         msg.className = 'msg ok';
       })
       .catch(function (err) {
