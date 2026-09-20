@@ -17,19 +17,21 @@
 // Endpoints:
 //   GET  /               -> the admin control page (see "Admin page" below)
 //   GET  /debug-env      -> { hasSlackToken, hasOpenAiKey, slackChannelId, version }
-//   POST /verify          { imageBase64, mimeType, facts: {date,time,pax,price,product}, bookingId? }
+//   POST /verify          { imageBase64, mimeType, facts: {date,time,pax,price,product}, bookingId?, agentEmail? }
 //                          -> { checks: [...], isCheckoutPage, checkoutPageNote }
 //                             isCheckoutPage:false is the flagged case — the
 //                             screenshot is expected to be a checkout/cart/
 //                             payment page (pre-confirmation), not an
-//                             already-issued ticket. bookingId (optional) is
-//                             only used to record the usage-report counters
-//                             below — omitting it just skips that tracking.
+//                             already-issued ticket. bookingId and agentEmail
+//                             (both optional) only feed the usage report
+//                             below — omitting either just skips that slice
+//                             of tracking, the AI check itself is unaffected.
 //   POST /confirm-flag     { bookingId, agentEmail, confirmed, skipped,
 //                            imageBase64?, mimeType?, verifiedAt }
 //                          -> { ok: true, steps: [...], screenshotError? }
 //   GET  /admin/send-daily-code?password=...    -> manually trigger the Slack post (for testing)
-//   GET  /admin/send-usage-report?password=...  -> manually trigger the usage report (for testing)
+//   GET  /admin/send-usage-report?password=...  -> send the usage report to Slack right now
+//                                                   (also wired to a button on the admin page)
 //   GET  /admin/config?password=...           -> secret/binding status (admin-only)
 //   POST /admin/request-code { password } -> generate + Slack-post an admin
 //                                             code, reusable all day (admin-only)
@@ -38,16 +40,22 @@
 //                             code — false for a matched instructions code
 //
 // Usage report — posted automatically once a day (same cron as the
-// instructions code) to the confirm-flag Slack channel: how many unique
-// bookings have run AI Verify (all-time, from the verifyseen: KV keys), and
-// of those, how many were flagged for showing an already-issued ticket
-// instead of the expected checkout page (verifyticket: KV keys). Both are
-// recorded automatically by every /verify call that includes a bookingId —
-// there's no separate step or button an agent needs to remember, since the
-// extension runs AI Verify itself the instant a screenshot is captured,
-// pasted, or uploaded (not gated behind a manual "AI Verify" click). Counts
-// are cumulative since this shipped, not a daily/weekly delta — there's no
-// historical data from before this endpoint existed to backfill from.
+// instructions code) to the confirm-flag Slack channel, and postable any
+// time on demand via the admin page's "Send usage report now" button:
+//   1. Unique bookings that have run AI Verify, all-time (verifyseen: KV
+//      keys), and of those, how many were flagged for showing an
+//      already-issued ticket instead of the expected checkout page
+//      (verifyticket: KV keys) — both cumulative since this shipped, not a
+//      daily/weekly delta, since there's no historical data from before
+//      these existed to backfill from.
+//   2. Per-person AI Verify usage for a rolling last 24 hours, busiest
+//      first (verifyevent: KV keys, each auto-expiring after 48h — a fresh
+//      short-lived event per check, not a running counter, so this stays a
+//      true "last 24h as of right now" figure whenever it's read).
+// Both are recorded automatically by every /verify call — there's no
+// separate step or button an agent needs to remember, since the extension
+// runs AI Verify itself the instant a screenshot is captured, pasted, or
+// uploaded (not gated behind a manual "AI Verify" click).
 //
 // Every meaningful operation (Slack calls, OpenAI calls) appends a
 // {step, ok, detail, at} entry to a `steps` array that's returned in the
@@ -104,7 +112,7 @@
 
 // Bump this string whenever you paste a new version into the dashboard —
 // visiting GET /debug-env instantly confirms whether a deploy took effect.
-const WORKER_VERSION = '2026-09-18-03';
+const WORKER_VERSION = '2026-09-20-01';
 
 // Formats an ISO timestamp as a clean IST string, e.g. "6 Sep 2026, 10:44 PM IST".
 function formatIST(isoString) {
@@ -399,7 +407,7 @@ async function handleVerify(request, env, ctx) {
     return cors(JSON.stringify({ error: 'Invalid JSON body', steps }), 400);
   }
 
-  const { imageBase64, mimeType = 'image/png', facts = {}, bookingId = '' } = body;
+  const { imageBase64, mimeType = 'image/png', facts = {}, bookingId = '', agentEmail = '' } = body;
 
   if (!imageBase64) {
     logStep('validate_input', false, 'imageBase64 missing');
@@ -567,6 +575,7 @@ Rules:
   // separately flags it when the AI found an already-issued ticket instead
   // of the expected checkout page. Never blocks the response on this.
   if (bookingId) ctx.waitUntil(recordVerifyUsage(env, String(bookingId), result.isCheckoutPage));
+  if (agentEmail) ctx.waitUntil(recordVerifyAgentEvent(env, String(agentEmail)));
 
   return cors(JSON.stringify({ ...result, steps }), 200);
 }
@@ -603,9 +612,43 @@ async function listKvIdsByPrefix(env, prefix) {
   return ids;
 }
 
+// Per-agent activity, for the "who's using it, and how much" half of the
+// report. Each /verify call that carries an agentEmail writes one
+// short-lived event (not a running counter) so the count can be a true
+// rolling last-24-hours window no matter when it's read — a daily cron post
+// or an on-demand click of the admin page's button. KV list() returns each
+// key's metadata directly, so tallying needs no extra per-key reads.
+const AGENT_EVENT_TTL_SECONDS = 172800; // 48h — comfortable margin over the 24h window this feeds
+
+async function recordVerifyAgentEvent(env, agentEmail) {
+  if (!env.CONFIG || !agentEmail) return;
+  await env.CONFIG.put(`verifyevent:${crypto.randomUUID()}`, '1', {
+    expirationTtl: AGENT_EVENT_TTL_SECONDS,
+    metadata: { email: agentEmail, at: new Date().toISOString() },
+  });
+}
+
+// Returns [[email, count], ...] for events in the last 24h, busiest first.
+async function getAgentUsageLast24h(env) {
+  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+  const counts = new Map();
+  let cursor;
+  do {
+    const page = await env.CONFIG.list({ prefix: 'verifyevent:', cursor });
+    for (const k of page.keys) {
+      const email = k.metadata?.email;
+      const at = k.metadata?.at ? Date.parse(k.metadata.at) : NaN;
+      if (!email || !(at >= cutoff)) continue;
+      counts.set(email, (counts.get(email) || 0) + 1);
+    }
+    cursor = page.list_complete ? undefined : page.cursor;
+  } while (cursor);
+  return [...counts.entries()].sort((a, b) => b[1] - a[1]);
+}
+
 // Posted automatically once a day via the cron `scheduled` handler below,
-// alongside the instructions code — see /admin/send-usage-report to trigger
-// it manually for testing without waiting for the schedule.
+// alongside the instructions code — also wired to a button on the admin
+// page ("Send usage report now") for an on-demand check any time.
 async function sendUsageReportToSlack(env) {
   const steps = [];
   const logStep = (step, ok, detail) => steps.push({ step, ok, detail, at: new Date().toISOString() });
@@ -617,15 +660,20 @@ async function sendUsageReportToSlack(env) {
 
   const usedIds = await listKvIdsByPrefix(env, 'verifyseen:');
   const ticketIds = await listKvIdsByPrefix(env, 'verifyticket:');
+  const perAgent = await getAgentUsageLast24h(env);
 
   const MAX_LISTED = 30;
   const ticketList = ticketIds.length
     ? '\n' + ticketIds.slice(0, MAX_LISTED).join(', ') + (ticketIds.length > MAX_LISTED ? ` … +${ticketIds.length - MAX_LISTED} more` : '')
     : '';
+  const perAgentLines = perAgent.length
+    ? perAgent.map(([email, count]) => `• ${email}: *${count}*`).join('\n')
+    : '_No AI Verify activity in the last 24 hours._';
 
   const text = `:bar_chart: *Booking Assistant — usage report*\n` +
     `Unique bookings AI-verified (all-time): *${usedIds.length}*\n` +
-    `:rotating_light: Ticket screenshot used instead of checkout page (all-time): *${ticketIds.length}*${ticketList}`;
+    `:rotating_light: Ticket screenshot used instead of checkout page (all-time): *${ticketIds.length}*${ticketList}\n\n` +
+    `*Per-person usage — last 24 hours:*\n${perAgentLines}`;
 
   try {
     const res = await fetch('https://slack.com/api/chat.postMessage', {
@@ -638,7 +686,10 @@ async function sendUsageReportToSlack(env) {
     });
     const data = await res.json();
     logStep('slack_chat_postMessage', data.ok === true, `HTTP ${res.status} — ${JSON.stringify(data).slice(0, 500)}`);
-    return { ok: data.ok === true, error: data.ok ? null : data.error, usedCount: usedIds.length, ticketCount: ticketIds.length, steps };
+    return {
+      ok: data.ok === true, error: data.ok ? null : data.error,
+      usedCount: usedIds.length, ticketCount: ticketIds.length, perAgentUsage: perAgent, steps,
+    };
   } catch (err) {
     logStep('slack_chat_postMessage', false, `Exception: ${err.message}`);
     return { ok: false, error: err.message, steps };
@@ -950,6 +1001,16 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
 
     <div class="card">
       <div class="card-head">
+        <h2>📊 Usage report</h2>
+        <button type="button" class="info-btn" data-info="usage-report">i</button>
+      </div>
+      <p class="sub-label" style="margin:0 0 12px">Posts automatically once a day. Click below to send it right now — unique bookings AI-verified (all-time), tickets flagged instead of checkout (all-time), and per-person usage for the last 24 hours.</p>
+      <button class="secondary" id="send-usage-report-btn">Send usage report now</button>
+      <p class="msg" id="usage-report-msg"></p>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
         <h2>🩺 Status</h2>
         <button type="button" class="info-btn" data-info="status">i</button>
       </div>
@@ -976,6 +1037,7 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
     'daily-code': 'A random 6-digit code, posted to Slack automatically once a day \\u2014 click Send to Slack now any time to send another. Typed as bookingID-code, it unlocks that ONE booking\\'s gated Instructions, then is consumed immediately \\u2014 valid 5 minutes, single-use, so the same code can\\'t unlock a second booking or be reused if that booking is fetched again.',
     'admin-code': 'Generates a random code, posts it to the same Slack channel as the instructions code, and stores it until the end of today (IST). Typed as bookingID-code, it flips a permanent admin-mode bypass on your device for every display gate (Past booking, Booking due soon, Instructions) \\u2014 reusable as many times as you like for the rest of the day, not consumed on use. Request a fresh one any day you need admin access.',
     'status': 'Shows which Cloudflare secrets and bindings this Worker can see \\u2014 never the values themselves, just whether each is configured. A red dot here usually explains a broken feature (e.g. no Slack token means Confirm & Flag can\\'t post).',
+    'usage-report': 'Posts to the same Slack channel as Confirm & Flag: unique bookings AI-verified all-time, how many of those were flagged for an already-issued ticket instead of a checkout screenshot (also all-time), and a per-person breakdown of AI Verify checks in the last 24 hours \\u2014 a true rolling window, not tied to calendar days. Posts automatically once a day; this button sends it on demand too.',
   };
   var infoPopover = null;
   function closeInfoPopover() {
@@ -1071,6 +1133,26 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
         btn.disabled = false;
         if (!r.ok || !r.data.ok) { msg.textContent = (r.data && r.data.error) || 'Failed'; msg.className = 'msg err'; return; }
         msg.textContent = 'Sent — code ' + r.data.code + ', valid for the next 5 minutes, single-use.';
+        msg.className = 'msg ok';
+      })
+      .catch(function (err) {
+        btn.disabled = false;
+        msg.textContent = 'Request failed: ' + err.message; msg.className = 'msg err';
+      });
+  });
+
+  document.getElementById('send-usage-report-btn').addEventListener('click', function () {
+    var btn = this;
+    var msg = document.getElementById('usage-report-msg');
+    btn.disabled = true;
+    msg.textContent = 'Sending…'; msg.className = 'msg';
+    fetch('/admin/send-usage-report?password=' + encodeURIComponent(password))
+      .then(function (res) { return res.json().then(function (data) { return { ok: res.ok, data: data }; }); })
+      .then(function (r) {
+        btn.disabled = false;
+        if (!r.ok || !r.data.ok) { msg.textContent = (r.data && r.data.error) || 'Failed'; msg.className = 'msg err'; return; }
+        var agentCount = (r.data.perAgentUsage || []).length;
+        msg.textContent = 'Sent — ' + r.data.usedCount + ' unique booking(s), ' + r.data.ticketCount + ' ticket flag(s), ' + agentCount + ' agent(s) active in the last 24h.';
         msg.className = 'msg ok';
       })
       .catch(function (err) {

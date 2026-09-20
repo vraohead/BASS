@@ -69,6 +69,20 @@ async function getAgentEmail() {
   return trimmed;
 }
 
+// Read-only variant — never prompts. Used to attribute AI Verify's automatic
+// usage tracking, which now runs the instant a screenshot lands rather than
+// from an explicit click, so it can't interrupt that with a surprise prompt
+// the way Confirm & Flag's getAgentEmail() is allowed to. A device that
+// hasn't set an email yet just goes unattributed for the per-person report.
+async function getStoredAgentEmail() {
+  try {
+    const { agentEmail } = await chrome.storage.local.get('agentEmail');
+    return agentEmail || '';
+  } catch (_) {
+    return '';
+  }
+}
+
 // ── Theme ─────────────────────────────────────────────────────────────────────
 
 async function initTheme() {
@@ -1003,6 +1017,7 @@ function buildVerifySection(flat, guestData) {
 
     const [header, imageBase64] = imgEl.src.split(',');
     const mimeType = header.match(/:(.*?);/)?.[1] || 'image/png';
+    const agentEmail = await getStoredAgentEmail();
 
     const result = await sendMessage({
       action: 'VERIFY_IMAGE',
@@ -1010,6 +1025,7 @@ function buildVerifySection(flat, guestData) {
       mimeType,
       facts: { date, time, pax, price, product },
       bookingId,
+      agentEmail,
       workerUrl,
     });
 
