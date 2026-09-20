@@ -217,6 +217,8 @@ function clearResults() {
     '<div class="welcome-placeholder"><p>Search for a booking above to get started.</p></div>';
   $('booking-id').focus();
   clearLastBooking();
+  currentBookingId = null;
+  $('booking-mismatch-banner').hidden = true;
 }
 
 async function doSearch() {
@@ -287,6 +289,8 @@ async function doSearch() {
 
   renderBooking(id, result.data, result.guestData, result.showAutomationModal, result.vendorTourData);
   saveLastBooking(id);
+  currentBookingId = id;
+  checkLiveBookingMismatch();
 }
 
 // ── Render booking ────────────────────────────────────────────────────────────
@@ -1422,6 +1426,13 @@ function isAutomationPending(flat) {
 // booking, matching the code's single-use, per-booking scope.
 let unlockedBookingId = null;
 
+// Whichever booking is currently rendered in the panel — set on every
+// successful fetch, cleared on Clear. Used only to power the passive
+// booking-mismatch banner below; the pre-fetch/pre-confirm hard gates
+// (detectBookingMismatch calls in doSearch/Confirm handlers) don't need it
+// since they check against the booking ID being acted on directly.
+let currentBookingId = null;
+
 // Admin/testing mode — a persistent, non-expiring bypass for every display
 // gate (Past booking, Booking due soon, Instructions withheld), unlocked by
 // redeeming a one-time admin code requested from the admin page. Cached in
@@ -1690,6 +1701,42 @@ async function detectBookingMismatch(expectedId) {
   const urlBookingId = await detectBookingIdFromActiveTab();
   return (urlBookingId && urlBookingId !== expectedId) ? urlBookingId : null;
 }
+
+// Passive counterpart to the hard gates above — those only fire at the
+// moment of a fetch or a confirm click, so if Box Office gets navigated to a
+// different booking WHILE the panel just sits open showing an earlier fetch
+// (side panels persist across tab navigation), nothing re-checks until the
+// next gated action. This re-runs on tab navigation/switch and whenever the
+// panel regains visibility, so the warning shows up without requiring the
+// agent to touch anything first.
+async function checkLiveBookingMismatch() {
+  const banner = $('booking-mismatch-banner');
+  if (!currentBookingId) { banner.hidden = true; return; }
+  const mismatch = await detectBookingMismatch(currentBookingId);
+  if (mismatch) {
+    $('booking-mismatch-text').textContent =
+      `⚠️ Box Office is now showing booking ${mismatch} — this panel is showing ${currentBookingId}.`;
+    $('booking-mismatch-fetch-btn').dataset.bookingId = mismatch;
+    banner.hidden = false;
+  } else {
+    banner.hidden = true;
+  }
+}
+
+$('booking-mismatch-fetch-btn').addEventListener('click', () => {
+  const id = $('booking-mismatch-fetch-btn').dataset.bookingId;
+  if (!id) return;
+  $('booking-id').value = id;
+  doSearch();
+});
+
+chrome.tabs.onUpdated.addListener((_tabId, changeInfo) => {
+  if (changeInfo.url || changeInfo.status === 'complete') checkLiveBookingMismatch();
+});
+chrome.tabs.onActivated.addListener(() => checkLiveBookingMismatch());
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') checkLiveBookingMismatch();
+});
 
 // Reconciles the restored (from storage) booking with whatever the active Box
 // Office tab is currently showing. If both exist and disagree, don't silently

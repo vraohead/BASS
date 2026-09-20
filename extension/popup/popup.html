@@ -64,6 +64,16 @@
       <button id="recheck-btn" class="recheck-inline-btn">Re-check</button>
     </div>
 
+    <!-- Live booking mismatch banner — Box Office tab shows a different
+         booking than what this panel currently has loaded. Kept separate
+         from the pre-fetch/pre-confirm gates (popup.js's
+         detectBookingMismatch) since this one is purely informational and
+         re-checks continuously while the panel just sits open. -->
+    <div id="booking-mismatch-banner" class="bms-warning" hidden>
+      <span id="booking-mismatch-text"></span>
+      <button id="booking-mismatch-fetch-btn" class="recheck-inline-btn">Fetch it</button>
+    </div>
+
     <!-- Loading -->
     <div id="loading-spinner" class="spinner-wrap hidden">
       <div class="spinner"></div>
