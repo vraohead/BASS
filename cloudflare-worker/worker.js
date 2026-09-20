@@ -141,7 +141,7 @@
 
 // Bump this string whenever you paste a new version into the dashboard —
 // visiting GET /debug-env instantly confirms whether a deploy took effect.
-const WORKER_VERSION = '2026-09-20-06';
+const WORKER_VERSION = '2026-09-20-07';
 
 // Formats an ISO timestamp as a clean IST string, e.g. "6 Sep 2026, 10:44 PM IST".
 function formatIST(isoString) {
@@ -182,6 +182,10 @@ export default {
 
     if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '/admin')) {
       return htmlResponse(ADMIN_PAGE_HTML);
+    }
+
+    if (request.method === 'GET' && (url.pathname === '/dashboard' || url.pathname === '/pulse')) {
+      return htmlResponse(DASHBOARD_HTML);
     }
 
     if (request.method === 'GET' && url.pathname === '/debug-env') {
@@ -1493,5 +1497,592 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
   if (savedPw) unlock(savedPw, { silent: true });
 })();
 </script>
+</body>
+</html>`;
+
+// ── "Verify Pulse" dashboard — served at GET /dashboard (or /pulse) on this
+// Worker's own domain. A deliberately distinct visual identity from the
+// admin page above (sage/paper editorial look vs. the admin page's plain
+// utility styling) — connected to the rest of this Worker only through the
+// same-origin fetch() calls below, not through shared markup or CSS.
+// Same password-gate pattern as the admin page's own login, except the
+// password is kept in this viewer's localStorage (not sessionStorage) so a
+// repeat visitor doesn't have to re-enter it — nothing is ever embedded in
+// this page's source. NOTE: any backslash inside this template literal must
+// be doubled (see the ADMIN_PAGE_HTML comment above for why).
+const DASHBOARD_HTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Verify Pulse</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Instrument+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  html { scroll-padding-top: env(safe-area-inset-top, 0px); }
+  img { max-width: 100%; }
+  [hidden]:not([hidden=until-found]) { display: none !important; }
+
+  /* ── Tokens — an editorial, sage/paper identity, deliberately distinct
+     from the extension's violet UI. Only the fetch logic connects them. ── */
+  :root {
+    color-scheme: light;
+    box-sizing: border-box;
+    --paper:       #f6f7f5;
+    --surface:     #ffffff;
+    --surface-2:   #eef0ea;
+    --ink:         #17201c;
+    --ink-2:       #43524a;
+    --ink-muted:   #7c8a80;
+    --line:        #dde2da;
+    --border:      rgba(23,32,28,0.10);
+    --accent:      #176247;
+    --accent-ink:  #ffffff;
+    --accent-wash: rgba(23,98,71,0.07);
+    --good:        #176247;
+    --good-wash:   rgba(23,98,71,0.07);
+    --warn:        #93650f;
+    --warn-wash:   rgba(147,101,15,0.10);
+    --crit:        #a23c2e;
+    --crit-wash:   rgba(162,60,46,0.08);
+    --shadow:      0 1px 2px rgba(23,32,28,0.04), 0 14px 32px -12px rgba(23,32,28,0.14);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --paper:       #0f130f;
+      --surface:     #171c18;
+      --surface-2:   #202620;
+      --ink:         #edf1ee;
+      --ink-2:       #aab6ae;
+      --ink-muted:   #7c8a80;
+      --line:        #2b332c;
+      --border:      rgba(237,241,238,0.10);
+      --accent:      #5fc9a1;
+      --accent-ink:  #0c1f16;
+      --accent-wash: rgba(95,201,161,0.12);
+      --good:        #5fc9a1;
+      --good-wash:   rgba(95,201,161,0.12);
+      --warn:        #e0ab4a;
+      --warn-wash:   rgba(224,171,74,0.14);
+      --crit:        #e2795f;
+      --crit-wash:   rgba(226,121,95,0.14);
+      --shadow:      0 1px 2px rgba(0,0,0,0.35), 0 16px 36px -14px rgba(0,0,0,0.55);
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --paper:       #0f130f;
+    --surface:     #171c18;
+    --surface-2:   #202620;
+    --ink:         #edf1ee;
+    --ink-2:       #aab6ae;
+    --ink-muted:   #7c8a80;
+    --line:        #2b332c;
+    --border:      rgba(237,241,238,0.10);
+    --accent:      #5fc9a1;
+    --accent-ink:  #0c1f16;
+    --accent-wash: rgba(95,201,161,0.12);
+    --good:        #5fc9a1;
+    --good-wash:   rgba(95,201,161,0.12);
+    --warn:        #e0ab4a;
+    --warn-wash:   rgba(224,171,74,0.14);
+    --crit:        #e2795f;
+    --crit-wash:   rgba(226,121,95,0.14);
+    --shadow:      0 1px 2px rgba(0,0,0,0.35), 0 16px 36px -14px rgba(0,0,0,0.55);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--paper); color: var(--ink);
+    font: 14px 'Instrument Sans', system-ui, -apple-system, "Segoe UI", sans-serif;
+    padding-inline: 24px; padding-block: 28px 56px;
+    padding-top: calc(28px + env(safe-area-inset-top, 0px));
+    padding-bottom: calc(56px + env(safe-area-inset-bottom, 0px));
+    max-width: 1180px; margin: 0 auto;
+  }
+  .serif { font-family: 'Instrument Serif', Georgia, serif; }
+  .tabular { font-variant-numeric: tabular-nums; }
+  h1, h2, h3 { text-wrap: balance; margin: 0; }
+  a { color: var(--accent); }
+
+  /* ── Top bar ────────────────────────────────────────────────────────── */
+  .topbar {
+    display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between;
+    gap: 14px; padding-bottom: 20px; margin-bottom: 26px; border-bottom: 1px solid var(--line);
+  }
+  .brand-text h1 {
+    font-family: 'Instrument Serif', Georgia, serif; font-style: italic; font-weight: 400;
+    font-size: 34px; letter-spacing: -0.01em; color: var(--ink);
+  }
+  .brand-text h1 em { font-style: italic; color: var(--accent); }
+  .brand-text p { margin: 3px 0 0; font-size: 12.5px; color: var(--ink-muted); letter-spacing: .01em; }
+  .topbar-right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+
+  .range-group { display: flex; gap: 3px; background: var(--surface-2); border-radius: 999px; padding: 3px; }
+  .range-btn {
+    border: none; background: transparent; color: var(--ink-2); font: inherit; font-size: 12.5px;
+    font-weight: 500; padding: 6px 13px; border-radius: 999px; cursor: pointer; transition: all .15s;
+  }
+  .range-btn:hover { color: var(--ink); }
+  .range-btn.active { background: var(--surface); color: var(--accent); font-weight: 600; box-shadow: var(--shadow); }
+
+  .custom-range { display: none; align-items: center; gap: 6px; }
+  .custom-range.open { display: flex; }
+  .custom-range input {
+    font: inherit; font-size: 12px; padding: 6px 8px; border-radius: 8px;
+    border: 1px solid var(--border); background: var(--surface); color: var(--ink);
+  }
+  .icon-btn {
+    border: 1px solid var(--border); background: var(--surface); color: var(--ink-2);
+    border-radius: 999px; padding: 7px 14px; font: inherit; font-size: 12px; font-weight: 500; cursor: pointer;
+    transition: border-color .15s, color .15s;
+  }
+  .icon-btn:hover { color: var(--ink); border-color: var(--ink-muted); }
+
+  .status-line { font-size: 11.5px; color: var(--ink-muted); margin-top: -14px; margin-bottom: 24px; }
+
+  /* ── Cards & grid ───────────────────────────────────────────────────── */
+  .card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 18px;
+    padding: 20px 22px; box-shadow: var(--shadow);
+  }
+  .section { margin-bottom: 24px; }
+  .section-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 14px; gap: 10px; }
+  .section-head h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--ink-muted); font-weight: 600; }
+  .section-head .hint { font-size: 12px; color: var(--ink-muted); font-style: italic; font-family: 'Instrument Serif', Georgia, serif; }
+
+  .kpi-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  .kpi-tile { display: flex; flex-direction: column; gap: 7px; }
+  .kpi-label { font-size: 11px; color: var(--ink-muted); font-weight: 600; text-transform: uppercase; letter-spacing: .05em; }
+  .kpi-value { font-family: 'Instrument Serif', Georgia, serif; font-size: 40px; font-weight: 400; letter-spacing: -0.01em; line-height: 1; color: var(--ink); }
+  .kpi-sub { font-size: 12px; color: var(--ink-2); }
+
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .three-col { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+
+  /* ── Status tiles (page type) ──────────────────────────────────────── */
+  .status-tile {
+    border-radius: 14px; padding: 16px 18px; display: flex; flex-direction: column; gap: 5px;
+    border: 1px solid var(--border);
+  }
+  .status-tile .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; margin-right: 7px; }
+  .status-tile .label { font-size: 12px; font-weight: 600; display: flex; align-items: center; color: var(--ink-2); }
+  .status-tile .value { font-family: 'Instrument Serif', Georgia, serif; font-size: 30px; font-weight: 400; letter-spacing: -0.01em; color: var(--ink); }
+  .status-tile .pct { font-size: 11.5px; color: var(--ink-muted); }
+  .status-tile.good  { background: var(--good-wash); }
+  .status-tile.warn  { background: var(--warn-wash); }
+  .status-tile.crit  { background: var(--crit-wash); }
+  .status-tile.good .dot { background: var(--good); }
+  .status-tile.warn .dot { background: var(--warn); }
+  .status-tile.crit .dot { background: var(--crit); }
+
+  /* ── Ranked horizontal bars ────────────────────────────────────────── */
+  .rank-list { display: flex; flex-direction: column; gap: 11px; }
+  .rank-row { display: grid; grid-template-columns: 128px 1fr 32px; align-items: center; gap: 10px; }
+  .rank-name { font-size: 12.5px; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .rank-track { position: relative; height: 8px; background: var(--surface-2); border-radius: 4px; overflow: hidden; }
+  .rank-fill { position: absolute; inset: 0 auto 0 0; height: 100%; border-radius: 4px; background: var(--accent); transition: width .35s ease; }
+  .rank-fill.mismatch { background: var(--crit); }
+  .rank-value { font-size: 12.5px; font-weight: 600; text-align: right; font-variant-numeric: tabular-nums; }
+  .empty-note { font-size: 12.5px; color: var(--ink-muted); font-style: italic; font-family: 'Instrument Serif', Georgia, serif; padding: 10px 2px; }
+
+  /* ── Table ─────────────────────────────────────────────────────────── */
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; font-size: 10.5px; text-transform: uppercase; letter-spacing: .05em; color: var(--ink-muted); font-weight: 600; padding: 0 10px 9px; border-bottom: 1px solid var(--line); }
+  td { padding: 10px 10px; border-bottom: 1px solid var(--line); color: var(--ink-2); }
+  tr:last-child td { border-bottom: none; }
+  td.num, th.num { text-align: right; }
+  .table-wrap { overflow-x: auto; }
+  .rank-badge {
+    display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px;
+    border-radius: 50%; background: var(--accent-wash); color: var(--accent); font-size: 11px; font-weight: 700; margin-right: 9px;
+  }
+
+  footer { margin-top: 34px; font-size: 11.5px; color: var(--ink-muted); text-align: center; font-style: italic; font-family: 'Instrument Serif', Georgia, serif; }
+
+  /* ── Connect screen ────────────────────────────────────────────────── */
+  .connect-wrap { max-width: 420px; margin: 12vh auto 0; }
+  .connect-wrap .card { display: flex; flex-direction: column; gap: 12px; }
+  .connect-wrap h1 { font-family: 'Instrument Serif', Georgia, serif; font-style: italic; font-weight: 400; font-size: 24px; }
+  .connect-wrap label { font-size: 12px; font-weight: 600; color: var(--ink-2); margin-bottom: -6px; }
+  .connect-wrap input {
+    font: inherit; font-size: 14px; padding: 10px 12px; border-radius: 10px;
+    border: 1px solid var(--border); background: var(--surface-2); color: var(--ink); width: 100%;
+  }
+  .connect-wrap button {
+    font: inherit; font-size: 14px; font-weight: 600; padding: 10px 14px; border-radius: 10px;
+    border: none; background: var(--accent); color: var(--accent-ink); cursor: pointer; margin-top: 4px;
+  }
+  .connect-wrap button:hover { opacity: .9; }
+  .connect-msg { font-size: 12.5px; min-height: 16px; }
+  .connect-msg.err { color: var(--crit); }
+  .connect-msg.ok { color: var(--good); }
+
+  [hidden] { display: none !important; }
+
+  @media (max-width: 760px) {
+    .kpi-grid { grid-template-columns: repeat(2, 1fr); }
+    .two-col, .three-col { grid-template-columns: 1fr; }
+    .rank-row { grid-template-columns: 96px 1fr 30px; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ── Connect screen — password stays only in this viewer's localStorage,
+     never in the page source. Mirrors the worker's own admin-page login. -->
+<div class="connect-wrap" id="connect-screen">
+  <div class="card">
+    <h1>Connect to <em style="color:var(--accent)">Verify Pulse</em></h1>
+    <p style="font-size:12.5px;color:var(--ink-2);margin:-6px 0 4px;">Reads live from your Booking Assistant Worker's admin API. Nothing is stored anywhere but this browser.</p>
+    <label for="worker-url-input">Worker URL</label>
+    <input id="worker-url-input" type="text" value="" spellcheck="false">
+    <label for="worker-pw-input">Admin password</label>
+    <input id="worker-pw-input" type="password" spellcheck="false">
+    <button id="connect-btn">Connect</button>
+    <p class="connect-msg" id="connect-msg"></p>
+  </div>
+</div>
+
+<!-- ── Dashboard ─────────────────────────────────────────────────────── -->
+<div id="dashboard" hidden>
+  <div class="topbar">
+    <div class="brand-text">
+      <h1>Verify <em>Pulse</em></h1>
+      <p>Booking Assistant — AI Verify usage &amp; quality</p>
+    </div>
+    <div class="topbar-right">
+      <div class="range-group" id="range-group">
+        <button class="range-btn" data-range="1">Today</button>
+        <button class="range-btn active" data-range="7">7D</button>
+        <button class="range-btn" data-range="30">30D</button>
+        <button class="range-btn" data-range="90">90D</button>
+        <button class="range-btn" data-range="all">All-time</button>
+        <button class="range-btn" data-range="custom">Custom…</button>
+      </div>
+      <div class="custom-range" id="custom-range">
+        <input type="datetime-local" id="custom-start">
+        <span style="color:var(--ink-muted);font-size:12px;">to</span>
+        <input type="datetime-local" id="custom-end">
+        <button class="icon-btn" id="custom-apply-btn">Apply</button>
+      </div>
+      <button class="icon-btn" id="refresh-btn">↻ Refresh</button>
+      <button class="icon-btn" id="disconnect-btn">Disconnect</button>
+    </div>
+  </div>
+
+  <p class="status-line" id="status-line">Loading…</p>
+
+  <div class="section">
+    <div class="kpi-grid">
+      <div class="card kpi-tile">
+        <span class="kpi-label">Unique Bookings Verified</span>
+        <span class="kpi-value tabular" id="kpi-bookings">—</span>
+        <span class="kpi-sub" id="kpi-bookings-sub">&nbsp;</span>
+      </div>
+      <div class="card kpi-tile">
+        <span class="kpi-label">Checkout Capture Rate</span>
+        <span class="kpi-value tabular" id="kpi-checkout-rate">—</span>
+        <span class="kpi-sub">Screenshots that were the expected page</span>
+      </div>
+      <div class="card kpi-tile">
+        <span class="kpi-label">Full-Match Rate</span>
+        <span class="kpi-value tabular" id="kpi-match-rate">—</span>
+        <span class="kpi-sub">Of checks with field data</span>
+      </div>
+      <div class="card kpi-tile">
+        <span class="kpi-label">Busiest Vendor</span>
+        <span class="kpi-value" id="kpi-top-vendor" style="font-size:24px;">—</span>
+        <span class="kpi-sub" id="kpi-top-vendor-sub">&nbsp;</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">
+      <h2>Screenshot classification</h2>
+      <span class="hint">What every captured screenshot turned out to be</span>
+    </div>
+    <div class="three-col">
+      <div class="status-tile good">
+        <span class="label"><span class="dot"></span>Checkout page</span>
+        <span class="value tabular" id="tile-checkout">—</span>
+        <span class="pct" id="tile-checkout-pct">expected — good</span>
+      </div>
+      <div class="status-tile crit">
+        <span class="label"><span class="dot"></span>Ticket shown instead</span>
+        <span class="value tabular" id="tile-ticket">—</span>
+        <span class="pct" id="tile-ticket-pct">checked after booking — flag</span>
+      </div>
+      <div class="status-tile warn">
+        <span class="label"><span class="dot"></span>Other / unclear</span>
+        <span class="value tabular" id="tile-other">—</span>
+        <span class="pct" id="tile-other-pct">not a checkout or a ticket</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="section two-col">
+    <div class="card">
+      <div class="section-head" style="margin-bottom:16px;">
+        <h2>Top vendors</h2>
+        <span class="hint">by unique bookings</span>
+      </div>
+      <div class="rank-list" id="vendor-list"></div>
+    </div>
+    <div class="card">
+      <div class="section-head" style="margin-bottom:16px;">
+        <h2>Top experiences</h2>
+        <span class="hint">by unique bookings</span>
+      </div>
+      <div class="rank-list" id="product-list"></div>
+    </div>
+  </div>
+
+  <div class="section two-col">
+    <div class="card">
+      <div class="section-head" style="margin-bottom:16px;">
+        <h2>Match quality</h2>
+        <span class="hint" id="match-hint">&nbsp;</span>
+      </div>
+      <div class="rank-list">
+        <div class="rank-row">
+          <span class="rank-name">Full match</span>
+          <div class="rank-track"><div class="rank-fill" id="bar-full" style="background:var(--good)"></div></div>
+          <span class="rank-value tabular" id="val-full">—</span>
+        </div>
+        <div class="rank-row">
+          <span class="rank-name">Partial match</span>
+          <div class="rank-track"><div class="rank-fill" id="bar-partial" style="background:var(--warn)"></div></div>
+          <span class="rank-value tabular" id="val-partial">—</span>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="section-head" style="margin-bottom:16px;">
+        <h2>Most-mismatched fields</h2>
+        <span class="hint">where checks fail most</span>
+      </div>
+      <div class="rank-list" id="field-list"></div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="card">
+      <div class="section-head" style="margin-bottom:16px;">
+        <h2>Per person</h2>
+        <span class="hint">for the selected window</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Agent</th><th class="num">Checks run</th><th class="num">Unique bookings</th></tr></thead>
+          <tbody id="person-table-body"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <footer id="footer-note">Verify Pulse reads live from the Booking Assistant Worker's usage log — no data is stored by this page.</footer>
+</div>
+
+<script>
+(function () {
+  var LS_URL = 'verifyPulseWorkerUrl';
+  var LS_PW  = 'verifyPulsePassword';
+
+  function $(id) { return document.getElementById(id); }
+  function escHtml(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+  function pct(n, d) { return d > 0 ? Math.round((n / d) * 100) + '%' : '—'; }
+  function fmtRange(startIso, endIso) {
+    try {
+      var opts = { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' };
+      return new Date(startIso).toLocaleString(undefined, opts) + ' → ' + new Date(endIso).toLocaleString(undefined, opts);
+    } catch (_) { return startIso + ' to ' + endIso; }
+  }
+
+  var state = { workerUrl: '', password: '', rangeDays: 7, customStart: null, customEnd: null };
+
+  // Same-origin by construction (this page is served BY the Worker), so
+  // default straight to it — no URL to type or get wrong.
+  try { $('worker-url-input').value = location.origin; } catch (_) {}
+
+  // ── Connect screen ──────────────────────────────────────────────────
+  function tryStoredCreds() {
+    try {
+      var url = localStorage.getItem(LS_URL);
+      var pw = localStorage.getItem(LS_PW);
+      if (url && pw) return { url: url, pw: pw };
+    } catch (_) {}
+    return null;
+  }
+
+  function showDashboard(url, pw) {
+    state.workerUrl = url.replace(/\\/$/, '');
+    state.password = pw;
+    $('connect-screen').hidden = true;
+    $('dashboard').hidden = false;
+    loadData();
+  }
+
+  $('connect-btn').addEventListener('click', function () {
+    var url = $('worker-url-input').value.trim().replace(/\\/$/, '');
+    var pw = $('worker-pw-input').value;
+    var msg = $('connect-msg');
+    if (!url || !pw) { msg.textContent = 'Enter both a Worker URL and the admin password.'; msg.className = 'connect-msg err'; return; }
+    msg.textContent = 'Connecting…'; msg.className = 'connect-msg';
+    fetch(url + '/admin/usage-report-range?password=' + encodeURIComponent(pw) + '&start=' + encodeURIComponent(new Date(0).toISOString()))
+      .then(function (res) { return res.json().then(function (data) { return { ok: res.ok, data: data }; }); })
+      .then(function (r) {
+        if (!r.ok || !r.data.ok) { msg.textContent = (r.data && r.data.error) || 'Could not connect — check the URL and password.'; msg.className = 'connect-msg err'; return; }
+        try { localStorage.setItem(LS_URL, url); localStorage.setItem(LS_PW, pw); } catch (_) {}
+        msg.textContent = 'Connected.'; msg.className = 'connect-msg ok';
+        showDashboard(url, pw);
+      })
+      .catch(function (err) { msg.textContent = 'Request failed: ' + err.message; msg.className = 'connect-msg err'; });
+  });
+
+  $('disconnect-btn').addEventListener('click', function () {
+    try { localStorage.removeItem(LS_URL); localStorage.removeItem(LS_PW); } catch (_) {}
+    location.reload();
+  });
+
+  // ── Date range control ──────────────────────────────────────────────
+  function computeRange() {
+    if (state.rangeDays === 'custom' && state.customStart && state.customEnd) {
+      return { start: state.customStart, end: state.customEnd };
+    }
+    var end = new Date();
+    var start;
+    if (state.rangeDays === 'all') {
+      start = new Date(0);
+    } else {
+      start = new Date(end.getTime() - state.rangeDays * 24 * 60 * 60 * 1000);
+    }
+    return { start: start.toISOString(), end: end.toISOString() };
+  }
+
+  document.querySelectorAll('.range-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var range = btn.getAttribute('data-range');
+      document.querySelectorAll('.range-btn').forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      if (range === 'custom') {
+        $('custom-range').classList.add('open');
+        return;
+      }
+      $('custom-range').classList.remove('open');
+      state.rangeDays = range === 'all' ? 'all' : parseInt(range, 10);
+      loadData();
+    });
+  });
+  $('custom-apply-btn').addEventListener('click', function () {
+    var s = $('custom-start').value, e = $('custom-end').value;
+    if (!s || !e) return;
+    state.rangeDays = 'custom';
+    state.customStart = new Date(s).toISOString();
+    state.customEnd = new Date(e).toISOString();
+    loadData();
+  });
+  $('refresh-btn').addEventListener('click', loadData);
+
+  // ── Rendering ───────────────────────────────────────────────────────
+  function renderRankList(el, rows, opts) {
+    opts = opts || {};
+    if (!rows.length) {
+      el.innerHTML = '<p class="empty-note">No activity in this range yet.</p>';
+      return;
+    }
+    var max = Math.max.apply(null, rows.map(function (r) { return r.value; }));
+    el.innerHTML = rows.slice(0, 8).map(function (r) {
+      var widthPct = max > 0 ? Math.max(4, Math.round((r.value / max) * 100)) : 0;
+      return '<div class="rank-row" title="' + escHtml(r.name) + ': ' + r.value + '">' +
+        '<span class="rank-name">' + escHtml(r.name) + '</span>' +
+        '<div class="rank-track"><div class="rank-fill' + (opts.mismatch ? ' mismatch' : '') + '" style="width:' + widthPct + '%"></div></div>' +
+        '<span class="rank-value tabular">' + r.value + '</span>' +
+        '</div>';
+    }).join('');
+  }
+
+  function render(d, range) {
+    $('status-line').textContent = 'Showing ' + fmtRange(range.start, range.end) + ' · ' + (d.totalEvents || 0) + ' logged event(s) · updated ' + new Date().toLocaleTimeString();
+
+    $('kpi-bookings').textContent = d.uniqueBookingCount;
+    $('kpi-bookings-sub').textContent = d.checksWithData + ' with field-level checks';
+
+    var totalTagged = d.checkoutBookingCount + d.ticketBookingCount + d.otherPageBookingCount;
+    $('kpi-checkout-rate').textContent = pct(d.checkoutBookingCount, totalTagged);
+    $('kpi-match-rate').textContent = pct(d.fullMatchChecks, d.checksWithData);
+
+    var topVendor = d.perVendorUniqueBookings[0];
+    $('kpi-top-vendor').textContent = topVendor ? topVendor[0] : '—';
+    $('kpi-top-vendor-sub').textContent = topVendor ? topVendor[1] + ' unique booking(s)' : 'No vendor data yet';
+
+    $('tile-checkout').textContent = d.checkoutBookingCount;
+    $('tile-ticket').textContent = d.ticketBookingCount;
+    $('tile-other').textContent = d.otherPageBookingCount;
+    $('tile-checkout-pct').textContent = pct(d.checkoutBookingCount, totalTagged) + ' of tagged screenshots — good';
+    $('tile-ticket-pct').textContent = pct(d.ticketBookingCount, totalTagged) + ' of tagged screenshots — flag';
+    $('tile-other-pct').textContent = pct(d.otherPageBookingCount, totalTagged) + ' of tagged screenshots';
+
+    renderRankList($('vendor-list'), d.perVendorUniqueBookings.map(function (r) { return { name: r[0], value: r[1] }; }));
+    renderRankList($('product-list'), d.perProductUniqueBookings.map(function (r) { return { name: r.product + (r.vendor ? ' · ' + r.vendor : ''), value: r.uniqueBookingCount }; }));
+    renderRankList($('field-list'), d.fieldMismatchCounts.map(function (r) { return { name: r[0], value: r[1] }; }), { mismatch: true });
+
+    var matchTotal = d.fullMatchChecks + d.partialMatchChecks;
+    $('match-hint').textContent = matchTotal + ' check(s) with field data';
+    $('val-full').textContent = d.fullMatchChecks;
+    $('val-partial').textContent = d.partialMatchChecks;
+    $('bar-full').style.width = matchTotal ? Math.max(4, Math.round((d.fullMatchChecks / matchTotal) * 100)) + '%' : '0%';
+    $('bar-partial').style.width = matchTotal ? Math.max(4, Math.round((d.partialMatchChecks / matchTotal) * 100)) + '%' : '0%';
+
+    var personRows = d.perPersonUniqueBookings.map(function (row) {
+      var email = row[0], uniqueCount = row[1];
+      var checksRow = d.perPersonCheckCounts.find(function (c) { return c[0] === email; });
+      return { email: email, checks: checksRow ? checksRow[1] : 0, unique: uniqueCount };
+    });
+    d.perPersonCheckCounts.forEach(function (c) {
+      if (!personRows.some(function (r) { return r.email === c[0]; })) {
+        personRows.push({ email: c[0], checks: c[1], unique: 0 });
+      }
+    });
+    personRows.sort(function (a, b) { return b.checks - a.checks; });
+    $('person-table-body').innerHTML = personRows.length
+      ? personRows.map(function (r, i) {
+          return '<tr><td><span class="rank-badge">' + (i + 1) + '</span>' + escHtml(r.email) + '</td>' +
+            '<td class="num tabular">' + r.checks + '</td><td class="num tabular">' + r.unique + '</td></tr>';
+        }).join('')
+      : '<tr><td colspan="3" class="empty-note">No one has used AI Verify in this range yet.</td></tr>';
+  }
+
+  function loadData() {
+    var range = computeRange();
+    $('status-line').textContent = 'Loading…';
+    fetch(state.workerUrl + '/admin/usage-report-range?password=' + encodeURIComponent(state.password) +
+      '&start=' + encodeURIComponent(range.start) + '&end=' + encodeURIComponent(range.end))
+      .then(function (res) { return res.json().then(function (data) { return { ok: res.ok, data: data }; }); })
+      .then(function (r) {
+        if (!r.ok || !r.data.ok) {
+          $('status-line').textContent = 'Could not load data: ' + ((r.data && r.data.error) || ('HTTP ' + (r.status || '?')));
+          return;
+        }
+        render(r.data, range);
+      })
+      .catch(function (err) {
+        $('status-line').textContent = 'Request failed: ' + err.message + ' — is the Worker deployed and reachable?';
+      });
+  }
+
+  var creds = tryStoredCreds();
+  if (creds) showDashboard(creds.url, creds.pw);
+})();
+</script>
+
 </body>
 </html>`;
