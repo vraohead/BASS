@@ -141,7 +141,7 @@
 
 // Bump this string whenever you paste a new version into the dashboard —
 // visiting GET /debug-env instantly confirms whether a deploy took effect.
-const WORKER_VERSION = '2026-09-20-07';
+const WORKER_VERSION = '2026-09-20-08';
 
 // Formats an ISO timestamp as a clean IST string, e.g. "6 Sep 2026, 10:44 PM IST".
 function formatIST(isoString) {
@@ -184,8 +184,11 @@ export default {
       return htmlResponse(ADMIN_PAGE_HTML);
     }
 
+    // The Verify Pulse analytics view used to be its own page at these
+    // paths — it now lives inline on the admin page itself, so redirect
+    // anyone with the old link.
     if (request.method === 'GET' && (url.pathname === '/dashboard' || url.pathname === '/pulse')) {
-      return htmlResponse(DASHBOARD_HTML);
+      return Response.redirect(url.origin + '/', 302);
     }
 
     if (request.method === 'GET' && url.pathname === '/debug-env') {
@@ -1118,77 +1121,196 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Booking Assistant — Admin</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Instrument+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
-  :root { color-scheme: light dark; }
+  /* ── Same sage/paper editorial identity as the Verify Pulse dashboard
+     (/dashboard) — same tokens and fonts, restyled logic-for-logic so the
+     two pages read as one product. Nothing below changes any element id,
+     class, or the <script> at the bottom — styling only. ── */
+  :root {
+    color-scheme: light;
+    --paper:       #f6f7f5;
+    --surface:     #ffffff;
+    --surface-2:   #eef0ea;
+    --ink:         #17201c;
+    --ink-2:       #43524a;
+    --ink-muted:   #7c8a80;
+    --line:        #dde2da;
+    --border:      rgba(23,32,28,0.10);
+    --accent:      #176247;
+    --accent-ink:  #ffffff;
+    --accent-wash: rgba(23,98,71,0.07);
+    --good:        #176247;
+    --good-wash:   rgba(23,98,71,0.07);
+    --warn:        #93650f;
+    --warn-wash:   rgba(147,101,15,0.10);
+    --crit:        #a23c2e;
+    --crit-wash:   rgba(162,60,46,0.08);
+    --shadow:      0 1px 2px rgba(23,32,28,0.04), 0 14px 32px -12px rgba(23,32,28,0.14);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --paper:       #0f130f;
+      --surface:     #171c18;
+      --surface-2:   #202620;
+      --ink:         #edf1ee;
+      --ink-2:       #aab6ae;
+      --ink-muted:   #7c8a80;
+      --line:        #2b332c;
+      --border:      rgba(237,241,238,0.10);
+      --accent:      #5fc9a1;
+      --accent-ink:  #0c1f16;
+      --accent-wash: rgba(95,201,161,0.12);
+      --good:        #5fc9a1;
+      --good-wash:   rgba(95,201,161,0.12);
+      --warn:        #e0ab4a;
+      --warn-wash:   rgba(224,171,74,0.14);
+      --crit:        #e2795f;
+      --crit-wash:   rgba(226,121,95,0.14);
+      --shadow:      0 1px 2px rgba(0,0,0,0.35), 0 16px 36px -14px rgba(0,0,0,0.55);
+    }
+  }
   * { box-sizing: border-box; }
   body {
-    margin: 0; padding: 24px 16px 64px; background: #0f1115; color: #e6e6ea;
-    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif;
+    margin: 0; padding: 32px 16px 64px; background: var(--paper); color: var(--ink);
+    font: 14px/1.5 'Instrument Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   }
-  h1 { font-size: 18px; margin: 0 0 4px; }
-  .sub { color: #8b8b95; margin: 0 0 24px; font-size: 13px; }
+  h1 {
+    font-family: 'Instrument Serif', Georgia, serif; font-style: italic; font-weight: 400;
+    font-size: 26px; margin: 0 0 4px; letter-spacing: -0.01em;
+  }
+  h1 em { font-style: italic; color: var(--accent); }
+  .sub { color: var(--ink-muted); margin: 0 0 24px; font-size: 13px; }
   .login-wrap { max-width: 420px; margin: 40px auto 0; }
   .layout { max-width: 480px; margin: 0 auto; }
   .card {
-    background: #1a1c23; border: 1px solid #2a2c35; border-radius: 10px;
-    padding: 18px; margin-bottom: 16px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 18px;
+    padding: 20px 22px; margin-bottom: 16px; box-shadow: var(--shadow);
   }
-  .card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: #9a9aa5; margin: 0; }
+  .card h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--ink-muted); margin: 0; font-weight: 600; }
   .card-head { display: flex; align-items: center; gap: 6px; margin-bottom: 14px; }
   .info-btn {
-    background: transparent; border: 1px solid #33353f; color: #75757f;
+    background: transparent; border: 1px solid var(--border); color: var(--ink-muted);
     width: 18px; height: 18px; padding: 0; border-radius: 50%;
     font-size: 11px; font-weight: 700; line-height: 1; display: inline-flex;
     align-items: center; justify-content: center; flex-shrink: 0;
   }
-  .info-btn:hover { background: #24262e; color: #b0b0ba; border-color: #45475a; }
+  .info-btn:hover { background: var(--surface-2); color: var(--ink-2); border-color: var(--ink-muted); }
   .info-popover {
-    position: fixed; max-width: 280px; background: #24262e; border: 1px solid #3a3d4a;
-    border-radius: 8px; padding: 10px 12px; font-size: 12.5px; line-height: 1.55;
-    color: #d6d6de; box-shadow: 0 8px 24px rgba(0,0,0,0.4); z-index: 50;
+    position: fixed; max-width: 280px; background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 10px 12px; font-size: 12.5px; line-height: 1.55;
+    color: var(--ink-2); box-shadow: var(--shadow); z-index: 50;
   }
-  label { display: block; font-size: 12px; color: #b0b0ba; margin-bottom: 6px; }
-  .sub-label { font-size: 11px; color: #75757f; margin: -6px 0 10px; }
+  label { display: block; font-size: 12px; color: var(--ink-2); margin-bottom: 6px; font-weight: 600; }
+  .sub-label { font-size: 12px; color: var(--ink-muted); margin: -6px 0 10px; }
   input[type=password], input[type=text], input[type=datetime-local], textarea {
-    width: 100%; padding: 9px 10px; border-radius: 7px; border: 1px solid #33353f;
-    background: #0f1115; color: #e6e6ea; font-size: 14px; margin-bottom: 10px;
+    width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--border);
+    background: var(--surface-2); color: var(--ink); font-size: 14px; margin-bottom: 10px;
     font-family: inherit;
   }
   textarea { resize: vertical; min-height: 56px; }
   textarea:disabled { opacity: 0.4; cursor: not-allowed; }
   .message-block {
-    border-top: 1px dashed #2a2c35; margin-top: 4px; padding-top: 14px;
+    border-top: 1px dashed var(--line); margin-top: 4px; padding-top: 14px;
   }
   .row { display: flex; gap: 10px; align-items: center; }
   .checkbox-row { display: flex; align-items: center; gap: 8px; margin: 4px 0 14px; }
   .checkbox-row input { width: 16px; height: 16px; }
   button {
-    background: #5865f2; color: #fff; border: none; border-radius: 7px;
-    padding: 9px 16px; font-size: 14px; font-weight: 600; cursor: pointer;
+    background: var(--accent); color: var(--accent-ink); border: none; border-radius: 999px;
+    padding: 10px 18px; font-size: 14px; font-weight: 600; cursor: pointer; font-family: inherit;
   }
-  button:hover { background: #4752c4; }
-  button:disabled { background: #33353f; color: #75757f; cursor: not-allowed; }
-  button.secondary { background: #2a2c35; }
-  button.secondary:hover { background: #33353f; }
+  button:hover { opacity: .9; }
+  button:disabled { background: var(--surface-2); color: var(--ink-muted); cursor: not-allowed; opacity: 1; }
+  button.secondary { background: var(--surface-2); color: var(--ink); }
+  button.secondary:hover { background: var(--line); opacity: 1; }
   button.tiny { padding: 4px 10px; font-size: 12px; }
   .status-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 16px; font-size: 13px; }
   .status-grid div { display: flex; justify-content: space-between; }
   .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
-  .dot.ok { background: #3ba55c; } .dot.bad { background: #ed4245; }
-  .code-display { font: 700 22px/1 "JetBrains Mono", monospace; letter-spacing: .06em; color: #5865f2; margin: 6px 0; }
-  .muted { color: #8b8b95; font-size: 12px; }
+  .dot.ok { background: var(--good); } .dot.bad { background: var(--crit); }
+  .code-display { font: 700 22px/1 "JetBrains Mono", monospace; letter-spacing: .06em; color: var(--accent); margin: 6px 0; }
+  .muted { color: var(--ink-muted); font-size: 12px; }
   .msg { font-size: 13px; margin-top: 10px; min-height: 18px; }
-  .msg.err { color: #ed4245; } .msg.ok { color: #3ba55c; }
+  .msg.err { color: var(--crit); } .msg.ok { color: var(--good); }
   .warn-banner {
-    background: #3a2c0f; border: 1px solid #6b4f14; color: #f0c674;
-    border-radius: 8px; padding: 10px 12px; font-size: 12px; margin-bottom: 16px;
+    background: var(--warn-wash); border: 1px solid var(--warn); color: var(--warn);
+    border-radius: 12px; padding: 10px 12px; font-size: 12px; margin-bottom: 16px;
   }
-  #dashboard { display: none; }
-  a { color: #5865f2; }
+  #dashboard { display: none; max-width: 1180px; margin: 0 auto; }
+  a { color: var(--accent); }
+
+  /* ── Analytics (merged in from the former separate /dashboard page) ──── */
+  .topbar {
+    display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between;
+    gap: 14px; padding-bottom: 16px; margin: 4px 0 20px; border-bottom: 1px solid var(--line);
+  }
+  .topbar h2 {
+    font-family: 'Instrument Serif', Georgia, serif; font-style: italic; font-weight: 400;
+    font-size: 24px; letter-spacing: -0.01em; color: var(--ink); text-transform: none; margin: 0;
+  }
+  .topbar h2 em { font-style: italic; color: var(--accent); }
+  .topbar p { margin: 3px 0 0; font-size: 12px; color: var(--ink-muted); }
+  .topbar-right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .range-group { display: flex; gap: 3px; background: var(--surface-2); border-radius: 999px; padding: 3px; }
+  .range-btn {
+    border: none; background: transparent; color: var(--ink-2); font: inherit; font-size: 12.5px;
+    font-weight: 500; padding: 6px 13px; border-radius: 999px; cursor: pointer;
+  }
+  .range-btn:hover { color: var(--ink); }
+  .range-btn.active { background: var(--surface); color: var(--accent); font-weight: 600; box-shadow: var(--shadow); }
+  .custom-range { display: none; align-items: center; gap: 6px; }
+  .custom-range.open { display: flex; }
+  .custom-range input {
+    font: inherit; font-size: 12px; padding: 6px 8px; border-radius: 8px; margin-bottom: 0;
+    border: 1px solid var(--border); background: var(--surface); color: var(--ink); width: auto;
+  }
+  .status-line { font-size: 11.5px; color: var(--ink-muted); margin: -12px 0 20px; }
+  .tabular { font-variant-numeric: tabular-nums; }
+  .kpi-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 20px; }
+  .kpi-tile { display: flex; flex-direction: column; gap: 7px; }
+  .kpi-label { font-size: 11px; color: var(--ink-muted); font-weight: 600; text-transform: uppercase; letter-spacing: .05em; }
+  .kpi-value { font-family: 'Instrument Serif', Georgia, serif; font-size: 34px; font-weight: 400; letter-spacing: -0.01em; line-height: 1; color: var(--ink); }
+  .kpi-sub { font-size: 12px; color: var(--ink-2); }
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 20px; }
+  .three-col { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 20px; }
+  .status-tile { border-radius: 14px; padding: 16px 18px; display: flex; flex-direction: column; gap: 5px; border: 1px solid var(--border); }
+  .status-tile .stlabel { font-size: 12px; font-weight: 600; display: flex; align-items: center; color: var(--ink-2); }
+  .status-tile .stdot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; margin-right: 7px; }
+  .status-tile .stvalue { font-family: 'Instrument Serif', Georgia, serif; font-size: 28px; font-weight: 400; letter-spacing: -0.01em; color: var(--ink); }
+  .status-tile .stpct { font-size: 11.5px; color: var(--ink-muted); }
+  .status-tile.good { background: var(--good-wash); } .status-tile.good .stdot { background: var(--good); }
+  .status-tile.warn { background: var(--warn-wash); } .status-tile.warn .stdot { background: var(--warn); }
+  .status-tile.crit { background: var(--crit-wash); } .status-tile.crit .stdot { background: var(--crit); }
+  .rank-list { display: flex; flex-direction: column; gap: 11px; }
+  .rank-row { display: grid; grid-template-columns: 128px 1fr 32px; align-items: center; gap: 10px; }
+  .rank-name { font-size: 12.5px; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .rank-track { position: relative; height: 8px; background: var(--surface-2); border-radius: 4px; overflow: hidden; }
+  .rank-fill { position: absolute; inset: 0 auto 0 0; height: 100%; border-radius: 4px; background: var(--accent); }
+  .rank-fill.mismatch { background: var(--crit); }
+  .rank-value { font-size: 12.5px; font-weight: 600; text-align: right; }
+  .empty-note { font-size: 12.5px; color: var(--ink-muted); font-style: italic; font-family: 'Instrument Serif', Georgia, serif; padding: 10px 2px; }
+  .an-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .an-table th { text-align: left; font-size: 10.5px; text-transform: uppercase; letter-spacing: .05em; color: var(--ink-muted); font-weight: 600; padding: 0 10px 9px; border-bottom: 1px solid var(--line); }
+  .an-table td { padding: 10px 10px; border-bottom: 1px solid var(--line); color: var(--ink-2); }
+  .an-table tr:last-child td { border-bottom: none; }
+  .an-table td.num, .an-table th.num { text-align: right; }
+  .rank-badge {
+    display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px;
+    border-radius: 50%; background: var(--accent-wash); color: var(--accent); font-size: 11px; font-weight: 700; margin-right: 9px;
+  }
+  @media (max-width: 760px) {
+    .kpi-grid { grid-template-columns: repeat(2, 1fr); }
+    .two-col, .three-col { grid-template-columns: 1fr; }
+    .rank-row { grid-template-columns: 96px 1fr 30px; }
+  }
 </style>
 </head>
 <body>
-  <h1>Booking Assistant — Admin</h1>
+  <h1>Booking Assistant — <em>Admin</em></h1>
   <p class="sub">Manage what the team's extension shows, test changes live before they go out, and check configuration health. · Worker: <span id="worker-version">—</span></p>
 
   <div id="login-card" class="card login-wrap">
@@ -1198,11 +1320,121 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
     <p class="msg" id="login-msg"></p>
   </div>
 
-  <div id="dashboard" class="layout">
+  <div id="dashboard">
     <div id="kv-warning" class="warn-banner" style="display:none">
       No CONFIG KV namespace bound yet — codes can't be generated or verified. Bind one in Settings → Bindings → KV Namespace → name it <b>CONFIG</b> to fix this.
     </div>
 
+    <!-- ── Analytics — was the separate Verify Pulse page, now lives here ── -->
+    <div class="topbar">
+      <div>
+        <h2>Verify <em>Pulse</em></h2>
+        <p>AI Verify usage &amp; quality</p>
+      </div>
+      <div class="topbar-right">
+        <div class="range-group" id="range-group">
+          <button type="button" class="range-btn" data-range="1">Today</button>
+          <button type="button" class="range-btn active" data-range="7">7D</button>
+          <button type="button" class="range-btn" data-range="30">30D</button>
+          <button type="button" class="range-btn" data-range="90">90D</button>
+          <button type="button" class="range-btn" data-range="all">All-time</button>
+          <button type="button" class="range-btn" data-range="custom">Custom…</button>
+        </div>
+        <div class="custom-range" id="custom-range">
+          <input type="datetime-local" id="custom-start">
+          <span style="color:var(--ink-muted);font-size:12px;">to</span>
+          <input type="datetime-local" id="custom-end">
+          <button type="button" class="secondary tiny" id="custom-apply-btn">Apply</button>
+        </div>
+        <button type="button" class="secondary tiny" id="refresh-btn">↻ Refresh</button>
+      </div>
+    </div>
+    <p class="status-line" id="status-line">Loading…</p>
+
+    <div class="kpi-grid">
+      <div class="card kpi-tile">
+        <span class="kpi-label">Unique Bookings Verified</span>
+        <span class="kpi-value tabular" id="kpi-bookings">—</span>
+        <span class="kpi-sub" id="kpi-bookings-sub">&nbsp;</span>
+      </div>
+      <div class="card kpi-tile">
+        <span class="kpi-label">Checkout Capture Rate</span>
+        <span class="kpi-value tabular" id="kpi-checkout-rate">—</span>
+        <span class="kpi-sub">Screenshots that were the expected page</span>
+      </div>
+      <div class="card kpi-tile">
+        <span class="kpi-label">Full-Match Rate</span>
+        <span class="kpi-value tabular" id="kpi-match-rate">—</span>
+        <span class="kpi-sub">Of checks with field data</span>
+      </div>
+      <div class="card kpi-tile">
+        <span class="kpi-label">Busiest Vendor</span>
+        <span class="kpi-value" id="kpi-top-vendor" style="font-size:22px;">—</span>
+        <span class="kpi-sub" id="kpi-top-vendor-sub">&nbsp;</span>
+      </div>
+    </div>
+
+    <div class="three-col">
+      <div class="status-tile good">
+        <span class="stlabel"><span class="stdot"></span>Checkout page</span>
+        <span class="stvalue tabular" id="tile-checkout">—</span>
+        <span class="stpct" id="tile-checkout-pct">expected — good</span>
+      </div>
+      <div class="status-tile crit">
+        <span class="stlabel"><span class="stdot"></span>Ticket shown instead</span>
+        <span class="stvalue tabular" id="tile-ticket">—</span>
+        <span class="stpct" id="tile-ticket-pct">checked after booking — flag</span>
+      </div>
+      <div class="status-tile warn">
+        <span class="stlabel"><span class="stdot"></span>Other / unclear</span>
+        <span class="stvalue tabular" id="tile-other">—</span>
+        <span class="stpct" id="tile-other-pct">not a checkout or a ticket</span>
+      </div>
+    </div>
+
+    <div class="two-col">
+      <div class="card">
+        <h2 style="font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);font-weight:600;margin:0 0 14px;">Top vendors</h2>
+        <div class="rank-list" id="vendor-list"></div>
+      </div>
+      <div class="card">
+        <h2 style="font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);font-weight:600;margin:0 0 14px;">Top experiences</h2>
+        <div class="rank-list" id="product-list"></div>
+      </div>
+    </div>
+
+    <div class="two-col">
+      <div class="card">
+        <h2 style="font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);font-weight:600;margin:0 0 14px;">Match quality</h2>
+        <div class="rank-list">
+          <div class="rank-row">
+            <span class="rank-name">Full match</span>
+            <div class="rank-track"><div class="rank-fill" id="bar-full" style="background:var(--good)"></div></div>
+            <span class="rank-value tabular" id="val-full">—</span>
+          </div>
+          <div class="rank-row">
+            <span class="rank-name">Partial match</span>
+            <div class="rank-track"><div class="rank-fill" id="bar-partial" style="background:var(--warn)"></div></div>
+            <span class="rank-value tabular" id="val-partial">—</span>
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <h2 style="font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);font-weight:600;margin:0 0 14px;">Most-mismatched fields</h2>
+        <div class="rank-list" id="field-list"></div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:20px;">
+      <h2 style="font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);font-weight:600;margin:0 0 14px;">Per person</h2>
+      <table class="an-table">
+        <thead><tr><th>Agent</th><th class="num">Checks run</th><th class="num">Unique bookings</th></tr></thead>
+        <tbody id="person-table-body"></tbody>
+      </table>
+    </div>
+
+    <!-- ── Admin actions (unchanged from before) ── -->
+    <div class="layout">
     <div class="card">
       <div class="card-head">
         <h2>🔑 Instructions-unlock code</h2>
@@ -1253,25 +1485,11 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
 
     <div class="card">
       <div class="card-head">
-        <h2>🗓 Custom range report</h2>
-        <button type="button" class="info-btn" data-info="range-report">i</button>
-      </div>
-      <p class="sub-label" style="margin:0 0 12px">Fetch usage for any date/time window — shown right here, doesn't post to Slack.</p>
-      <label for="range-start-input">From</label>
-      <input type="datetime-local" id="range-start-input" />
-      <label for="range-end-input">To</label>
-      <input type="datetime-local" id="range-end-input" />
-      <button class="secondary" id="range-fetch-btn" style="margin-top:2px">Fetch</button>
-      <p class="msg" id="range-msg"></p>
-      <div id="range-results" style="display:none; margin-top:12px; font-size:13px; line-height:1.7;"></div>
-    </div>
-
-    <div class="card">
-      <div class="card-head">
         <h2>🩺 Status</h2>
         <button type="button" class="info-btn" data-info="status">i</button>
       </div>
       <div class="status-grid" id="status-grid"></div>
+    </div>
     </div>
   </div>
 
@@ -1302,7 +1520,6 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
     'status': 'Shows which Cloudflare secrets and bindings this Worker can see \\u2014 never the values themselves, just whether each is configured. A red dot here usually explains a broken feature (e.g. no Slack token means Confirm & Flag can\\'t post).',
     'usage-report': 'Posts to the passcode channel (the same one the instructions/admin codes go to), not the main team channel — this is admin-level data, not something the whole team needs in their feed. Check "Also send to the main team channel" before clicking to post there too. Unique bookings AI-verified all-time, and how many of those were flagged for an already-issued ticket instead of a checkout screenshot (also all-time). Posts automatically once a day; this button sends it on demand too.',
     'agent-report': 'Posts to the passcode channel by default, same as the usage report \\u2014 check the box first if you also want this in the main team channel. Checks run per person over a true rolling last-24-hours window (not tied to calendar days), plus total unique bookings each person has actioned, all-time. Posts automatically once a day; this button sends it on demand too.',
-    'range-report': 'Pick any From/To window and fetch usage for exactly that period \\u2014 unique bookings, ticket-instead-of-checkout flags, and a per-person breakdown. Shown right here on the page, not posted to Slack, so you can explore freely without spamming the channel.',
   };
   var infoPopover = null;
   function closeInfoPopover() {
@@ -1355,6 +1572,7 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
         loginCard.style.display = 'none';
         dashboard.style.display = 'block';
         render(r.data);
+        loadAnalyticsData();
         return true;
       })
       .catch(function (err) {
@@ -1448,458 +1666,10 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
       });
   });
 
-  document.getElementById('range-fetch-btn').addEventListener('click', function () {
-    var btn = this;
-    var msg = document.getElementById('range-msg');
-    var resultsEl = document.getElementById('range-results');
-    var startVal = document.getElementById('range-start-input').value;
-    var endVal = document.getElementById('range-end-input').value;
-    if (!startVal || !endVal) {
-      msg.textContent = 'Pick both a start and end.'; msg.className = 'msg err';
-      return;
-    }
-    var startIso = new Date(startVal).toISOString();
-    var endIso = new Date(endVal).toISOString();
-    btn.disabled = true;
-    resultsEl.style.display = 'none';
-    msg.textContent = 'Fetching…'; msg.className = 'msg';
-    fetch('/admin/usage-report-range?password=' + encodeURIComponent(password) +
-      '&start=' + encodeURIComponent(startIso) + '&end=' + encodeURIComponent(endIso))
-      .then(function (res) { return res.json().then(function (data) { return { ok: res.ok, data: data }; }); })
-      .then(function (r) {
-        btn.disabled = false;
-        if (!r.ok || !r.data.ok) { msg.textContent = (r.data && r.data.error) || 'Failed'; msg.className = 'msg err'; return; }
-        msg.textContent = '';
-        var d = r.data;
-        var perPersonLines = d.perPersonUniqueBookings.length
-          ? d.perPersonUniqueBookings.map(function (row) {
-              return '<div>' + escHtml(row[0]) + ': <b>' + row[1] + '</b> unique booking(s)</div>';
-            }).join('')
-          : '<div class="muted">No activity in this range.</div>';
-        resultsEl.innerHTML =
-          '<div><b>' + d.uniqueBookingCount + '</b> unique booking(s) verified</div>' +
-          '<div><b>' + d.checkoutBookingCount + '</b> checkout page (expected)</div>' +
-          '<div><b>' + d.ticketBookingCount + '</b> ticket shown instead of checkout</div>' +
-          '<div><b>' + d.otherPageBookingCount + '</b> neither (other)</div>' +
-          '<div style="margin-top:8px"><b>' + d.fullMatchChecks + '</b> full match, <b>' + d.partialMatchChecks + '</b> partial match (of ' + d.checksWithData + ')</div>' +
-          '<div style="margin-top:8px"><b>Per person (unique bookings):</b></div>' + perPersonLines +
-          '<div class="muted" style="margin-top:10px">Full breakdown (vendors, experiences, mismatched fields) is on the dashboard.</div>';
-        resultsEl.style.display = 'block';
-      })
-      .catch(function (err) {
-        btn.disabled = false;
-        msg.textContent = 'Request failed: ' + err.message; msg.className = 'msg err';
-      });
-  });
-
-  var savedPw = null;
-  try { savedPw = sessionStorage.getItem('bassAdminPw'); } catch (_) {}
-  if (savedPw) unlock(savedPw, { silent: true });
-})();
-</script>
-</body>
-</html>`;
-
-// ── "Verify Pulse" dashboard — served at GET /dashboard (or /pulse) on this
-// Worker's own domain. A deliberately distinct visual identity from the
-// admin page above (sage/paper editorial look vs. the admin page's plain
-// utility styling) — connected to the rest of this Worker only through the
-// same-origin fetch() calls below, not through shared markup or CSS.
-// Same password-gate pattern as the admin page's own login, except the
-// password is kept in this viewer's localStorage (not sessionStorage) so a
-// repeat visitor doesn't have to re-enter it — nothing is ever embedded in
-// this page's source. NOTE: any backslash inside this template literal must
-// be doubled (see the ADMIN_PAGE_HTML comment above for why).
-const DASHBOARD_HTML = `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-<title>Verify Pulse</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Instrument+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
-<style>
-  html { scroll-padding-top: env(safe-area-inset-top, 0px); }
-  img { max-width: 100%; }
-  [hidden]:not([hidden=until-found]) { display: none !important; }
-
-  /* ── Tokens — an editorial, sage/paper identity, deliberately distinct
-     from the extension's violet UI. Only the fetch logic connects them. ── */
-  :root {
-    color-scheme: light;
-    box-sizing: border-box;
-    --paper:       #f6f7f5;
-    --surface:     #ffffff;
-    --surface-2:   #eef0ea;
-    --ink:         #17201c;
-    --ink-2:       #43524a;
-    --ink-muted:   #7c8a80;
-    --line:        #dde2da;
-    --border:      rgba(23,32,28,0.10);
-    --accent:      #176247;
-    --accent-ink:  #ffffff;
-    --accent-wash: rgba(23,98,71,0.07);
-    --good:        #176247;
-    --good-wash:   rgba(23,98,71,0.07);
-    --warn:        #93650f;
-    --warn-wash:   rgba(147,101,15,0.10);
-    --crit:        #a23c2e;
-    --crit-wash:   rgba(162,60,46,0.08);
-    --shadow:      0 1px 2px rgba(23,32,28,0.04), 0 14px 32px -12px rgba(23,32,28,0.14);
-  }
-  @media (prefers-color-scheme: dark) {
-    :root:not([data-theme="light"]) {
-      color-scheme: dark;
-      --paper:       #0f130f;
-      --surface:     #171c18;
-      --surface-2:   #202620;
-      --ink:         #edf1ee;
-      --ink-2:       #aab6ae;
-      --ink-muted:   #7c8a80;
-      --line:        #2b332c;
-      --border:      rgba(237,241,238,0.10);
-      --accent:      #5fc9a1;
-      --accent-ink:  #0c1f16;
-      --accent-wash: rgba(95,201,161,0.12);
-      --good:        #5fc9a1;
-      --good-wash:   rgba(95,201,161,0.12);
-      --warn:        #e0ab4a;
-      --warn-wash:   rgba(224,171,74,0.14);
-      --crit:        #e2795f;
-      --crit-wash:   rgba(226,121,95,0.14);
-      --shadow:      0 1px 2px rgba(0,0,0,0.35), 0 16px 36px -14px rgba(0,0,0,0.55);
-    }
-  }
-  :root[data-theme="dark"] {
-    color-scheme: dark;
-    --paper:       #0f130f;
-    --surface:     #171c18;
-    --surface-2:   #202620;
-    --ink:         #edf1ee;
-    --ink-2:       #aab6ae;
-    --ink-muted:   #7c8a80;
-    --line:        #2b332c;
-    --border:      rgba(237,241,238,0.10);
-    --accent:      #5fc9a1;
-    --accent-ink:  #0c1f16;
-    --accent-wash: rgba(95,201,161,0.12);
-    --good:        #5fc9a1;
-    --good-wash:   rgba(95,201,161,0.12);
-    --warn:        #e0ab4a;
-    --warn-wash:   rgba(224,171,74,0.14);
-    --crit:        #e2795f;
-    --crit-wash:   rgba(226,121,95,0.14);
-    --shadow:      0 1px 2px rgba(0,0,0,0.35), 0 16px 36px -14px rgba(0,0,0,0.55);
-  }
-
-  * { box-sizing: border-box; }
-  body {
-    margin: 0;
-    background: var(--paper); color: var(--ink);
-    font: 14px 'Instrument Sans', system-ui, -apple-system, "Segoe UI", sans-serif;
-    padding-inline: 24px; padding-block: 28px 56px;
-    padding-top: calc(28px + env(safe-area-inset-top, 0px));
-    padding-bottom: calc(56px + env(safe-area-inset-bottom, 0px));
-    max-width: 1180px; margin: 0 auto;
-  }
-  .serif { font-family: 'Instrument Serif', Georgia, serif; }
-  .tabular { font-variant-numeric: tabular-nums; }
-  h1, h2, h3 { text-wrap: balance; margin: 0; }
-  a { color: var(--accent); }
-
-  /* ── Top bar ────────────────────────────────────────────────────────── */
-  .topbar {
-    display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between;
-    gap: 14px; padding-bottom: 20px; margin-bottom: 26px; border-bottom: 1px solid var(--line);
-  }
-  .brand-text h1 {
-    font-family: 'Instrument Serif', Georgia, serif; font-style: italic; font-weight: 400;
-    font-size: 34px; letter-spacing: -0.01em; color: var(--ink);
-  }
-  .brand-text h1 em { font-style: italic; color: var(--accent); }
-  .brand-text p { margin: 3px 0 0; font-size: 12.5px; color: var(--ink-muted); letter-spacing: .01em; }
-  .topbar-right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-
-  .range-group { display: flex; gap: 3px; background: var(--surface-2); border-radius: 999px; padding: 3px; }
-  .range-btn {
-    border: none; background: transparent; color: var(--ink-2); font: inherit; font-size: 12.5px;
-    font-weight: 500; padding: 6px 13px; border-radius: 999px; cursor: pointer; transition: all .15s;
-  }
-  .range-btn:hover { color: var(--ink); }
-  .range-btn.active { background: var(--surface); color: var(--accent); font-weight: 600; box-shadow: var(--shadow); }
-
-  .custom-range { display: none; align-items: center; gap: 6px; }
-  .custom-range.open { display: flex; }
-  .custom-range input {
-    font: inherit; font-size: 12px; padding: 6px 8px; border-radius: 8px;
-    border: 1px solid var(--border); background: var(--surface); color: var(--ink);
-  }
-  .icon-btn {
-    border: 1px solid var(--border); background: var(--surface); color: var(--ink-2);
-    border-radius: 999px; padding: 7px 14px; font: inherit; font-size: 12px; font-weight: 500; cursor: pointer;
-    transition: border-color .15s, color .15s;
-  }
-  .icon-btn:hover { color: var(--ink); border-color: var(--ink-muted); }
-
-  .status-line { font-size: 11.5px; color: var(--ink-muted); margin-top: -14px; margin-bottom: 24px; }
-
-  /* ── Cards & grid ───────────────────────────────────────────────────── */
-  .card {
-    background: var(--surface); border: 1px solid var(--border); border-radius: 18px;
-    padding: 20px 22px; box-shadow: var(--shadow);
-  }
-  .section { margin-bottom: 24px; }
-  .section-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 14px; gap: 10px; }
-  .section-head h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--ink-muted); font-weight: 600; }
-  .section-head .hint { font-size: 12px; color: var(--ink-muted); font-style: italic; font-family: 'Instrument Serif', Georgia, serif; }
-
-  .kpi-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
-  .kpi-tile { display: flex; flex-direction: column; gap: 7px; }
-  .kpi-label { font-size: 11px; color: var(--ink-muted); font-weight: 600; text-transform: uppercase; letter-spacing: .05em; }
-  .kpi-value { font-family: 'Instrument Serif', Georgia, serif; font-size: 40px; font-weight: 400; letter-spacing: -0.01em; line-height: 1; color: var(--ink); }
-  .kpi-sub { font-size: 12px; color: var(--ink-2); }
-
-  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
-  .three-col { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
-
-  /* ── Status tiles (page type) ──────────────────────────────────────── */
-  .status-tile {
-    border-radius: 14px; padding: 16px 18px; display: flex; flex-direction: column; gap: 5px;
-    border: 1px solid var(--border);
-  }
-  .status-tile .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; margin-right: 7px; }
-  .status-tile .label { font-size: 12px; font-weight: 600; display: flex; align-items: center; color: var(--ink-2); }
-  .status-tile .value { font-family: 'Instrument Serif', Georgia, serif; font-size: 30px; font-weight: 400; letter-spacing: -0.01em; color: var(--ink); }
-  .status-tile .pct { font-size: 11.5px; color: var(--ink-muted); }
-  .status-tile.good  { background: var(--good-wash); }
-  .status-tile.warn  { background: var(--warn-wash); }
-  .status-tile.crit  { background: var(--crit-wash); }
-  .status-tile.good .dot { background: var(--good); }
-  .status-tile.warn .dot { background: var(--warn); }
-  .status-tile.crit .dot { background: var(--crit); }
-
-  /* ── Ranked horizontal bars ────────────────────────────────────────── */
-  .rank-list { display: flex; flex-direction: column; gap: 11px; }
-  .rank-row { display: grid; grid-template-columns: 128px 1fr 32px; align-items: center; gap: 10px; }
-  .rank-name { font-size: 12.5px; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .rank-track { position: relative; height: 8px; background: var(--surface-2); border-radius: 4px; overflow: hidden; }
-  .rank-fill { position: absolute; inset: 0 auto 0 0; height: 100%; border-radius: 4px; background: var(--accent); transition: width .35s ease; }
-  .rank-fill.mismatch { background: var(--crit); }
-  .rank-value { font-size: 12.5px; font-weight: 600; text-align: right; font-variant-numeric: tabular-nums; }
-  .empty-note { font-size: 12.5px; color: var(--ink-muted); font-style: italic; font-family: 'Instrument Serif', Georgia, serif; padding: 10px 2px; }
-
-  /* ── Table ─────────────────────────────────────────────────────────── */
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th { text-align: left; font-size: 10.5px; text-transform: uppercase; letter-spacing: .05em; color: var(--ink-muted); font-weight: 600; padding: 0 10px 9px; border-bottom: 1px solid var(--line); }
-  td { padding: 10px 10px; border-bottom: 1px solid var(--line); color: var(--ink-2); }
-  tr:last-child td { border-bottom: none; }
-  td.num, th.num { text-align: right; }
-  .table-wrap { overflow-x: auto; }
-  .rank-badge {
-    display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px;
-    border-radius: 50%; background: var(--accent-wash); color: var(--accent); font-size: 11px; font-weight: 700; margin-right: 9px;
-  }
-
-  footer { margin-top: 34px; font-size: 11.5px; color: var(--ink-muted); text-align: center; font-style: italic; font-family: 'Instrument Serif', Georgia, serif; }
-
-  /* ── Connect screen ────────────────────────────────────────────────── */
-  .connect-wrap { max-width: 420px; margin: 12vh auto 0; }
-  .connect-wrap .card { display: flex; flex-direction: column; gap: 12px; }
-  .connect-wrap h1 { font-family: 'Instrument Serif', Georgia, serif; font-style: italic; font-weight: 400; font-size: 24px; }
-  .connect-wrap label { font-size: 12px; font-weight: 600; color: var(--ink-2); margin-bottom: -6px; }
-  .connect-wrap input {
-    font: inherit; font-size: 14px; padding: 10px 12px; border-radius: 10px;
-    border: 1px solid var(--border); background: var(--surface-2); color: var(--ink); width: 100%;
-  }
-  .connect-wrap button {
-    font: inherit; font-size: 14px; font-weight: 600; padding: 10px 14px; border-radius: 10px;
-    border: none; background: var(--accent); color: var(--accent-ink); cursor: pointer; margin-top: 4px;
-  }
-  .connect-wrap button:hover { opacity: .9; }
-  .connect-msg { font-size: 12.5px; min-height: 16px; }
-  .connect-msg.err { color: var(--crit); }
-  .connect-msg.ok { color: var(--good); }
-
-  [hidden] { display: none !important; }
-
-  @media (max-width: 760px) {
-    .kpi-grid { grid-template-columns: repeat(2, 1fr); }
-    .two-col, .three-col { grid-template-columns: 1fr; }
-    .rank-row { grid-template-columns: 96px 1fr 30px; }
-  }
-</style>
-</head>
-<body>
-
-<!-- ── Connect screen — password stays only in this viewer's localStorage,
-     never in the page source. Mirrors the worker's own admin-page login. -->
-<div class="connect-wrap" id="connect-screen">
-  <div class="card">
-    <h1>Connect to <em style="color:var(--accent)">Verify Pulse</em></h1>
-    <p style="font-size:12.5px;color:var(--ink-2);margin:-6px 0 4px;">Reads live from your Booking Assistant Worker's admin API. Nothing is stored anywhere but this browser.</p>
-    <label for="worker-url-input">Worker URL</label>
-    <input id="worker-url-input" type="text" value="" spellcheck="false">
-    <label for="worker-pw-input">Admin password</label>
-    <input id="worker-pw-input" type="password" spellcheck="false">
-    <button id="connect-btn">Connect</button>
-    <p class="connect-msg" id="connect-msg"></p>
-  </div>
-</div>
-
-<!-- ── Dashboard ─────────────────────────────────────────────────────── -->
-<div id="dashboard" hidden>
-  <div class="topbar">
-    <div class="brand-text">
-      <h1>Verify <em>Pulse</em></h1>
-      <p>Booking Assistant — AI Verify usage &amp; quality</p>
-    </div>
-    <div class="topbar-right">
-      <div class="range-group" id="range-group">
-        <button class="range-btn" data-range="1">Today</button>
-        <button class="range-btn active" data-range="7">7D</button>
-        <button class="range-btn" data-range="30">30D</button>
-        <button class="range-btn" data-range="90">90D</button>
-        <button class="range-btn" data-range="all">All-time</button>
-        <button class="range-btn" data-range="custom">Custom…</button>
-      </div>
-      <div class="custom-range" id="custom-range">
-        <input type="datetime-local" id="custom-start">
-        <span style="color:var(--ink-muted);font-size:12px;">to</span>
-        <input type="datetime-local" id="custom-end">
-        <button class="icon-btn" id="custom-apply-btn">Apply</button>
-      </div>
-      <button class="icon-btn" id="refresh-btn">↻ Refresh</button>
-      <button class="icon-btn" id="disconnect-btn">Disconnect</button>
-    </div>
-  </div>
-
-  <p class="status-line" id="status-line">Loading…</p>
-
-  <div class="section">
-    <div class="kpi-grid">
-      <div class="card kpi-tile">
-        <span class="kpi-label">Unique Bookings Verified</span>
-        <span class="kpi-value tabular" id="kpi-bookings">—</span>
-        <span class="kpi-sub" id="kpi-bookings-sub">&nbsp;</span>
-      </div>
-      <div class="card kpi-tile">
-        <span class="kpi-label">Checkout Capture Rate</span>
-        <span class="kpi-value tabular" id="kpi-checkout-rate">—</span>
-        <span class="kpi-sub">Screenshots that were the expected page</span>
-      </div>
-      <div class="card kpi-tile">
-        <span class="kpi-label">Full-Match Rate</span>
-        <span class="kpi-value tabular" id="kpi-match-rate">—</span>
-        <span class="kpi-sub">Of checks with field data</span>
-      </div>
-      <div class="card kpi-tile">
-        <span class="kpi-label">Busiest Vendor</span>
-        <span class="kpi-value" id="kpi-top-vendor" style="font-size:24px;">—</span>
-        <span class="kpi-sub" id="kpi-top-vendor-sub">&nbsp;</span>
-      </div>
-    </div>
-  </div>
-
-  <div class="section">
-    <div class="section-head">
-      <h2>Screenshot classification</h2>
-      <span class="hint">What every captured screenshot turned out to be</span>
-    </div>
-    <div class="three-col">
-      <div class="status-tile good">
-        <span class="label"><span class="dot"></span>Checkout page</span>
-        <span class="value tabular" id="tile-checkout">—</span>
-        <span class="pct" id="tile-checkout-pct">expected — good</span>
-      </div>
-      <div class="status-tile crit">
-        <span class="label"><span class="dot"></span>Ticket shown instead</span>
-        <span class="value tabular" id="tile-ticket">—</span>
-        <span class="pct" id="tile-ticket-pct">checked after booking — flag</span>
-      </div>
-      <div class="status-tile warn">
-        <span class="label"><span class="dot"></span>Other / unclear</span>
-        <span class="value tabular" id="tile-other">—</span>
-        <span class="pct" id="tile-other-pct">not a checkout or a ticket</span>
-      </div>
-    </div>
-  </div>
-
-  <div class="section two-col">
-    <div class="card">
-      <div class="section-head" style="margin-bottom:16px;">
-        <h2>Top vendors</h2>
-        <span class="hint">by unique bookings</span>
-      </div>
-      <div class="rank-list" id="vendor-list"></div>
-    </div>
-    <div class="card">
-      <div class="section-head" style="margin-bottom:16px;">
-        <h2>Top experiences</h2>
-        <span class="hint">by unique bookings</span>
-      </div>
-      <div class="rank-list" id="product-list"></div>
-    </div>
-  </div>
-
-  <div class="section two-col">
-    <div class="card">
-      <div class="section-head" style="margin-bottom:16px;">
-        <h2>Match quality</h2>
-        <span class="hint" id="match-hint">&nbsp;</span>
-      </div>
-      <div class="rank-list">
-        <div class="rank-row">
-          <span class="rank-name">Full match</span>
-          <div class="rank-track"><div class="rank-fill" id="bar-full" style="background:var(--good)"></div></div>
-          <span class="rank-value tabular" id="val-full">—</span>
-        </div>
-        <div class="rank-row">
-          <span class="rank-name">Partial match</span>
-          <div class="rank-track"><div class="rank-fill" id="bar-partial" style="background:var(--warn)"></div></div>
-          <span class="rank-value tabular" id="val-partial">—</span>
-        </div>
-      </div>
-    </div>
-    <div class="card">
-      <div class="section-head" style="margin-bottom:16px;">
-        <h2>Most-mismatched fields</h2>
-        <span class="hint">where checks fail most</span>
-      </div>
-      <div class="rank-list" id="field-list"></div>
-    </div>
-  </div>
-
-  <div class="section">
-    <div class="card">
-      <div class="section-head" style="margin-bottom:16px;">
-        <h2>Per person</h2>
-        <span class="hint">for the selected window</span>
-      </div>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>Agent</th><th class="num">Checks run</th><th class="num">Unique bookings</th></tr></thead>
-          <tbody id="person-table-body"></tbody>
-        </table>
-      </div>
-    </div>
-  </div>
-
-  <footer id="footer-note">Verify Pulse reads live from the Booking Assistant Worker's usage log — no data is stored by this page.</footer>
-</div>
-
-<script>
-(function () {
-  var LS_URL = 'verifyPulseWorkerUrl';
-  var LS_PW  = 'verifyPulsePassword';
-
-  function $(id) { return document.getElementById(id); }
-  function escHtml(s) {
-    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
-      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
-    });
-  }
-  function pct(n, d) { return d > 0 ? Math.round((n / d) * 100) + '%' : '—'; }
+  // ── Analytics — merged in from the former separate /dashboard page.
+  // Reuses the same admin 'password' already unlocked above — no separate
+  // login, no localStorage, no other origin involved.
+  var pct = function (n, d) { return d > 0 ? Math.round((n / d) * 100) + '%' : '—'; };
   function fmtRange(startIso, endIso) {
     try {
       var opts = { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' };
@@ -1907,92 +1677,17 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     } catch (_) { return startIso + ' to ' + endIso; }
   }
 
-  var state = { workerUrl: '', password: '', rangeDays: 7, customStart: null, customEnd: null };
+  var anState = { rangeDays: 7, customStart: null, customEnd: null };
 
-  // Same-origin by construction (this page is served BY the Worker), so
-  // default straight to it — no URL to type or get wrong.
-  try { $('worker-url-input').value = location.origin; } catch (_) {}
-
-  // ── Connect screen ──────────────────────────────────────────────────
-  function tryStoredCreds() {
-    try {
-      var url = localStorage.getItem(LS_URL);
-      var pw = localStorage.getItem(LS_PW);
-      if (url && pw) return { url: url, pw: pw };
-    } catch (_) {}
-    return null;
-  }
-
-  function showDashboard(url, pw) {
-    state.workerUrl = url.replace(/\\/$/, '');
-    state.password = pw;
-    $('connect-screen').hidden = true;
-    $('dashboard').hidden = false;
-    loadData();
-  }
-
-  $('connect-btn').addEventListener('click', function () {
-    var url = $('worker-url-input').value.trim().replace(/\\/$/, '');
-    var pw = $('worker-pw-input').value;
-    var msg = $('connect-msg');
-    if (!url || !pw) { msg.textContent = 'Enter both a Worker URL and the admin password.'; msg.className = 'connect-msg err'; return; }
-    msg.textContent = 'Connecting…'; msg.className = 'connect-msg';
-    fetch(url + '/admin/usage-report-range?password=' + encodeURIComponent(pw) + '&start=' + encodeURIComponent(new Date(0).toISOString()))
-      .then(function (res) { return res.json().then(function (data) { return { ok: res.ok, data: data }; }); })
-      .then(function (r) {
-        if (!r.ok || !r.data.ok) { msg.textContent = (r.data && r.data.error) || 'Could not connect — check the URL and password.'; msg.className = 'connect-msg err'; return; }
-        try { localStorage.setItem(LS_URL, url); localStorage.setItem(LS_PW, pw); } catch (_) {}
-        msg.textContent = 'Connected.'; msg.className = 'connect-msg ok';
-        showDashboard(url, pw);
-      })
-      .catch(function (err) { msg.textContent = 'Request failed: ' + err.message; msg.className = 'connect-msg err'; });
-  });
-
-  $('disconnect-btn').addEventListener('click', function () {
-    try { localStorage.removeItem(LS_URL); localStorage.removeItem(LS_PW); } catch (_) {}
-    location.reload();
-  });
-
-  // ── Date range control ──────────────────────────────────────────────
   function computeRange() {
-    if (state.rangeDays === 'custom' && state.customStart && state.customEnd) {
-      return { start: state.customStart, end: state.customEnd };
+    if (anState.rangeDays === 'custom' && anState.customStart && anState.customEnd) {
+      return { start: anState.customStart, end: anState.customEnd };
     }
     var end = new Date();
-    var start;
-    if (state.rangeDays === 'all') {
-      start = new Date(0);
-    } else {
-      start = new Date(end.getTime() - state.rangeDays * 24 * 60 * 60 * 1000);
-    }
+    var start = anState.rangeDays === 'all' ? new Date(0) : new Date(end.getTime() - anState.rangeDays * 24 * 60 * 60 * 1000);
     return { start: start.toISOString(), end: end.toISOString() };
   }
 
-  document.querySelectorAll('.range-btn').forEach(function (btn) {
-    btn.addEventListener('click', function () {
-      var range = btn.getAttribute('data-range');
-      document.querySelectorAll('.range-btn').forEach(function (b) { b.classList.remove('active'); });
-      btn.classList.add('active');
-      if (range === 'custom') {
-        $('custom-range').classList.add('open');
-        return;
-      }
-      $('custom-range').classList.remove('open');
-      state.rangeDays = range === 'all' ? 'all' : parseInt(range, 10);
-      loadData();
-    });
-  });
-  $('custom-apply-btn').addEventListener('click', function () {
-    var s = $('custom-start').value, e = $('custom-end').value;
-    if (!s || !e) return;
-    state.rangeDays = 'custom';
-    state.customStart = new Date(s).toISOString();
-    state.customEnd = new Date(e).toISOString();
-    loadData();
-  });
-  $('refresh-btn').addEventListener('click', loadData);
-
-  // ── Rendering ───────────────────────────────────────────────────────
   function renderRankList(el, rows, opts) {
     opts = opts || {};
     if (!rows.length) {
@@ -2010,37 +1705,36 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     }).join('');
   }
 
-  function render(d, range) {
-    $('status-line').textContent = 'Showing ' + fmtRange(range.start, range.end) + ' · ' + (d.totalEvents || 0) + ' logged event(s) · updated ' + new Date().toLocaleTimeString();
+  function renderAnalytics(d, range) {
+    document.getElementById('status-line').textContent = 'Showing ' + fmtRange(range.start, range.end) + ' · ' + (d.totalEvents || 0) + ' logged event(s) · updated ' + new Date().toLocaleTimeString();
 
-    $('kpi-bookings').textContent = d.uniqueBookingCount;
-    $('kpi-bookings-sub').textContent = d.checksWithData + ' with field-level checks';
+    document.getElementById('kpi-bookings').textContent = d.uniqueBookingCount;
+    document.getElementById('kpi-bookings-sub').textContent = d.checksWithData + ' with field-level checks';
 
     var totalTagged = d.checkoutBookingCount + d.ticketBookingCount + d.otherPageBookingCount;
-    $('kpi-checkout-rate').textContent = pct(d.checkoutBookingCount, totalTagged);
-    $('kpi-match-rate').textContent = pct(d.fullMatchChecks, d.checksWithData);
+    document.getElementById('kpi-checkout-rate').textContent = pct(d.checkoutBookingCount, totalTagged);
+    document.getElementById('kpi-match-rate').textContent = pct(d.fullMatchChecks, d.checksWithData);
 
     var topVendor = d.perVendorUniqueBookings[0];
-    $('kpi-top-vendor').textContent = topVendor ? topVendor[0] : '—';
-    $('kpi-top-vendor-sub').textContent = topVendor ? topVendor[1] + ' unique booking(s)' : 'No vendor data yet';
+    document.getElementById('kpi-top-vendor').textContent = topVendor ? topVendor[0] : '—';
+    document.getElementById('kpi-top-vendor-sub').textContent = topVendor ? topVendor[1] + ' unique booking(s)' : 'No vendor data yet';
 
-    $('tile-checkout').textContent = d.checkoutBookingCount;
-    $('tile-ticket').textContent = d.ticketBookingCount;
-    $('tile-other').textContent = d.otherPageBookingCount;
-    $('tile-checkout-pct').textContent = pct(d.checkoutBookingCount, totalTagged) + ' of tagged screenshots — good';
-    $('tile-ticket-pct').textContent = pct(d.ticketBookingCount, totalTagged) + ' of tagged screenshots — flag';
-    $('tile-other-pct').textContent = pct(d.otherPageBookingCount, totalTagged) + ' of tagged screenshots';
+    document.getElementById('tile-checkout').textContent = d.checkoutBookingCount;
+    document.getElementById('tile-ticket').textContent = d.ticketBookingCount;
+    document.getElementById('tile-other').textContent = d.otherPageBookingCount;
+    document.getElementById('tile-checkout-pct').textContent = pct(d.checkoutBookingCount, totalTagged) + ' of tagged screenshots — good';
+    document.getElementById('tile-ticket-pct').textContent = pct(d.ticketBookingCount, totalTagged) + ' of tagged screenshots — flag';
+    document.getElementById('tile-other-pct').textContent = pct(d.otherPageBookingCount, totalTagged) + ' of tagged screenshots';
 
-    renderRankList($('vendor-list'), d.perVendorUniqueBookings.map(function (r) { return { name: r[0], value: r[1] }; }));
-    renderRankList($('product-list'), d.perProductUniqueBookings.map(function (r) { return { name: r.product + (r.vendor ? ' · ' + r.vendor : ''), value: r.uniqueBookingCount }; }));
-    renderRankList($('field-list'), d.fieldMismatchCounts.map(function (r) { return { name: r[0], value: r[1] }; }), { mismatch: true });
+    renderRankList(document.getElementById('vendor-list'), d.perVendorUniqueBookings.map(function (r) { return { name: r[0], value: r[1] }; }));
+    renderRankList(document.getElementById('product-list'), d.perProductUniqueBookings.map(function (r) { return { name: r.product + (r.vendor ? ' · ' + r.vendor : ''), value: r.uniqueBookingCount }; }));
+    renderRankList(document.getElementById('field-list'), d.fieldMismatchCounts.map(function (r) { return { name: r[0], value: r[1] }; }), { mismatch: true });
 
     var matchTotal = d.fullMatchChecks + d.partialMatchChecks;
-    $('match-hint').textContent = matchTotal + ' check(s) with field data';
-    $('val-full').textContent = d.fullMatchChecks;
-    $('val-partial').textContent = d.partialMatchChecks;
-    $('bar-full').style.width = matchTotal ? Math.max(4, Math.round((d.fullMatchChecks / matchTotal) * 100)) + '%' : '0%';
-    $('bar-partial').style.width = matchTotal ? Math.max(4, Math.round((d.partialMatchChecks / matchTotal) * 100)) + '%' : '0%';
+    document.getElementById('val-full').textContent = d.fullMatchChecks;
+    document.getElementById('val-partial').textContent = d.partialMatchChecks;
+    document.getElementById('bar-full').style.width = matchTotal ? Math.max(4, Math.round((d.fullMatchChecks / matchTotal) * 100)) + '%' : '0%';
+    document.getElementById('bar-partial').style.width = matchTotal ? Math.max(4, Math.round((d.partialMatchChecks / matchTotal) * 100)) + '%' : '0%';
 
     var personRows = d.perPersonUniqueBookings.map(function (row) {
       var email = row[0], uniqueCount = row[1];
@@ -2048,12 +1742,10 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       return { email: email, checks: checksRow ? checksRow[1] : 0, unique: uniqueCount };
     });
     d.perPersonCheckCounts.forEach(function (c) {
-      if (!personRows.some(function (r) { return r.email === c[0]; })) {
-        personRows.push({ email: c[0], checks: c[1], unique: 0 });
-      }
+      if (!personRows.some(function (r) { return r.email === c[0]; })) personRows.push({ email: c[0], checks: c[1], unique: 0 });
     });
     personRows.sort(function (a, b) { return b.checks - a.checks; });
-    $('person-table-body').innerHTML = personRows.length
+    document.getElementById('person-table-body').innerHTML = personRows.length
       ? personRows.map(function (r, i) {
           return '<tr><td><span class="rank-badge">' + (i + 1) + '</span>' + escHtml(r.email) + '</td>' +
             '<td class="num tabular">' + r.checks + '</td><td class="num tabular">' + r.unique + '</td></tr>';
@@ -2061,28 +1753,50 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       : '<tr><td colspan="3" class="empty-note">No one has used AI Verify in this range yet.</td></tr>';
   }
 
-  function loadData() {
+  function loadAnalyticsData() {
+    if (!password) return;
     var range = computeRange();
-    $('status-line').textContent = 'Loading…';
-    fetch(state.workerUrl + '/admin/usage-report-range?password=' + encodeURIComponent(state.password) +
+    document.getElementById('status-line').textContent = 'Loading…';
+    fetch('/admin/usage-report-range?password=' + encodeURIComponent(password) +
       '&start=' + encodeURIComponent(range.start) + '&end=' + encodeURIComponent(range.end))
       .then(function (res) { return res.json().then(function (data) { return { ok: res.ok, data: data }; }); })
       .then(function (r) {
         if (!r.ok || !r.data.ok) {
-          $('status-line').textContent = 'Could not load data: ' + ((r.data && r.data.error) || ('HTTP ' + (r.status || '?')));
+          document.getElementById('status-line').textContent = 'Could not load data: ' + ((r.data && r.data.error) || ('HTTP ' + (r.status || '?')));
           return;
         }
-        render(r.data, range);
+        renderAnalytics(r.data, range);
       })
       .catch(function (err) {
-        $('status-line').textContent = 'Request failed: ' + err.message + ' — is the Worker deployed and reachable?';
+        document.getElementById('status-line').textContent = 'Request failed: ' + err.message;
       });
   }
 
-  var creds = tryStoredCreds();
-  if (creds) showDashboard(creds.url, creds.pw);
+  document.querySelectorAll('.range-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var range = btn.getAttribute('data-range');
+      document.querySelectorAll('.range-btn').forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      if (range === 'custom') { document.getElementById('custom-range').classList.add('open'); return; }
+      document.getElementById('custom-range').classList.remove('open');
+      anState.rangeDays = range === 'all' ? 'all' : parseInt(range, 10);
+      loadAnalyticsData();
+    });
+  });
+  document.getElementById('custom-apply-btn').addEventListener('click', function () {
+    var s = document.getElementById('custom-start').value, e = document.getElementById('custom-end').value;
+    if (!s || !e) return;
+    anState.rangeDays = 'custom';
+    anState.customStart = new Date(s).toISOString();
+    anState.customEnd = new Date(e).toISOString();
+    loadAnalyticsData();
+  });
+  document.getElementById('refresh-btn').addEventListener('click', loadAnalyticsData);
+
+  var savedPw = null;
+  try { savedPw = sessionStorage.getItem('bassAdminPw'); } catch (_) {}
+  if (savedPw) unlock(savedPw, { silent: true });
 })();
 </script>
-
 </body>
 </html>`;
