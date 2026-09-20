@@ -34,6 +34,11 @@
 //                                                   (also wired to a button on the admin page)
 //   GET  /admin/send-agent-report?password=...  -> send the per-person report to Slack right now
 //                                                   (also wired to a button on the admin page)
+//   GET  /admin/usage-report-range?password=...&start=<ISO>&end=<ISO>
+//                          -> { uniqueBookingCount, ticketBookingCount, ticketBookingIds,
+//                               perPersonCheckCounts, perPersonUniqueBookings, totalEvents }
+//                             for exactly that window — doesn't post to Slack, rendered
+//                             inline on the admin page (its "Custom range report" card)
 //   GET  /admin/config?password=...           -> secret/binding status (admin-only)
 //   POST /admin/request-code { password } -> generate + Slack-post an admin
 //                                             code, reusable all day (admin-only)
@@ -41,28 +46,33 @@
 //                             adminMode is true only for a matched admin
 //                             code — false for a matched instructions code
 //
-// Usage reports — two separate reports, each posted automatically once a
-// day (same cron as the instructions code) to the confirm-flag Slack
-// channel, and each postable any time on demand via its own admin page
-// button ("Send usage report now" / "Send per-person report now"):
+// Usage tracking — one permanent, append-only KV event log (verifylog: keys,
+// each a random-UUID key with the actual data in its KV metadata: bookingId,
+// email, isCheckoutPage, at). Every /verify call that carries a bookingId
+// and/or agentEmail writes one entry; nothing is ever overwritten, so any
+// report — all-time, last-24h, or an arbitrary custom range — is just a
+// filter + aggregation over this same log, computed at read time
+// (listVerifyEvents + summarizeEvents). There's no separate step or button
+// an agent needs to remember to generate this data, since the extension
+// runs AI Verify itself the instant a screenshot is captured, pasted, or
+// uploaded (not gated behind a manual "AI Verify" click).
+//
+// Three ways to read it, all admin-page buttons/cards plus a matching daily
+// cron post (except the custom range, which is on-demand only):
 //   1. Totals (sendUsageReportToSlack) — unique bookings that have run AI
-//      Verify, all-time (verifyseen: KV keys), and of those, how many were
-//      flagged for showing an already-issued ticket instead of the expected
-//      checkout page (verifyticket: KV keys). Both cumulative since this
-//      shipped, not a daily/weekly delta — there's no historical data from
-//      before these existed to backfill from.
+//      Verify, all-time, and of those, how many were flagged for showing an
+//      already-issued ticket instead of the expected checkout page. Both
+//      cumulative since this shipped, not a daily/weekly delta — there's no
+//      historical data from before this existed to backfill from.
 //   2. Per-person (sendAgentUsageReportToSlack) — who's using it: checks run
-//      per person over a rolling last 24 hours (verifyevent: KV keys, each
-//      auto-expiring after 48h — a fresh short-lived event per check, not a
-//      running counter, so this stays a true "last 24h as of right now"
-//      figure whenever it's read), plus total unique bookings each person
-//      has actioned, all-time (agentbooking: KV keys, one permanent key per
-//      agent+booking pair).
-// All of the above are recorded automatically by every /verify call that
-// carries a bookingId and/or agentEmail — there's no separate step or
-// button an agent needs to remember, since the extension runs AI Verify
-// itself the instant a screenshot is captured, pasted, or uploaded (not
-// gated behind a manual "AI Verify" click).
+//      per person over a true rolling last 24 hours (recomputed from the
+//      log at read time, not a calendar-day bucket), listing every person
+//      who has ever logged an event so someone at 0 today still shows up
+//      rather than silently disappearing — plus total unique bookings each
+//      person has actioned, all-time.
+//   3. Custom range (handleAdminUsageReportRange) — the same totals and
+//      per-person breakdown as above, but for whatever start/end window is
+//      asked for instead of last-24h or all-time.
 //
 // Every meaningful operation (Slack calls, OpenAI calls) appends a
 // {step, ok, detail, at} entry to a `steps` array that's returned in the
@@ -119,7 +129,7 @@
 
 // Bump this string whenever you paste a new version into the dashboard —
 // visiting GET /debug-env instantly confirms whether a deploy took effect.
-const WORKER_VERSION = '2026-09-20-02';
+const WORKER_VERSION = '2026-09-20-03';
 
 // Formats an ISO timestamp as a clean IST string, e.g. "6 Sep 2026, 10:44 PM IST".
 function formatIST(isoString) {
@@ -184,6 +194,10 @@ export default {
 
     if (request.method === 'GET' && url.pathname === '/admin/send-agent-report') {
       return handleAdminSendAgentReport(request, env, url);
+    }
+
+    if (request.method === 'GET' && url.pathname === '/admin/usage-report-range') {
+      return handleAdminUsageReportRange(request, env, url);
     }
 
     if (request.method === 'GET' && url.pathname === '/admin/config') {
@@ -583,115 +597,89 @@ Rules:
     return cors(JSON.stringify({ error: lastError || 'AI Verify failed', raw: lastRaw, steps }), 502);
   }
 
-  // Fire-and-forget: marks this booking "used" for the usage report, and
-  // separately flags it when the AI found an already-issued ticket instead
-  // of the expected checkout page. Never blocks the response on this.
-  if (bookingId) ctx.waitUntil(recordVerifyUsage(env, String(bookingId), result.isCheckoutPage));
-  if (agentEmail) ctx.waitUntil(recordVerifyAgentEvent(env, String(agentEmail)));
-  if (bookingId && agentEmail) ctx.waitUntil(recordAgentBookingUsage(env, String(agentEmail), String(bookingId)));
+  // Fire-and-forget: logs one permanent usage event for the reports below
+  // (booking-uniqueness, ticket-vs-checkout flag, per-person breakdowns, and
+  // custom date-range queries all derive from this same log). Never blocks
+  // the response on this.
+  ctx.waitUntil(recordVerifyEvent(env, { bookingId: bookingId || null, agentEmail: agentEmail || null, isCheckoutPage: result.isCheckoutPage }));
 
   return cors(JSON.stringify({ ...result, steps }), 200);
 }
 
 // ── Usage tracking + report ──────────────────────────────────────────────────
-// Every successful /verify call marks its booking as "used" via a permanent
-// KV key (put is idempotent per booking, so repeat checks on the same
-// booking never inflate the count), and separately marks it when the AI
-// found an already-issued ticket instead of the expected checkout page.
-// Both are all-time, cumulative counts — built by listing keys by prefix
-// rather than keeping a separate counter that could drift out of sync.
-function verifySeenKey(id) { return `verifyseen:${id}`; }
-function verifyTicketKey(id) { return `verifyticket:${id}`; }
+// One permanent, append-only event log — every successful /verify call that
+// carries a bookingId and/or agentEmail writes one entry (never overwritten,
+// no TTL), so any report (all-time, last-24h, or an arbitrary custom range)
+// is just a filter + aggregation over the same data, computed at read time.
+// Cheap at this team's scale (a few dozen entries a day at most).
+const VERIFY_LOG_PREFIX = 'verifylog:';
 
-async function recordVerifyUsage(env, bookingId, isCheckoutPage) {
-  if (!env.CONFIG || !bookingId) return;
-  const now = new Date().toISOString();
-  await env.CONFIG.put(verifySeenKey(bookingId), now);
-  if (isCheckoutPage === false) {
-    await env.CONFIG.put(verifyTicketKey(bookingId), now);
-  }
-}
-
-// Cloudflare KV lists at most 1000 keys per call — page through with the
-// cursor so a growing history never silently under-counts.
-async function listKvIdsByPrefix(env, prefix) {
-  const ids = [];
-  let cursor;
-  do {
-    const page = await env.CONFIG.list({ prefix, cursor });
-    for (const k of page.keys) ids.push(k.name.slice(prefix.length));
-    cursor = page.list_complete ? undefined : page.cursor;
-  } while (cursor);
-  return ids;
-}
-
-// Per-agent activity, for the "who's using it, and how much" half of the
-// report. Each /verify call that carries an agentEmail writes one
-// short-lived event (not a running counter) so the count can be a true
-// rolling last-24-hours window no matter when it's read — a daily cron post
-// or an on-demand click of the admin page's button. KV list() returns each
-// key's metadata directly, so tallying needs no extra per-key reads.
-const AGENT_EVENT_TTL_SECONDS = 172800; // 48h — comfortable margin over the 24h window this feeds
-
-async function recordVerifyAgentEvent(env, agentEmail) {
-  if (!env.CONFIG || !agentEmail) return;
-  await env.CONFIG.put(`verifyevent:${crypto.randomUUID()}`, '1', {
-    expirationTtl: AGENT_EVENT_TTL_SECONDS,
-    metadata: { email: agentEmail, at: new Date().toISOString() },
+async function recordVerifyEvent(env, { bookingId, agentEmail, isCheckoutPage }) {
+  if (!env.CONFIG) return;
+  if (!bookingId && !agentEmail) return; // nothing worth logging
+  await env.CONFIG.put(`${VERIFY_LOG_PREFIX}${crypto.randomUUID()}`, '1', {
+    metadata: {
+      bookingId: bookingId || null,
+      email: agentEmail || null,
+      isCheckoutPage: isCheckoutPage !== false, // default true unless explicitly flagged false
+      at: new Date().toISOString(),
+    },
   });
 }
 
-// Returns [[email, count], ...] for events in the last 24h, busiest first.
-async function getAgentUsageLast24h(env) {
-  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
-  const counts = new Map();
+// Cloudflare KV lists at most 1000 keys per call — page through with the
+// cursor. `start`/`end` accept anything Date can parse (or null/undefined
+// for an open end) and are inclusive.
+async function listVerifyEvents(env, { start, end } = {}) {
+  const startMs = start ? new Date(start).getTime() : -Infinity;
+  const endMs = end ? new Date(end).getTime() : Infinity;
+  const events = [];
   let cursor;
   do {
-    const page = await env.CONFIG.list({ prefix: 'verifyevent:', cursor });
+    const page = await env.CONFIG.list({ prefix: VERIFY_LOG_PREFIX, cursor });
     for (const k of page.keys) {
-      const email = k.metadata?.email;
-      const at = k.metadata?.at ? Date.parse(k.metadata.at) : NaN;
-      if (!email || !(at >= cutoff)) continue;
-      counts.set(email, (counts.get(email) || 0) + 1);
+      const m = k.metadata;
+      const atMs = m?.at ? Date.parse(m.at) : NaN;
+      if (Number.isNaN(atMs) || atMs < startMs || atMs > endMs) continue;
+      events.push(m);
     }
     cursor = page.list_complete ? undefined : page.cursor;
   } while (cursor);
-  return [...counts.entries()].sort((a, b) => b[1] - a[1]);
+  return events;
 }
 
-// Distinct bookings each person has actioned, all-time — a permanent key per
-// (agent, booking) pair, so re-verifying the same booking never inflates it.
-// Separate from verifyevent: above, which is a short-lived per-check event
-// used only for the last-24h activity count.
-function agentBookingKey(email, bookingId) { return `agentbooking:${email}:${bookingId}`; }
+// Aggregates a list of log entries into every shape the reports need —
+// shared by the totals report, the per-person report, and the custom-range
+// endpoint, so "unique booking" / "per person" always mean the same thing.
+function summarizeEvents(events) {
+  const bookingIds = new Set();
+  const ticketBookingIds = new Set();
+  const perPersonChecks = new Map();
+  const perPersonBookings = new Map(); // email -> Set(bookingId)
 
-async function recordAgentBookingUsage(env, agentEmail, bookingId) {
-  if (!env.CONFIG || !agentEmail || !bookingId) return;
-  await env.CONFIG.put(agentBookingKey(agentEmail, bookingId), new Date().toISOString());
-}
-
-// Returns [[email, uniqueBookingCount], ...] all-time, busiest first. Emails
-// never contain ":", so splitting each key's suffix on its last ":" cleanly
-// separates it from the (purely numeric) booking ID even though the email
-// itself may contain other characters.
-async function getAgentUniqueBookingCounts(env) {
-  const prefix = 'agentbooking:';
-  const perAgent = new Map();
-  let cursor;
-  do {
-    const page = await env.CONFIG.list({ prefix, cursor });
-    for (const k of page.keys) {
-      const suffix = k.name.slice(prefix.length);
-      const idx = suffix.lastIndexOf(':');
-      if (idx === -1) continue;
-      const email = suffix.slice(0, idx);
-      const bookingId = suffix.slice(idx + 1);
-      if (!perAgent.has(email)) perAgent.set(email, new Set());
-      perAgent.get(email).add(bookingId);
+  for (const e of events) {
+    if (e.bookingId) {
+      bookingIds.add(e.bookingId);
+      if (e.isCheckoutPage === false) ticketBookingIds.add(e.bookingId);
     }
-    cursor = page.list_complete ? undefined : page.cursor;
-  } while (cursor);
-  return [...perAgent.entries()].map(([email, set]) => [email, set.size]).sort((a, b) => b[1] - a[1]);
+    if (e.email) {
+      perPersonChecks.set(e.email, (perPersonChecks.get(e.email) || 0) + 1);
+      if (e.bookingId) {
+        if (!perPersonBookings.has(e.email)) perPersonBookings.set(e.email, new Set());
+        perPersonBookings.get(e.email).add(e.bookingId);
+      }
+    }
+  }
+
+  return {
+    uniqueBookingCount: bookingIds.size,
+    ticketBookingIds: [...ticketBookingIds],
+    ticketBookingCount: ticketBookingIds.size,
+    perPersonCheckCounts: [...perPersonChecks.entries()].sort((a, b) => b[1] - a[1]),
+    perPersonUniqueBookings: [...perPersonBookings.entries()]
+      .map(([email, set]) => [email, set.size])
+      .sort((a, b) => b[1] - a[1]),
+  };
 }
 
 // Posted automatically once a day via the cron `scheduled` handler below,
@@ -707,17 +695,16 @@ async function sendUsageReportToSlack(env) {
     return { ok: false, error: 'Worker misconfigured', steps };
   }
 
-  const usedIds = await listKvIdsByPrefix(env, 'verifyseen:');
-  const ticketIds = await listKvIdsByPrefix(env, 'verifyticket:');
+  const { uniqueBookingCount, ticketBookingCount, ticketBookingIds } = summarizeEvents(await listVerifyEvents(env));
 
   const MAX_LISTED = 30;
-  const ticketList = ticketIds.length
-    ? '\n' + ticketIds.slice(0, MAX_LISTED).join(', ') + (ticketIds.length > MAX_LISTED ? ` … +${ticketIds.length - MAX_LISTED} more` : '')
+  const ticketList = ticketBookingIds.length
+    ? '\n' + ticketBookingIds.slice(0, MAX_LISTED).join(', ') + (ticketBookingIds.length > MAX_LISTED ? ` … +${ticketBookingIds.length - MAX_LISTED} more` : '')
     : '';
 
   const text = `:bar_chart: *Booking Assistant — usage report*\n` +
-    `Unique bookings AI-verified (all-time): *${usedIds.length}*\n` +
-    `:rotating_light: Ticket screenshot used instead of checkout page (all-time): *${ticketIds.length}*${ticketList}`;
+    `Unique bookings AI-verified (all-time): *${uniqueBookingCount}*\n` +
+    `:rotating_light: Ticket screenshot used instead of checkout page (all-time): *${ticketBookingCount}*${ticketList}`;
 
   try {
     const res = await fetch('https://slack.com/api/chat.postMessage', {
@@ -732,7 +719,7 @@ async function sendUsageReportToSlack(env) {
     logStep('slack_chat_postMessage', data.ok === true, `HTTP ${res.status} — ${JSON.stringify(data).slice(0, 500)}`);
     return {
       ok: data.ok === true, error: data.ok ? null : data.error,
-      usedCount: usedIds.length, ticketCount: ticketIds.length, steps,
+      usedCount: uniqueBookingCount, ticketCount: ticketBookingCount, steps,
     };
   } catch (err) {
     logStep('slack_chat_postMessage', false, `Exception: ${err.message}`);
@@ -743,7 +730,9 @@ async function sendUsageReportToSlack(env) {
 // Posted automatically once a day alongside the report above — also wired
 // to its own admin page button ("Send per-person report now") since it's a
 // distinct question (who's using it) from the totals report (how much has
-// been used overall).
+// been used overall). Lists every person who has EVER logged an event (the
+// "roster"), not just those active in the last 24h, so someone at 0 today
+// still shows up rather than silently disappearing from the list.
 async function sendAgentUsageReportToSlack(env) {
   const steps = [];
   const logStep = (step, ok, detail) => steps.push({ step, ok, detail, at: new Date().toISOString() });
@@ -753,18 +742,28 @@ async function sendAgentUsageReportToSlack(env) {
     return { ok: false, error: 'Worker misconfigured', steps };
   }
 
-  const last24h = await getAgentUsageLast24h(env);
-  const allTime = await getAgentUniqueBookingCounts(env);
+  const allEvents = await listVerifyEvents(env);
+  const cutoffIso = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const last24hEvents = allEvents.filter(e => e.at >= cutoffIso);
 
-  const last24hLines = last24h.length
-    ? last24h.map(([email, count]) => `• ${email}: *${count}*`).join('\n')
-    : '_No AI Verify activity in the last 24 hours._';
-  const allTimeLines = allTime.length
-    ? allTime.map(([email, count]) => `• ${email}: *${count}*`).join('\n')
+  const allTime = summarizeEvents(allEvents);
+  const last24h = summarizeEvents(last24hEvents);
+
+  const roster = new Set(allEvents.map(e => e.email).filter(Boolean));
+  const last24hCountByEmail = new Map(last24h.perPersonCheckCounts);
+  const last24hFull = [...roster]
+    .map(email => [email, last24hCountByEmail.get(email) || 0])
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+
+  const last24hLines = last24hFull.length
+    ? last24hFull.map(([email, count]) => `• ${email}: *${count}*`).join('\n')
+    : '_No one has used AI Verify yet._';
+  const allTimeLines = allTime.perPersonUniqueBookings.length
+    ? allTime.perPersonUniqueBookings.map(([email, count]) => `• ${email}: *${count}*`).join('\n')
     : '_No AI Verify activity yet._';
 
   const text = `:bar_chart: *Booking Assistant — per-person usage report*\n\n` +
-    `*Checks run — last 24 hours:*\n${last24hLines}\n\n` +
+    `*Checks run — last 24 hours (everyone, including 0):*\n${last24hLines}\n\n` +
     `*Unique bookings actioned — all-time:*\n${allTimeLines}`;
 
   try {
@@ -780,7 +779,7 @@ async function sendAgentUsageReportToSlack(env) {
     logStep('slack_chat_postMessage', data.ok === true, `HTTP ${res.status} — ${JSON.stringify(data).slice(0, 500)}`);
     return {
       ok: data.ok === true, error: data.ok ? null : data.error,
-      last24hUsage: last24h, allTimeUsage: allTime, steps,
+      last24hUsage: last24hFull, allTimeUsage: allTime.perPersonUniqueBookings, steps,
     };
   } catch (err) {
     logStep('slack_chat_postMessage', false, `Exception: ${err.message}`);
@@ -810,6 +809,26 @@ async function handleAdminSendAgentReport(request, env, url) {
   }
   const result = await sendAgentUsageReportToSlack(env);
   return cors(JSON.stringify(result), result.ok ? 200 : 502);
+}
+
+// On-demand only — doesn't post to Slack, just returns the numbers so the
+// admin page can render them inline for whatever window was asked for.
+async function handleAdminUsageReportRange(request, env, url) {
+  if (!env.ADMIN_PASSWORD) {
+    return cors(JSON.stringify({ error: 'Worker misconfigured — set the ADMIN_PASSWORD secret' }), 500);
+  }
+  const password = url.searchParams.get('password') || '';
+  if (password !== env.ADMIN_PASSWORD) {
+    return cors(JSON.stringify({ error: 'Wrong password' }), 401);
+  }
+  if (!env.CONFIG) {
+    return cors(JSON.stringify({ error: 'No CONFIG KV namespace bound' }), 500);
+  }
+  const start = url.searchParams.get('start') || null;
+  const end = url.searchParams.get('end') || null;
+  const events = await listVerifyEvents(env, { start, end });
+  const summary = summarizeEvents(events);
+  return cors(JSON.stringify({ ok: true, start, end, totalEvents: events.length, ...summary }), 200);
 }
 
 // ── /confirm-flag — post to Slack (message + screenshot, unified) ─────────────
@@ -1029,7 +1048,7 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
   }
   label { display: block; font-size: 12px; color: #b0b0ba; margin-bottom: 6px; }
   .sub-label { font-size: 11px; color: #75757f; margin: -6px 0 10px; }
-  input[type=password], input[type=text], textarea {
+  input[type=password], input[type=text], input[type=datetime-local], textarea {
     width: 100%; padding: 9px 10px; border-radius: 7px; border: 1px solid #33353f;
     background: #0f1115; color: #e6e6ea; font-size: 14px; margin-bottom: 10px;
     font-family: inherit;
@@ -1125,6 +1144,21 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
 
     <div class="card">
       <div class="card-head">
+        <h2>🗓 Custom range report</h2>
+        <button type="button" class="info-btn" data-info="range-report">i</button>
+      </div>
+      <p class="sub-label" style="margin:0 0 12px">Fetch usage for any date/time window — shown right here, doesn't post to Slack.</p>
+      <label for="range-start-input">From</label>
+      <input type="datetime-local" id="range-start-input" />
+      <label for="range-end-input">To</label>
+      <input type="datetime-local" id="range-end-input" />
+      <button class="secondary" id="range-fetch-btn" style="margin-top:2px">Fetch</button>
+      <p class="msg" id="range-msg"></p>
+      <div id="range-results" style="display:none; margin-top:12px; font-size:13px; line-height:1.7;"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
         <h2>🩺 Status</h2>
         <button type="button" class="info-btn" data-info="status">i</button>
       </div>
@@ -1144,6 +1178,12 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
     return '<div><span>' + label + '</span><span><span class="dot ' + (ok ? 'ok' : 'bad') + '"></span>' + (ok ? 'yes' : 'no') + '</span></div>';
   }
 
+  function escHtml(s) {
+    return String(s || '').replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
   // ── Info popovers — one shared element, positioned near whichever (i)
   // button was clicked; closes on outside click, Escape, or a second click
   // on the same button.
@@ -1153,6 +1193,7 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
     'status': 'Shows which Cloudflare secrets and bindings this Worker can see \\u2014 never the values themselves, just whether each is configured. A red dot here usually explains a broken feature (e.g. no Slack token means Confirm & Flag can\\'t post).',
     'usage-report': 'Posts to the same Slack channel as Confirm & Flag: unique bookings AI-verified all-time, and how many of those were flagged for an already-issued ticket instead of a checkout screenshot (also all-time). Posts automatically once a day; this button sends it on demand too.',
     'agent-report': 'Posts to the same Slack channel: checks run per person over a true rolling last-24-hours window (not tied to calendar days), plus total unique bookings each person has actioned, all-time. Posts automatically once a day; this button sends it on demand too.',
+    'range-report': 'Pick any From/To window and fetch usage for exactly that period \\u2014 unique bookings, ticket-instead-of-checkout flags, and a per-person breakdown. Shown right here on the page, not posted to Slack, so you can explore freely without spamming the channel.',
   };
   var infoPopover = null;
   function closeInfoPopover() {
@@ -1285,10 +1326,50 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
       .then(function (r) {
         btn.disabled = false;
         if (!r.ok || !r.data.ok) { msg.textContent = (r.data && r.data.error) || 'Failed'; msg.className = 'msg err'; return; }
-        var last24hCount = (r.data.last24hUsage || []).length;
+        var rosterCount = (r.data.last24hUsage || []).length;
         var allTimeCount = (r.data.allTimeUsage || []).length;
-        msg.textContent = 'Sent — ' + last24hCount + ' agent(s) active in the last 24h, ' + allTimeCount + ' agent(s) with unique-booking history.';
+        msg.textContent = 'Sent — ' + rosterCount + ' known agent(s) listed, ' + allTimeCount + ' with unique-booking history.';
         msg.className = 'msg ok';
+      })
+      .catch(function (err) {
+        btn.disabled = false;
+        msg.textContent = 'Request failed: ' + err.message; msg.className = 'msg err';
+      });
+  });
+
+  document.getElementById('range-fetch-btn').addEventListener('click', function () {
+    var btn = this;
+    var msg = document.getElementById('range-msg');
+    var resultsEl = document.getElementById('range-results');
+    var startVal = document.getElementById('range-start-input').value;
+    var endVal = document.getElementById('range-end-input').value;
+    if (!startVal || !endVal) {
+      msg.textContent = 'Pick both a start and end.'; msg.className = 'msg err';
+      return;
+    }
+    var startIso = new Date(startVal).toISOString();
+    var endIso = new Date(endVal).toISOString();
+    btn.disabled = true;
+    resultsEl.style.display = 'none';
+    msg.textContent = 'Fetching…'; msg.className = 'msg';
+    fetch('/admin/usage-report-range?password=' + encodeURIComponent(password) +
+      '&start=' + encodeURIComponent(startIso) + '&end=' + encodeURIComponent(endIso))
+      .then(function (res) { return res.json().then(function (data) { return { ok: res.ok, data: data }; }); })
+      .then(function (r) {
+        btn.disabled = false;
+        if (!r.ok || !r.data.ok) { msg.textContent = (r.data && r.data.error) || 'Failed'; msg.className = 'msg err'; return; }
+        msg.textContent = '';
+        var d = r.data;
+        var perPersonLines = d.perPersonUniqueBookings.length
+          ? d.perPersonUniqueBookings.map(function (row) {
+              return '<div>' + escHtml(row[0]) + ': <b>' + row[1] + '</b> unique booking(s)</div>';
+            }).join('')
+          : '<div class="muted">No activity in this range.</div>';
+        resultsEl.innerHTML =
+          '<div><b>' + d.uniqueBookingCount + '</b> unique booking(s) verified</div>' +
+          '<div><b>' + d.ticketBookingCount + '</b> ticket-instead-of-checkout flag(s)</div>' +
+          '<div style="margin-top:8px"><b>Per person (unique bookings):</b></div>' + perPersonLines;
+        resultsEl.style.display = 'block';
       })
       .catch(function (err) {
         btn.disabled = false;
