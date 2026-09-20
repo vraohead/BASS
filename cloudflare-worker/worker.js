@@ -30,7 +30,9 @@
 //                            imageBase64?, mimeType?, verifiedAt }
 //                          -> { ok: true, steps: [...], screenshotError? }
 //   GET  /admin/send-daily-code?password=...    -> manually trigger the Slack post (for testing)
-//   GET  /admin/send-usage-report?password=...  -> send the usage report to Slack right now
+//   GET  /admin/send-usage-report?password=...  -> send the totals report to Slack right now
+//                                                   (also wired to a button on the admin page)
+//   GET  /admin/send-agent-report?password=...  -> send the per-person report to Slack right now
 //                                                   (also wired to a button on the admin page)
 //   GET  /admin/config?password=...           -> secret/binding status (admin-only)
 //   POST /admin/request-code { password } -> generate + Slack-post an admin
@@ -39,23 +41,28 @@
 //                             adminMode is true only for a matched admin
 //                             code — false for a matched instructions code
 //
-// Usage report — posted automatically once a day (same cron as the
-// instructions code) to the confirm-flag Slack channel, and postable any
-// time on demand via the admin page's "Send usage report now" button:
-//   1. Unique bookings that have run AI Verify, all-time (verifyseen: KV
-//      keys), and of those, how many were flagged for showing an
-//      already-issued ticket instead of the expected checkout page
-//      (verifyticket: KV keys) — both cumulative since this shipped, not a
-//      daily/weekly delta, since there's no historical data from before
-//      these existed to backfill from.
-//   2. Per-person AI Verify usage for a rolling last 24 hours, busiest
-//      first (verifyevent: KV keys, each auto-expiring after 48h — a fresh
-//      short-lived event per check, not a running counter, so this stays a
-//      true "last 24h as of right now" figure whenever it's read).
-// Both are recorded automatically by every /verify call — there's no
-// separate step or button an agent needs to remember, since the extension
-// runs AI Verify itself the instant a screenshot is captured, pasted, or
-// uploaded (not gated behind a manual "AI Verify" click).
+// Usage reports — two separate reports, each posted automatically once a
+// day (same cron as the instructions code) to the confirm-flag Slack
+// channel, and each postable any time on demand via its own admin page
+// button ("Send usage report now" / "Send per-person report now"):
+//   1. Totals (sendUsageReportToSlack) — unique bookings that have run AI
+//      Verify, all-time (verifyseen: KV keys), and of those, how many were
+//      flagged for showing an already-issued ticket instead of the expected
+//      checkout page (verifyticket: KV keys). Both cumulative since this
+//      shipped, not a daily/weekly delta — there's no historical data from
+//      before these existed to backfill from.
+//   2. Per-person (sendAgentUsageReportToSlack) — who's using it: checks run
+//      per person over a rolling last 24 hours (verifyevent: KV keys, each
+//      auto-expiring after 48h — a fresh short-lived event per check, not a
+//      running counter, so this stays a true "last 24h as of right now"
+//      figure whenever it's read), plus total unique bookings each person
+//      has actioned, all-time (agentbooking: KV keys, one permanent key per
+//      agent+booking pair).
+// All of the above are recorded automatically by every /verify call that
+// carries a bookingId and/or agentEmail — there's no separate step or
+// button an agent needs to remember, since the extension runs AI Verify
+// itself the instant a screenshot is captured, pasted, or uploaded (not
+// gated behind a manual "AI Verify" click).
 //
 // Every meaningful operation (Slack calls, OpenAI calls) appends a
 // {step, ok, detail, at} entry to a `steps` array that's returned in the
@@ -112,7 +119,7 @@
 
 // Bump this string whenever you paste a new version into the dashboard —
 // visiting GET /debug-env instantly confirms whether a deploy took effect.
-const WORKER_VERSION = '2026-09-20-01';
+const WORKER_VERSION = '2026-09-20-02';
 
 // Formats an ISO timestamp as a clean IST string, e.g. "6 Sep 2026, 10:44 PM IST".
 function formatIST(isoString) {
@@ -175,6 +182,10 @@ export default {
       return handleAdminSendUsageReport(request, env, url);
     }
 
+    if (request.method === 'GET' && url.pathname === '/admin/send-agent-report') {
+      return handleAdminSendAgentReport(request, env, url);
+    }
+
     if (request.method === 'GET' && url.pathname === '/admin/config') {
       return handleAdminGetConfig(request, env, url);
     }
@@ -198,6 +209,7 @@ export default {
   async scheduled(event, env, ctx) {
     ctx.waitUntil(sendDailyCodeToSlack(env));
     ctx.waitUntil(sendUsageReportToSlack(env));
+    ctx.waitUntil(sendAgentUsageReportToSlack(env));
   },
 };
 
@@ -576,6 +588,7 @@ Rules:
   // of the expected checkout page. Never blocks the response on this.
   if (bookingId) ctx.waitUntil(recordVerifyUsage(env, String(bookingId), result.isCheckoutPage));
   if (agentEmail) ctx.waitUntil(recordVerifyAgentEvent(env, String(agentEmail)));
+  if (bookingId && agentEmail) ctx.waitUntil(recordAgentBookingUsage(env, String(agentEmail), String(bookingId)));
 
   return cors(JSON.stringify({ ...result, steps }), 200);
 }
@@ -646,9 +659,45 @@ async function getAgentUsageLast24h(env) {
   return [...counts.entries()].sort((a, b) => b[1] - a[1]);
 }
 
+// Distinct bookings each person has actioned, all-time — a permanent key per
+// (agent, booking) pair, so re-verifying the same booking never inflates it.
+// Separate from verifyevent: above, which is a short-lived per-check event
+// used only for the last-24h activity count.
+function agentBookingKey(email, bookingId) { return `agentbooking:${email}:${bookingId}`; }
+
+async function recordAgentBookingUsage(env, agentEmail, bookingId) {
+  if (!env.CONFIG || !agentEmail || !bookingId) return;
+  await env.CONFIG.put(agentBookingKey(agentEmail, bookingId), new Date().toISOString());
+}
+
+// Returns [[email, uniqueBookingCount], ...] all-time, busiest first. Emails
+// never contain ":", so splitting each key's suffix on its last ":" cleanly
+// separates it from the (purely numeric) booking ID even though the email
+// itself may contain other characters.
+async function getAgentUniqueBookingCounts(env) {
+  const prefix = 'agentbooking:';
+  const perAgent = new Map();
+  let cursor;
+  do {
+    const page = await env.CONFIG.list({ prefix, cursor });
+    for (const k of page.keys) {
+      const suffix = k.name.slice(prefix.length);
+      const idx = suffix.lastIndexOf(':');
+      if (idx === -1) continue;
+      const email = suffix.slice(0, idx);
+      const bookingId = suffix.slice(idx + 1);
+      if (!perAgent.has(email)) perAgent.set(email, new Set());
+      perAgent.get(email).add(bookingId);
+    }
+    cursor = page.list_complete ? undefined : page.cursor;
+  } while (cursor);
+  return [...perAgent.entries()].map(([email, set]) => [email, set.size]).sort((a, b) => b[1] - a[1]);
+}
+
 // Posted automatically once a day via the cron `scheduled` handler below,
-// alongside the instructions code — also wired to a button on the admin
-// page ("Send usage report now") for an on-demand check any time.
+// alongside the instructions code — also wired to the admin page's "Send
+// usage report now" button for an on-demand check any time. Covers overall
+// totals only; per-person activity is a separate report (see below).
 async function sendUsageReportToSlack(env) {
   const steps = [];
   const logStep = (step, ok, detail) => steps.push({ step, ok, detail, at: new Date().toISOString() });
@@ -660,20 +709,15 @@ async function sendUsageReportToSlack(env) {
 
   const usedIds = await listKvIdsByPrefix(env, 'verifyseen:');
   const ticketIds = await listKvIdsByPrefix(env, 'verifyticket:');
-  const perAgent = await getAgentUsageLast24h(env);
 
   const MAX_LISTED = 30;
   const ticketList = ticketIds.length
     ? '\n' + ticketIds.slice(0, MAX_LISTED).join(', ') + (ticketIds.length > MAX_LISTED ? ` … +${ticketIds.length - MAX_LISTED} more` : '')
     : '';
-  const perAgentLines = perAgent.length
-    ? perAgent.map(([email, count]) => `• ${email}: *${count}*`).join('\n')
-    : '_No AI Verify activity in the last 24 hours._';
 
   const text = `:bar_chart: *Booking Assistant — usage report*\n` +
     `Unique bookings AI-verified (all-time): *${usedIds.length}*\n` +
-    `:rotating_light: Ticket screenshot used instead of checkout page (all-time): *${ticketIds.length}*${ticketList}\n\n` +
-    `*Per-person usage — last 24 hours:*\n${perAgentLines}`;
+    `:rotating_light: Ticket screenshot used instead of checkout page (all-time): *${ticketIds.length}*${ticketList}`;
 
   try {
     const res = await fetch('https://slack.com/api/chat.postMessage', {
@@ -688,7 +732,55 @@ async function sendUsageReportToSlack(env) {
     logStep('slack_chat_postMessage', data.ok === true, `HTTP ${res.status} — ${JSON.stringify(data).slice(0, 500)}`);
     return {
       ok: data.ok === true, error: data.ok ? null : data.error,
-      usedCount: usedIds.length, ticketCount: ticketIds.length, perAgentUsage: perAgent, steps,
+      usedCount: usedIds.length, ticketCount: ticketIds.length, steps,
+    };
+  } catch (err) {
+    logStep('slack_chat_postMessage', false, `Exception: ${err.message}`);
+    return { ok: false, error: err.message, steps };
+  }
+}
+
+// Posted automatically once a day alongside the report above — also wired
+// to its own admin page button ("Send per-person report now") since it's a
+// distinct question (who's using it) from the totals report (how much has
+// been used overall).
+async function sendAgentUsageReportToSlack(env) {
+  const steps = [];
+  const logStep = (step, ok, detail) => steps.push({ step, ok, detail, at: new Date().toISOString() });
+
+  if (!env.SLACK_BOT_TOKEN || !env.CONFIG) {
+    logStep('check_config', false, 'SLACK_BOT_TOKEN secret or CONFIG KV binding missing');
+    return { ok: false, error: 'Worker misconfigured', steps };
+  }
+
+  const last24h = await getAgentUsageLast24h(env);
+  const allTime = await getAgentUniqueBookingCounts(env);
+
+  const last24hLines = last24h.length
+    ? last24h.map(([email, count]) => `• ${email}: *${count}*`).join('\n')
+    : '_No AI Verify activity in the last 24 hours._';
+  const allTimeLines = allTime.length
+    ? allTime.map(([email, count]) => `• ${email}: *${count}*`).join('\n')
+    : '_No AI Verify activity yet._';
+
+  const text = `:bar_chart: *Booking Assistant — per-person usage report*\n\n` +
+    `*Checks run — last 24 hours:*\n${last24hLines}\n\n` +
+    `*Unique bookings actioned — all-time:*\n${allTimeLines}`;
+
+  try {
+    const res = await fetch('https://slack.com/api/chat.postMessage', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${env.SLACK_BOT_TOKEN}`,
+        'Content-Type': 'application/json; charset=utf-8',
+      },
+      body: JSON.stringify({ channel: SLACK_CHANNEL_ID, text }),
+    });
+    const data = await res.json();
+    logStep('slack_chat_postMessage', data.ok === true, `HTTP ${res.status} — ${JSON.stringify(data).slice(0, 500)}`);
+    return {
+      ok: data.ok === true, error: data.ok ? null : data.error,
+      last24hUsage: last24h, allTimeUsage: allTime, steps,
     };
   } catch (err) {
     logStep('slack_chat_postMessage', false, `Exception: ${err.message}`);
@@ -705,6 +797,18 @@ async function handleAdminSendUsageReport(request, env, url) {
     return cors(JSON.stringify({ error: 'Wrong password' }), 401);
   }
   const result = await sendUsageReportToSlack(env);
+  return cors(JSON.stringify(result), result.ok ? 200 : 502);
+}
+
+async function handleAdminSendAgentReport(request, env, url) {
+  if (!env.ADMIN_PASSWORD) {
+    return cors(JSON.stringify({ error: 'Worker misconfigured — set the ADMIN_PASSWORD secret' }), 500);
+  }
+  const password = url.searchParams.get('password') || '';
+  if (password !== env.ADMIN_PASSWORD) {
+    return cors(JSON.stringify({ error: 'Wrong password' }), 401);
+  }
+  const result = await sendAgentUsageReportToSlack(env);
   return cors(JSON.stringify(result), result.ok ? 200 : 502);
 }
 
@@ -1004,9 +1108,19 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
         <h2>📊 Usage report</h2>
         <button type="button" class="info-btn" data-info="usage-report">i</button>
       </div>
-      <p class="sub-label" style="margin:0 0 12px">Posts automatically once a day. Click below to send it right now — unique bookings AI-verified (all-time), tickets flagged instead of checkout (all-time), and per-person usage for the last 24 hours.</p>
+      <p class="sub-label" style="margin:0 0 12px">Posts automatically once a day. Click below to send it right now — unique bookings AI-verified (all-time), and tickets flagged instead of checkout (all-time).</p>
       <button class="secondary" id="send-usage-report-btn">Send usage report now</button>
       <p class="msg" id="usage-report-msg"></p>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2>🧑‍💼 Per-person report</h2>
+        <button type="button" class="info-btn" data-info="agent-report">i</button>
+      </div>
+      <p class="sub-label" style="margin:0 0 12px">Posts automatically once a day. Click below to send it right now — who's using it: checks run in the last 24 hours, and total unique bookings actioned per person, all-time.</p>
+      <button class="secondary" id="send-agent-report-btn">Send per-person report now</button>
+      <p class="msg" id="agent-report-msg"></p>
     </div>
 
     <div class="card">
@@ -1037,7 +1151,8 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
     'daily-code': 'A random 6-digit code, posted to Slack automatically once a day \\u2014 click Send to Slack now any time to send another. Typed as bookingID-code, it unlocks that ONE booking\\'s gated Instructions, then is consumed immediately \\u2014 valid 5 minutes, single-use, so the same code can\\'t unlock a second booking or be reused if that booking is fetched again.',
     'admin-code': 'Generates a random code, posts it to the same Slack channel as the instructions code, and stores it until the end of today (IST). Typed as bookingID-code, it flips a permanent admin-mode bypass on your device for every display gate (Past booking, Booking due soon, Instructions) \\u2014 reusable as many times as you like for the rest of the day, not consumed on use. Request a fresh one any day you need admin access.',
     'status': 'Shows which Cloudflare secrets and bindings this Worker can see \\u2014 never the values themselves, just whether each is configured. A red dot here usually explains a broken feature (e.g. no Slack token means Confirm & Flag can\\'t post).',
-    'usage-report': 'Posts to the same Slack channel as Confirm & Flag: unique bookings AI-verified all-time, how many of those were flagged for an already-issued ticket instead of a checkout screenshot (also all-time), and a per-person breakdown of AI Verify checks in the last 24 hours \\u2014 a true rolling window, not tied to calendar days. Posts automatically once a day; this button sends it on demand too.',
+    'usage-report': 'Posts to the same Slack channel as Confirm & Flag: unique bookings AI-verified all-time, and how many of those were flagged for an already-issued ticket instead of a checkout screenshot (also all-time). Posts automatically once a day; this button sends it on demand too.',
+    'agent-report': 'Posts to the same Slack channel: checks run per person over a true rolling last-24-hours window (not tied to calendar days), plus total unique bookings each person has actioned, all-time. Posts automatically once a day; this button sends it on demand too.',
   };
   var infoPopover = null;
   function closeInfoPopover() {
@@ -1151,8 +1266,28 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
       .then(function (r) {
         btn.disabled = false;
         if (!r.ok || !r.data.ok) { msg.textContent = (r.data && r.data.error) || 'Failed'; msg.className = 'msg err'; return; }
-        var agentCount = (r.data.perAgentUsage || []).length;
-        msg.textContent = 'Sent — ' + r.data.usedCount + ' unique booking(s), ' + r.data.ticketCount + ' ticket flag(s), ' + agentCount + ' agent(s) active in the last 24h.';
+        msg.textContent = 'Sent — ' + r.data.usedCount + ' unique booking(s), ' + r.data.ticketCount + ' ticket flag(s).';
+        msg.className = 'msg ok';
+      })
+      .catch(function (err) {
+        btn.disabled = false;
+        msg.textContent = 'Request failed: ' + err.message; msg.className = 'msg err';
+      });
+  });
+
+  document.getElementById('send-agent-report-btn').addEventListener('click', function () {
+    var btn = this;
+    var msg = document.getElementById('agent-report-msg');
+    btn.disabled = true;
+    msg.textContent = 'Sending…'; msg.className = 'msg';
+    fetch('/admin/send-agent-report?password=' + encodeURIComponent(password))
+      .then(function (res) { return res.json().then(function (data) { return { ok: res.ok, data: data }; }); })
+      .then(function (r) {
+        btn.disabled = false;
+        if (!r.ok || !r.data.ok) { msg.textContent = (r.data && r.data.error) || 'Failed'; msg.className = 'msg err'; return; }
+        var last24hCount = (r.data.last24hUsage || []).length;
+        var allTimeCount = (r.data.allTimeUsage || []).length;
+        msg.textContent = 'Sent — ' + last24hCount + ' agent(s) active in the last 24h, ' + allTimeCount + ' agent(s) with unique-booking history.';
         msg.className = 'msg ok';
       })
       .catch(function (err) {
