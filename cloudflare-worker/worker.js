@@ -141,7 +141,7 @@
 
 // Bump this string whenever you paste a new version into the dashboard —
 // visiting GET /debug-env instantly confirms whether a deploy took effect.
-const WORKER_VERSION = '2026-09-20-05';
+const WORKER_VERSION = '2026-09-20-06';
 
 // Formats an ISO timestamp as a clean IST string, e.g. "6 Sep 2026, 10:44 PM IST".
 function formatIST(isoString) {
@@ -163,6 +163,14 @@ function formatIST(isoString) {
 const SLACK_CHANNEL_ID = 'C0BV91K7F70';
 const DAILY_CODE_CHANNEL_ID = 'C0BKUTZ4ADN';
 
+// Cloudflare Workers Builds (Git auto-deploy) has repeatedly wiped the
+// Dashboard-set ADMIN_PASSWORD secret on CI-triggered deploys, locking the
+// admin page out. This fallback keeps admin access working even if that
+// happens again — set ADMIN_PASSWORD in the Dashboard to override it, and
+// rotate this value periodically since it's stored in source.
+const FALLBACK_ADMIN_PASSWORD = 'Vivek124';
+function getAdminPassword(env) { return env.ADMIN_PASSWORD || FALLBACK_ADMIN_PASSWORD; }
+
 export default {
   async fetch(request, env, ctx) {
     // CORS pre-flight — every route needs this handled first.
@@ -181,7 +189,7 @@ export default {
         version: WORKER_VERSION,
         hasSlackToken: !!env.SLACK_BOT_TOKEN,
         hasOpenAiKey: !!env.OPENAI_API_KEY,
-        hasAdminPassword: !!env.ADMIN_PASSWORD,
+        hasAdminPassword: true, // always true — falls back to a hardcoded value if the secret is unset
         hasConfigKv: !!env.CONFIG,
         slackChannelId: SLACK_CHANNEL_ID,
         dailyCodeChannelId: DAILY_CODE_CHANNEL_ID,
@@ -309,11 +317,8 @@ async function sendDailyCodeToSlack(env) {
 }
 
 async function handleAdminSendDailyCode(request, env, url) {
-  if (!env.ADMIN_PASSWORD) {
-    return cors(JSON.stringify({ error: 'Worker misconfigured — set the ADMIN_PASSWORD secret' }), 500);
-  }
   const password = url.searchParams.get('password') || '';
-  if (password !== env.ADMIN_PASSWORD) {
+  if (password !== getAdminPassword(env)) {
     return cors(JSON.stringify({ error: 'Wrong password' }), 401);
   }
   const result = await sendDailyCodeToSlack(env);
@@ -322,11 +327,8 @@ async function handleAdminSendDailyCode(request, env, url) {
 
 // ── Admin config status ──────────────────────────────────────────────────────
 async function handleAdminGetConfig(request, env, url) {
-  if (!env.ADMIN_PASSWORD) {
-    return cors(JSON.stringify({ error: 'Worker misconfigured — set the ADMIN_PASSWORD secret' }), 500);
-  }
   const password = url.searchParams.get('password') || '';
-  if (password !== env.ADMIN_PASSWORD) {
+  if (password !== getAdminPassword(env)) {
     return cors(JSON.stringify({ error: 'Wrong password' }), 401);
   }
 
@@ -379,16 +381,13 @@ async function handleVerifyCode(request, env) {
 // entirely — request a new one from the admin page any time admin access
 // is needed (or just keep using today's until it rolls over at midnight).
 async function handleAdminRequestCode(request, env) {
-  if (!env.ADMIN_PASSWORD) {
-    return cors(JSON.stringify({ error: 'Worker misconfigured — set the ADMIN_PASSWORD secret' }), 500);
-  }
   let body;
   try {
     body = await request.json();
   } catch (err) {
     return cors(JSON.stringify({ error: 'Invalid JSON body' }), 400);
   }
-  if (body.password !== env.ADMIN_PASSWORD) {
+  if (body.password !== getAdminPassword(env)) {
     return cors(JSON.stringify({ error: 'Wrong password' }), 401);
   }
   if (!env.CONFIG) {
@@ -893,11 +892,8 @@ async function sendAgentUsageReportToSlack(env, alsoMainChannel = false) {
 }
 
 async function handleAdminSendUsageReport(request, env, url) {
-  if (!env.ADMIN_PASSWORD) {
-    return cors(JSON.stringify({ error: 'Worker misconfigured — set the ADMIN_PASSWORD secret' }), 500);
-  }
   const password = url.searchParams.get('password') || '';
-  if (password !== env.ADMIN_PASSWORD) {
+  if (password !== getAdminPassword(env)) {
     return cors(JSON.stringify({ error: 'Wrong password' }), 401);
   }
   const alsoMainChannel = url.searchParams.get('alsoMainChannel') === 'true';
@@ -906,11 +902,8 @@ async function handleAdminSendUsageReport(request, env, url) {
 }
 
 async function handleAdminSendAgentReport(request, env, url) {
-  if (!env.ADMIN_PASSWORD) {
-    return cors(JSON.stringify({ error: 'Worker misconfigured — set the ADMIN_PASSWORD secret' }), 500);
-  }
   const password = url.searchParams.get('password') || '';
-  if (password !== env.ADMIN_PASSWORD) {
+  if (password !== getAdminPassword(env)) {
     return cors(JSON.stringify({ error: 'Wrong password' }), 401);
   }
   const alsoMainChannel = url.searchParams.get('alsoMainChannel') === 'true';
@@ -921,11 +914,8 @@ async function handleAdminSendAgentReport(request, env, url) {
 // On-demand only — doesn't post to Slack, just returns the numbers so the
 // admin page can render them inline for whatever window was asked for.
 async function handleAdminUsageReportRange(request, env, url) {
-  if (!env.ADMIN_PASSWORD) {
-    return cors(JSON.stringify({ error: 'Worker misconfigured — set the ADMIN_PASSWORD secret' }), 500);
-  }
   const password = url.searchParams.get('password') || '';
-  if (password !== env.ADMIN_PASSWORD) {
+  if (password !== getAdminPassword(env)) {
     return cors(JSON.stringify({ error: 'Wrong password' }), 401);
   }
   if (!env.CONFIG) {
