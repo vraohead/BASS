@@ -1678,13 +1678,30 @@ function buildCustomerSection(flat, guestData) {
 
 // ── Auto-detect booking from active tab URL ────────────────────────────────────
 
-// Pure: returns the booking ID found in the active Box Office tab's URL, or null.
+// Pure: returns the booking ID Box Office is currently showing, or null.
+// Only ever compares against a box-office.headout.com tab — if the active
+// tab is anything else (a vendor checkout tab, an unrelated site), there's
+// nothing to contradict the panel with, so this returns null rather than
+// reading a stray number off some other page.
 async function detectBookingIdFromActiveTab() {
   try {
-    const tabs  = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-    const url   = tabs[0]?.url || '';
-    const match = url.match(/\/(\d{6,})/);
-    return match ? match[1] : null;
+    const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    const url  = tabs[0]?.url || '';
+    if (!/^https:\/\/box-office\.headout\.com\//.test(url)) return null;
+
+    // Cheapest path first — works if BMS ever puts the booking ID in the URL.
+    const urlMatch = url.match(/\/(\d{6,})/);
+    if (urlMatch) return urlMatch[1];
+
+    // BMS is a client-rendered app that doesn't reliably reflect the open
+    // booking in the URL (e.g. the fulfillment view keeps the same URL
+    // across bookings) — fall back to reading it straight off the page
+    // instead, matching the standalone booking-ID number every booking view
+    // shows near the top (e.g. "31877957" above "Created on: ...").
+    const resp = await sendMessage({ action: 'CAPTURE_RESPONSE' });
+    const text = resp?.ok ? resp.text : '';
+    const domMatch = text.match(/^\s*(\d{6,10})\s*$/m);
+    return domMatch ? domMatch[1] : null;
   } catch (_) {
     return null;
   }
