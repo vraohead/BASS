@@ -1730,6 +1730,7 @@ async function checkLiveBookingMismatch() {
   const banner = $('booking-mismatch-banner');
   if (!currentBookingId) { banner.hidden = true; return; }
   const mismatch = await detectBookingMismatch(currentBookingId);
+  console.log('[BA] live mismatch check — loaded:', currentBookingId, 'liveOnBms:', mismatch || '(same or undetected)');
   if (mismatch) {
     $('booking-mismatch-text').textContent =
       `⚠️ Box Office is now showing booking ${mismatch} — this panel is showing ${currentBookingId}.`;
@@ -1754,6 +1755,11 @@ chrome.tabs.onActivated.addListener(() => checkLiveBookingMismatch());
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') checkLiveBookingMismatch();
 });
+// Polling safety net — tab-update/activation events are the fast path, but
+// this guarantees the banner catches up within a few seconds regardless of
+// whether those events fire the way they're expected to in a side panel
+// (unverified in production; this makes correctness not depend on it).
+setInterval(checkLiveBookingMismatch, 3000);
 
 // Reconciles the restored (from storage) booking with whatever the active Box
 // Office tab is currently showing. If both exist and disagree, don't silently
