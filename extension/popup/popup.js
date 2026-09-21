@@ -870,6 +870,11 @@ function buildVerifySection(flat, guestData) {
   const vendorName = primaryVendor?.vendorName || '';
   const vendorId = primaryVendor?.vendorId || flat.vendorId || '';
   const tourId = primaryVendor?.tourId || flat.tourId || '';
+  // Set by runAiVerify() below, read by the Confirm & Flag handler further
+  // down — so the Slack alert (and the channel-based reports that parse it)
+  // carries the same checkout/ticket/other classification the dashboard's
+  // KV log gets from /verify directly.
+  let lastPageType = null;
   const cur2 = flat.currency || flat.currencyName || flat.tourCurrency || '';
   const displayPrice = price ? `${cur2} ${price}`.trim() : '—';
 
@@ -1085,6 +1090,7 @@ function buildVerifySection(flat, guestData) {
     // neither a checkout page nor a ticket (blank/error/unrelated page) —
     // flagged separately since it needs a different fix (go find the actual
     // checkout page) than a ticket does.
+    lastPageType = result.pageType || null;
     const checkoutBanner = result.pageType === 'ticket'
       ? `<p class="verify-checkout-flag">⚠️ This looks like an already-issued ticket, not a checkout/cart/payment page${result.pageTypeNote ? ` — ${escHtml(result.pageTypeNote)}` : ''}. Capture the checkout page before the booking is confirmed instead.</p>`
       : result.pageType === 'other'
@@ -1213,6 +1219,7 @@ function buildVerifySection(flat, guestData) {
       product,
       vendorId,
       tourId,
+      pageType: lastPageType,
     });
 
     confirmBtn.disabled = false;

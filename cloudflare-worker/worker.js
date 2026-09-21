@@ -29,10 +29,14 @@
 //                             unaffected.
 //   POST /confirm-flag     { bookingId, agentEmail, confirmed, skipped,
 //                            imageBase64?, mimeType?, verifiedAt, vendor?, product?,
-//                            vendorId?, tourId? }
-//                          vendorId/tourId are pushed into the Slack alert text
-//                          (Scorpio/Aries lookup) but not into the usage log —
-//                          vendor/product (names) are what the dashboard aggregates by.
+//                            vendorId?, tourId?, pageType? }
+//                          vendor/product/pageType go into both the Slack alert text AND
+//                          the verifylog: KV entry — vendorId/tourId (Scorpio/Aries lookup)
+//                          go into the alert text only, not the usage log.
+//                          pageType is only ever set when AI Verify ran first (never for
+//                          Late Confirm) — this is what lets the channel-based report (see
+//                          /admin/channel-report below) carry the same checkout/ticket/other
+//                          classification the KV log gets from /verify.
 //                          -> { ok: true, steps: [...], screenshotError? }
 //                          Also records a verifylog: event (same as /verify) so every
 //                          Confirm & Flag click counts toward usage — this fires far more
@@ -43,11 +47,13 @@
 //                                                   a button on the admin page); alsoMainChannel=true
 //                                                   also posts to the main confirm-flag channel
 //   GET  /admin/send-agent-report?password=...&alsoMainChannel=  -> same, for the per-person report
-//   GET  /admin/usage-report-range?password=...&start=<ISO>&end=<ISO>
-//                          -> the full summarizeEvents() shape (see below) for exactly
-//                             that window — doesn't post to Slack, rendered inline on
-//                             the admin page (its "Custom range report" card), and is
-//                             the same shape a future dashboard would read from
+//   GET  /admin/usage-report-range?password=...&start=<ISO>&end=<ISO>&filter=
+//                          -> the KV-log source for the admin page's Channel/Dashboard
+//                             toggle: the full summarizeEvents() shape (see below) for
+//                             exactly that window, plus a `bookings` list — same response
+//                             shape as /admin/channel-report below (source: 'dashboard'
+//                             vs 'channel' is the only difference the frontend checks).
+//                             filter is 'all' (default), 'mismatch', or 'fullmatch'.
 //   POST /admin/backfill-from-slack { password, since?, until? } -> reads the
 //                          main confirm-flag channel and writes any missing
 //                          verifylog: entries for that range (default: last
@@ -64,10 +70,11 @@
 //                          channel-based usage report — reads the Confirm & Flag
 //                          channel directly (not the KV log) for any date range
 //                          (default: last rolling 24h). filter is 'all' (default),
-//                          'mismatch' (only bookings with an acknowledged skip),
-//                          or 'fullmatch'. Returns unique booking count, the
-//                          actual list of flagged booking IDs (capped at 500,
-//                          newest first), and a per-person breakdown.
+//                          'mismatch' (only bookings with an acknowledged skip), or
+//                          'fullmatch'. Returns the full summarizeEvents() shape
+//                          (same as /admin/usage-report-range above — source:
+//                          'channel' vs 'dashboard' is the only difference), plus
+//                          `bookings` (capped at 500, newest first).
 //   GET  /admin/config?password=...           -> secret/binding status (admin-only)
 //   POST /admin/request-code { password } -> generate + Slack-post an admin
 //                                             code, reusable all day (admin-only)
@@ -168,7 +175,7 @@
 
 // Bump this string whenever you paste a new version into the dashboard —
 // visiting GET /debug-env instantly confirms whether a deploy took effect.
-const WORKER_VERSION = '2026-09-21-04';
+const WORKER_VERSION = '2026-09-21-05';
 
 // Formats an ISO timestamp as a clean IST string, e.g. "6 Sep 2026, 10:44 PM IST".
 function formatIST(isoString) {
@@ -837,6 +844,27 @@ function parseConfirmFlagMessage(text, ts) {
 
   const tourId = stripSlackLink(text.match(/\*Tour ID:\*\s*(\S+)/)?.[1]);
   const vendorId = stripSlackLink(text.match(/\*Vendor ID:\*\s*(\S+)/)?.[1]);
+  const vendorProductLine = text.match(/\*Vendor:\*\s*(.+?)\s*\|\s*\*Experience:\*\s*(.+)/);
+  const vendor = vendorProductLine?.[1]?.trim();
+  const product = vendorProductLine?.[2]?.trim();
+  // Mirrors handleConfirmFlag()'s label choices exactly. "Final ticket" is
+  // the expected Late Confirm outcome, not an AI classification — it's
+  // deliberately left out of pageType here too, same as recordVerifyEvent()
+  // never sets pageType for a Late Confirm. Only an actual AI Verify
+  // classification (Checkout page / an Incorrect flag line) sets pageType,
+  // so ticketBookingCount / checkoutBookingCount keep meaning "what AI Verify
+  // saw", not "was this ever a ticket".
+  const pageTypeLineRaw = text.match(/\*Page type:\*\s*(.+)/)?.[1];
+  let pageType = null;
+  if (pageTypeLineRaw) {
+    // Order matters, and matches on distinctive substrings only — both
+    // "Incorrect flag" messages mention "checkout page" (the other one's
+    // says "not a checkout page or a ticket" for clarity), so a bare
+    // "checkout page" test can't tell them apart.
+    if (/Incorrect flag.*ticket captured/i.test(pageTypeLineRaw)) pageType = 'ticket';
+    else if (/Incorrect flag.*other/i.test(pageTypeLineRaw)) pageType = 'other';
+    else if (/Checkout page/i.test(pageTypeLineRaw)) pageType = 'checkout';
+  }
 
   const parseFieldList = raw => (raw || '').split('  |  ').filter(Boolean).map(part => {
     const m = part.match(/^(.+?):\s*(.*)$/);
@@ -852,6 +880,9 @@ function parseConfirmFlagMessage(text, ts) {
     agentEmail: agentEmail === 'unknown' ? null : agentEmail || null,
     tourId: tourId === 'n/a' ? null : tourId || null,
     vendorId: vendorId === 'n/a' ? null : vendorId || null,
+    vendor: vendor === 'n/a' ? null : vendor || null,
+    product: product === 'n/a' ? null : product || null,
+    pageType: pageType || null,
     totalChecks: confirmed.length + skipped.length,
     mismatchedFields: skipped.map(s => s.label),
     retroactive,
@@ -1088,9 +1119,40 @@ async function handleAdminUsageReportRange(request, env, url) {
   }
   const start = url.searchParams.get('start') || null;
   const end = url.searchParams.get('end') || null;
-  const events = await listVerifyEvents(env, { start, end });
+  const filter = url.searchParams.get('filter') || 'all'; // 'all' | 'mismatch' | 'fullmatch'
+  let events = await listVerifyEvents(env, { start, end });
+  if (filter === 'mismatch') {
+    events = events.filter(e => (e.mismatchedFields || []).length > 0);
+  } else if (filter === 'fullmatch') {
+    events = events.filter(e => e.totalChecks > 0 && (e.mismatchedFields || []).length === 0);
+  }
   const summary = summarizeEvents(events);
-  return cors(JSON.stringify({ ok: true, start, end, totalEvents: events.length, ...summary }), 200);
+
+  // Same shape as /admin/channel-report's `bookings`, so the admin page can
+  // render either source with one set of functions.
+  const sorted = [...events].sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime());
+  const bookings = sorted.slice(0, USAGE_BOOKINGS_MAX_ROWS).map(e => ({
+    bookingId: e.bookingId,
+    agentEmail: e.email,
+    at: e.at,
+    tourId: null,
+    vendorId: null,
+    vendor: e.vendor,
+    product: e.product,
+    pageType: e.pageType,
+    mismatchedFields: e.mismatchedFields || [],
+    retroactive: null,
+  }));
+
+  return cors(JSON.stringify({
+    ok: true,
+    source: 'dashboard',
+    start, end, filter,
+    totalEvents: events.length,
+    ...summary,
+    bookings,
+    bookingsTruncated: sorted.length > USAGE_BOOKINGS_MAX_ROWS,
+  }), 200);
 }
 
 // One-time (safely re-runnable) historical import — reads the Confirm & Flag
@@ -1157,13 +1219,18 @@ async function handleAdminChannelAudit(request, env, url) {
   }
 }
 
+// Shared row cap for the `bookings` list both /admin/channel-report and
+// /admin/usage-report-range return — same shape either way, so the admin
+// page renders whichever source is selected with one set of functions.
+const USAGE_BOOKINGS_MAX_ROWS = 500;
+
 // The channel is the primary, ground-truth source for usage reporting — this
 // is the main channel-based report: any date range, an optional filter, the
 // actual list of flagged booking IDs (not just a count), and a per-person
-// breakdown, all read straight from the Confirm & Flag channel. The KV-log
-// dashboard (summarizeEvents(), the analytics section above) stays as a
-// separate, secondary section — this endpoint never touches it.
-const CHANNEL_REPORT_MAX_ROWS = 500;
+// breakdown, all read straight from the Confirm & Flag channel. Returns the
+// exact same summarizeEvents() shape as /admin/usage-report-range (the KV
+// log), plus `bookings`/`source`/`filter`, so the admin page's Channel/
+// Dashboard toggle can point at either endpoint and render identically.
 
 async function handleAdminChannelReport(request, env, url) {
   const password = url.searchParams.get('password') || '';
@@ -1185,38 +1252,39 @@ async function handleAdminChannelReport(request, env, url) {
       messages = messages.filter(m => m.totalChecks > 0 && m.mismatchedFields.length === 0);
     }
 
-    const uniqueBookingIds = new Set(messages.filter(m => m.bookingId).map(m => m.bookingId));
-    const perPerson = new Map(); // email -> Set(bookingId)
-    for (const m of messages) {
-      if (!m.agentEmail) continue;
-      if (!perPerson.has(m.agentEmail)) perPerson.set(m.agentEmail, new Set());
-      if (m.bookingId) perPerson.get(m.agentEmail).add(m.bookingId);
-    }
-    const perPersonUniqueBookings = [...perPerson.entries()]
-      .map(([email, set]) => [email, set.size])
-      .sort((a, b) => b[1] - a[1]);
+    // Same aggregation the KV-log dashboard uses — map each parsed message
+    // into the shape summarizeEvents() already expects, so "unique booking",
+    // "per person", vendor/experience breakdowns, and match-rate all mean
+    // exactly the same thing whether the source is the channel or the log.
+    const summary = summarizeEvents(messages.map(m => ({
+      bookingId: m.bookingId, email: m.agentEmail, vendor: m.vendor, product: m.product,
+      pageType: m.pageType, totalChecks: m.totalChecks, mismatchedFields: m.mismatchedFields,
+    })));
 
     const sorted = [...messages].sort((a, b) => parseFloat(b.ts) - parseFloat(a.ts));
-    const bookings = sorted.slice(0, CHANNEL_REPORT_MAX_ROWS).map(m => ({
+    const bookings = sorted.slice(0, USAGE_BOOKINGS_MAX_ROWS).map(m => ({
       bookingId: m.bookingId,
       agentEmail: m.agentEmail,
       at: m.at,
       tourId: m.tourId,
       vendorId: m.vendorId,
+      vendor: m.vendor,
+      product: m.product,
+      pageType: m.pageType,
       mismatchedFields: m.mismatchedFields,
       retroactive: m.retroactive,
     }));
 
     return cors(JSON.stringify({
       ok: true,
+      source: 'channel',
       start: new Date(startMs).toISOString(),
       end: new Date(endMs).toISOString(),
       filter,
-      messageCount: messages.length,
-      uniqueBookingCount: uniqueBookingIds.size,
-      perPersonUniqueBookings,
+      totalEvents: messages.length,
+      ...summary,
       bookings,
-      bookingsTruncated: sorted.length > CHANNEL_REPORT_MAX_ROWS,
+      bookingsTruncated: sorted.length > USAGE_BOOKINGS_MAX_ROWS,
     }), 200);
   } catch (err) {
     return cors(JSON.stringify({ error: err.message }), 502);
@@ -1240,7 +1308,7 @@ async function handleConfirmFlag(request, env, ctx) {
 
   const {
     bookingId, agentEmail, confirmed = [], skipped = [], retroactive = false,
-    imageBase64, mimeType = 'image/png', verifiedAt, vendor, product, vendorId, tourId,
+    imageBase64, mimeType = 'image/png', verifiedAt, vendor, product, vendorId, tourId, pageType,
   } = body;
 
   // This is the real, common usage signal — every Confirm & Flag click,
@@ -1248,13 +1316,15 @@ async function handleConfirmFlag(request, env, ctx) {
   // "unique bookings actioned" the same way an AI Verify check does.
   // mismatchedFields here means "skipped despite a mismatch", not an AI
   // classification, but summarizeEvents() treats both the same way.
+  // pageType is only ever set when AI Verify actually ran first (never for
+  // Late Confirm) — passed through as-is, null otherwise.
   if (ctx) {
     ctx.waitUntil(recordVerifyEvent(env, {
       bookingId: bookingId || null,
       agentEmail: agentEmail || null,
       vendor: vendor || null,
       product: product || null,
-      pageType: null,
+      pageType: pageType || null,
       totalChecks: confirmed.length + skipped.length,
       mismatchedFields: skipped.map(s => s.label),
     }));
@@ -1269,13 +1339,32 @@ async function handleConfirmFlag(request, env, ctx) {
   }
   logStep('check_slack_token', true, null);
 
+  // The two expected, healthy outcomes are "Final ticket" (Late Confirm —
+  // booking was already ticketed, no checkout page to capture) and
+  // "Checkout page" (normal flow, AI Verify saw the expected page). Anything
+  // else AI Verify actually classified — a ticket or an unrelated/blank page
+  // captured during the NORMAL flow, when a checkout page was expected — is
+  // the rare, wrong case and gets called out inline so it isn't missed.
+  let pageTypeLine = null;
+  if (retroactive) {
+    pageTypeLine = '*Page type:* Final ticket';
+  } else if (pageType === 'checkout') {
+    pageTypeLine = '*Page type:* Checkout page';
+  } else if (pageType === 'ticket') {
+    pageTypeLine = '*Page type:* :warning: Incorrect flag — ticket captured instead of a checkout page';
+  } else if (pageType === 'other') {
+    pageTypeLine = '*Page type:* :warning: Incorrect flag — other (not a checkout page or a ticket)';
+  }
+
   const lines = [
     retroactive
       ? ':rotating_light: *Booking Confirmed — Late (no prior verification run)*'
       : ':white_check_mark: *Booking Verification Confirmed*',
     `*Booking ID:* ${bookingId || 'n/a'}`,
     `*Confirmed by:* ${agentEmail || 'unknown'}`,
+    (vendor || product) ? `*Vendor:* ${vendor || 'n/a'}  |  *Experience:* ${product || 'n/a'}` : null,
     (tourId || vendorId) ? `*Tour ID:* ${tourId || 'n/a'}  |  *Vendor ID:* ${vendorId || 'n/a'}` : null,
+    pageTypeLine,
     confirmed.length
       ? `*Matched:* ${confirmed.map(c => `${c.label}: ${c.value}`).join('  |  ')}`
       : null,
@@ -1632,82 +1721,13 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
       No CONFIG KV namespace bound yet — codes can't be generated or verified. Bind one in Settings → Bindings → KV Namespace → name it <b>CONFIG</b> to fix this.
     </div>
 
-    <!-- ── Channel Report — the primary source: read live, straight from the
-         Confirm & Flag channel, not the KV usage log below. ── -->
+    <!-- ── Verify Pulse — reads from the Confirm & Flag channel by default
+         (the primary, ground-truth source); the Source toggle below can
+         switch it to the KV usage log instead. Same rendering either way. ── -->
     <div class="topbar">
       <div>
-        <h2>Channel <em>Report</em></h2>
-        <p>Read live from the Confirm &amp; Flag channel — the primary source</p>
-      </div>
-      <div class="topbar-right">
-        <div class="range-group" id="ch-range-group">
-          <button type="button" class="range-btn active" data-range="1">Today</button>
-          <button type="button" class="range-btn" data-range="7">7D</button>
-          <button type="button" class="range-btn" data-range="30">30D</button>
-          <button type="button" class="range-btn" data-range="90">90D</button>
-          <button type="button" class="range-btn" data-range="custom">Custom…</button>
-        </div>
-        <div class="custom-range" id="ch-custom-range">
-          <input type="datetime-local" id="ch-custom-start">
-          <span style="color:var(--ink-muted);font-size:12px;">to</span>
-          <input type="datetime-local" id="ch-custom-end">
-          <button type="button" class="secondary tiny" id="ch-custom-apply-btn">Apply</button>
-        </div>
-        <button type="button" class="secondary tiny" id="ch-refresh-btn">↻ Refresh</button>
-      </div>
-    </div>
-
-    <div class="topbar-right" style="justify-content:flex-start; padding-bottom:14px; margin-top:-10px;">
-      <span style="font-size:12px; color:var(--ink-muted); margin-right:2px;">Filter:</span>
-      <div class="range-group" id="ch-filter-group">
-        <button type="button" class="range-btn active" data-filter="all">All</button>
-        <button type="button" class="range-btn" data-filter="mismatch">Mismatched only</button>
-        <button type="button" class="range-btn" data-filter="fullmatch">Full match only</button>
-      </div>
-    </div>
-
-    <p class="status-line" id="ch-status-line">Loading…</p>
-
-    <div class="two-col">
-      <div class="card kpi-tile">
-        <span class="kpi-label">Unique Bookings Flagged</span>
-        <span class="kpi-value tabular" id="ch-kpi-bookings">—</span>
-        <span class="kpi-sub" id="ch-kpi-bookings-sub">&nbsp;</span>
-      </div>
-      <div class="card kpi-tile">
-        <span class="kpi-label">Messages in Channel</span>
-        <span class="kpi-value tabular" id="ch-kpi-messages">—</span>
-        <span class="kpi-sub">For the selected range and filter</span>
-      </div>
-    </div>
-
-    <div class="card" style="margin-bottom:20px;">
-      <h2 style="font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);font-weight:600;margin:0 0 14px;">Flagged booking IDs</h2>
-      <div class="table-wrap" style="max-height:340px; overflow-y:auto;">
-        <table class="an-table">
-          <thead><tr><th>Booking ID</th><th>Agent</th><th>Mismatched fields</th><th>At</th></tr></thead>
-          <tbody id="ch-booking-table-body"></tbody>
-        </table>
-      </div>
-      <p class="muted" id="ch-booking-truncated-note" style="display:none; margin-top:8px;">Showing the first 500 — narrow the range or filter to see the rest.</p>
-    </div>
-
-    <div class="card" style="margin-bottom:24px;">
-      <h2 style="font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);font-weight:600;margin:0 0 14px;">Per person</h2>
-      <table class="an-table">
-        <thead><tr><th>Agent</th><th class="num">Unique bookings</th></tr></thead>
-        <tbody id="ch-person-table-body"></tbody>
-      </table>
-    </div>
-
-    <!-- ── Dashboard — the secondary, KV-usage-log-based section. The
-         Channel Report above is the primary source; this stays useful for
-         AI Verify-specific quality metrics (match rate, vendor/experience
-         breakdowns) the channel alone doesn't carry. ── -->
-    <div class="topbar" style="margin-top:8px;">
-      <div>
         <h2>Verify <em>Pulse</em></h2>
-        <p>Dashboard (from the internal usage log) — AI Verify usage &amp; quality</p>
+        <p>AI Verify usage &amp; quality</p>
       </div>
       <div class="topbar-right">
         <div class="range-group" id="range-group">
@@ -1727,6 +1747,25 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
         <button type="button" class="secondary tiny" id="refresh-btn">↻ Refresh</button>
       </div>
     </div>
+
+    <div class="topbar-right" style="justify-content:flex-start; padding-bottom:14px; margin-top:-10px; gap:18px; flex-wrap:wrap;">
+      <span style="display:flex; align-items:center; gap:6px;">
+        <span style="font-size:12px; color:var(--ink-muted);">Source:</span>
+        <div class="range-group" id="source-group">
+          <button type="button" class="range-btn active" data-source="channel">Channel</button>
+          <button type="button" class="range-btn" data-source="dashboard">Dashboard</button>
+        </div>
+      </span>
+      <span style="display:flex; align-items:center; gap:6px;">
+        <span style="font-size:12px; color:var(--ink-muted);">Filter:</span>
+        <div class="range-group" id="filter-group">
+          <button type="button" class="range-btn active" data-filter="all">All</button>
+          <button type="button" class="range-btn" data-filter="mismatch">Mismatched only</button>
+          <button type="button" class="range-btn" data-filter="fullmatch">Full match only</button>
+        </div>
+      </span>
+    </div>
+
     <p class="status-line" id="status-line">Loading…</p>
 
     <div class="kpi-grid">
@@ -1801,6 +1840,17 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
         <h2 style="font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);font-weight:600;margin:0 0 14px;">Most-mismatched fields</h2>
         <div class="rank-list" id="field-list"></div>
       </div>
+    </div>
+
+    <div class="card" style="margin-bottom:20px;">
+      <h2 style="font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);font-weight:600;margin:0 0 14px;">Flagged booking IDs</h2>
+      <div class="table-wrap" style="max-height:340px; overflow-y:auto;">
+        <table class="an-table">
+          <thead><tr><th>Booking ID</th><th>Agent</th><th>Mismatched fields</th><th>At</th></tr></thead>
+          <tbody id="booking-table-body"></tbody>
+        </table>
+      </div>
+      <p class="muted" id="booking-truncated-note" style="display:none; margin-top:8px;">Showing the first 500 — narrow the range or filter to see the rest.</p>
     </div>
 
     <div class="card" style="margin-bottom:20px;">
@@ -1975,7 +2025,6 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
         loginCard.style.display = 'none';
         dashboard.style.display = 'block';
         render(r.data);
-        loadChannelReport();
         loadAnalyticsData();
         return true;
       })
@@ -2127,98 +2176,9 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
       });
   });
 
-  // ── Channel Report — the primary, channel-sourced report. Independent
-  // date range/filter state from the KV-log analytics section below; both
-  // read from the same admin 'password', nothing else shared between them.
-  var chState = { rangeDays: 1, customStart: null, customEnd: null, filter: 'all' };
-
-  function computeChRange() {
-    if (chState.rangeDays === 'custom' && chState.customStart && chState.customEnd) {
-      return { start: chState.customStart, end: chState.customEnd };
-    }
-    var end = new Date();
-    var start = new Date(end.getTime() - chState.rangeDays * 24 * 60 * 60 * 1000);
-    return { start: start.toISOString(), end: end.toISOString() };
-  }
-
-  function renderChannelReport(d) {
-    document.getElementById('ch-status-line').textContent =
-      'Showing ' + fmtRange(d.start, d.end) + ' · filter: ' + d.filter + ' · updated ' + new Date().toLocaleTimeString();
-    document.getElementById('ch-kpi-bookings').textContent = d.uniqueBookingCount;
-    document.getElementById('ch-kpi-bookings-sub').textContent = d.filter === 'all' ? 'All Confirm & Flag activity' : 'Filter: ' + d.filter;
-    document.getElementById('ch-kpi-messages').textContent = d.messageCount;
-
-    document.getElementById('ch-booking-table-body').innerHTML = d.bookings.length
-      ? d.bookings.map(function (b) {
-          var mismatch = (b.mismatchedFields || []).length ? escHtml(b.mismatchedFields.join(', ')) : '<span class="muted">none</span>';
-          var when = b.at ? new Date(b.at).toLocaleString() : '—';
-          return '<tr><td>' + escHtml(b.bookingId || '—') + (b.retroactive ? ' <span class="muted">(late)</span>' : '') + '</td>' +
-            '<td>' + escHtml(b.agentEmail || '—') + '</td>' +
-            '<td>' + mismatch + '</td>' +
-            '<td>' + escHtml(when) + '</td></tr>';
-        }).join('')
-      : '<tr><td colspan="4" class="empty-note">No Confirm & Flag activity for this range and filter.</td></tr>';
-    document.getElementById('ch-booking-truncated-note').style.display = d.bookingsTruncated ? 'block' : 'none';
-
-    document.getElementById('ch-person-table-body').innerHTML = d.perPersonUniqueBookings.length
-      ? d.perPersonUniqueBookings.map(function (row, i) {
-          return '<tr><td><span class="rank-badge">' + (i + 1) + '</span>' + escHtml(row[0]) + '</td><td class="num tabular">' + row[1] + '</td></tr>';
-        }).join('')
-      : '<tr><td colspan="2" class="empty-note">No one has flagged a booking in this range.</td></tr>';
-  }
-
-  function loadChannelReport() {
-    if (!password) return;
-    var range = computeChRange();
-    document.getElementById('ch-status-line').textContent = 'Reading the channel — this can take a moment…';
-    fetch('/admin/channel-report?password=' + encodeURIComponent(password) +
-      '&start=' + encodeURIComponent(range.start) + '&end=' + encodeURIComponent(range.end) +
-      '&filter=' + encodeURIComponent(chState.filter))
-      .then(function (res) { return res.json().then(function (data) { return { ok: res.ok, data: data }; }); })
-      .then(function (r) {
-        if (!r.ok || !r.data.ok) {
-          document.getElementById('ch-status-line').textContent = 'Could not load data: ' + ((r.data && r.data.error) || ('HTTP ' + (r.status || '?')));
-          return;
-        }
-        renderChannelReport(r.data);
-      })
-      .catch(function (err) {
-        document.getElementById('ch-status-line').textContent = 'Request failed: ' + err.message;
-      });
-  }
-
-  document.querySelectorAll('#ch-range-group .range-btn').forEach(function (btn) {
-    btn.addEventListener('click', function () {
-      var range = btn.getAttribute('data-range');
-      document.querySelectorAll('#ch-range-group .range-btn').forEach(function (b) { b.classList.remove('active'); });
-      btn.classList.add('active');
-      if (range === 'custom') { document.getElementById('ch-custom-range').classList.add('open'); return; }
-      document.getElementById('ch-custom-range').classList.remove('open');
-      chState.rangeDays = parseInt(range, 10);
-      loadChannelReport();
-    });
-  });
-  document.getElementById('ch-custom-apply-btn').addEventListener('click', function () {
-    var s = document.getElementById('ch-custom-start').value, e = document.getElementById('ch-custom-end').value;
-    if (!s || !e) return;
-    chState.rangeDays = 'custom';
-    chState.customStart = new Date(s).toISOString();
-    chState.customEnd = new Date(e).toISOString();
-    loadChannelReport();
-  });
-  document.querySelectorAll('#ch-filter-group .range-btn').forEach(function (btn) {
-    btn.addEventListener('click', function () {
-      document.querySelectorAll('#ch-filter-group .range-btn').forEach(function (b) { b.classList.remove('active'); });
-      btn.classList.add('active');
-      chState.filter = btn.getAttribute('data-filter');
-      loadChannelReport();
-    });
-  });
-  document.getElementById('ch-refresh-btn').addEventListener('click', loadChannelReport);
-
-  // ── Analytics — merged in from the former separate /dashboard page.
-  // Reuses the same admin 'password' already unlocked above — no separate
-  // login, no localStorage, no other origin involved.
+  // ── Analytics — reads from the Confirm & Flag channel by default (the
+  // primary source), with a toggle to switch to the KV usage log instead.
+  // Reuses the same admin 'password' already unlocked above.
   var pct = function (n, d) { return d > 0 ? Math.round((n / d) * 100) + '%' : '—'; };
   function fmtRange(startIso, endIso) {
     try {
@@ -2227,7 +2187,7 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
     } catch (_) { return startIso + ' to ' + endIso; }
   }
 
-  var anState = { rangeDays: 7, customStart: null, customEnd: null };
+  var anState = { rangeDays: 7, customStart: null, customEnd: null, source: 'channel', filter: 'all' };
 
   function computeRange() {
     if (anState.rangeDays === 'custom' && anState.customStart && anState.customEnd) {
@@ -2256,7 +2216,8 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
   }
 
   function renderAnalytics(d, range) {
-    document.getElementById('status-line').textContent = 'Showing ' + fmtRange(range.start, range.end) + ' · ' + (d.totalEvents || 0) + ' logged event(s) · updated ' + new Date().toLocaleTimeString();
+    var sourceLabel = d.source === 'dashboard' ? 'usage log' : 'channel';
+    document.getElementById('status-line').textContent = 'Showing ' + fmtRange(range.start, range.end) + ' from the ' + sourceLabel + ' · ' + (d.totalEvents || 0) + ' logged event(s) · updated ' + new Date().toLocaleTimeString();
 
     document.getElementById('kpi-bookings').textContent = d.uniqueBookingCount;
     document.getElementById('kpi-bookings-sub').textContent = d.checksWithData + ' with field-level checks';
@@ -2286,6 +2247,18 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
     document.getElementById('bar-full').style.width = matchTotal ? Math.max(4, Math.round((d.fullMatchChecks / matchTotal) * 100)) + '%' : '0%';
     document.getElementById('bar-partial').style.width = matchTotal ? Math.max(4, Math.round((d.partialMatchChecks / matchTotal) * 100)) + '%' : '0%';
 
+    document.getElementById('booking-table-body').innerHTML = (d.bookings || []).length
+      ? d.bookings.map(function (b) {
+          var mismatch = (b.mismatchedFields || []).length ? escHtml(b.mismatchedFields.join(', ')) : '<span class="muted">none</span>';
+          var when = b.at ? new Date(b.at).toLocaleString() : '—';
+          return '<tr><td>' + escHtml(b.bookingId || '—') + (b.retroactive ? ' <span class="muted">(late)</span>' : '') + '</td>' +
+            '<td>' + escHtml(b.agentEmail || '—') + '</td>' +
+            '<td>' + mismatch + '</td>' +
+            '<td>' + escHtml(when) + '</td></tr>';
+        }).join('')
+      : '<tr><td colspan="4" class="empty-note">No activity for this range, source, and filter.</td></tr>';
+    document.getElementById('booking-truncated-note').style.display = d.bookingsTruncated ? 'block' : 'none';
+
     var personRows = d.perPersonUniqueBookings.map(function (row) {
       var email = row[0], uniqueCount = row[1];
       var checksRow = d.perPersonCheckCounts.find(function (c) { return c[0] === email; });
@@ -2306,9 +2279,11 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
   function loadAnalyticsData() {
     if (!password) return;
     var range = computeRange();
-    document.getElementById('status-line').textContent = 'Loading…';
-    fetch('/admin/usage-report-range?password=' + encodeURIComponent(password) +
-      '&start=' + encodeURIComponent(range.start) + '&end=' + encodeURIComponent(range.end))
+    var endpoint = anState.source === 'dashboard' ? '/admin/usage-report-range' : '/admin/channel-report';
+    document.getElementById('status-line').textContent = anState.source === 'dashboard' ? 'Loading…' : 'Reading the channel — this can take a moment…';
+    fetch(endpoint + '?password=' + encodeURIComponent(password) +
+      '&start=' + encodeURIComponent(range.start) + '&end=' + encodeURIComponent(range.end) +
+      '&filter=' + encodeURIComponent(anState.filter))
       .then(function (res) { return res.json().then(function (data) { return { ok: res.ok, data: data }; }); })
       .then(function (r) {
         if (!r.ok || !r.data.ok) {
@@ -2342,6 +2317,23 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
     loadAnalyticsData();
   });
   document.getElementById('refresh-btn').addEventListener('click', loadAnalyticsData);
+
+  document.querySelectorAll('#source-group .range-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      document.querySelectorAll('#source-group .range-btn').forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      anState.source = btn.getAttribute('data-source');
+      loadAnalyticsData();
+    });
+  });
+  document.querySelectorAll('#filter-group .range-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      document.querySelectorAll('#filter-group .range-btn').forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      anState.filter = btn.getAttribute('data-filter');
+      loadAnalyticsData();
+    });
+  });
 
   var savedPw = null;
   try { savedPw = sessionStorage.getItem('bassAdminPw'); } catch (_) {}
