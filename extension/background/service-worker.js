@@ -224,4 +224,22 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
     return true;
   }
 
+  if (request.action === 'RECORD_FETCH') {
+    // Fire-and-forget usage log — logged the instant a booking is pulled up,
+    // before any verification runs. Never blocks the UI on this.
+    const { bookingId, agentEmail, workerUrl } = request;
+    (async () => {
+      try {
+        await fetch(`${workerUrl.replace(/\/$/, '')}/record-fetch`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ bookingId, agentEmail }),
+        });
+      } catch (_) {
+        // Best-effort only — a failed log write should never surface to the agent.
+      }
+    })();
+    return false;
+  }
+
 });

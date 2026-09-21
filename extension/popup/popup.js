@@ -292,6 +292,13 @@ async function doSearch() {
   saveLastBooking(id);
   currentBookingId = id;
   checkLiveBookingMismatch();
+
+  // Every successful fetch gets logged, even if the agent never runs AI
+  // Verify or Confirm & Flag on it — this is also the earliest point an
+  // agent's email gets captured (prompted once, then reused silently for
+  // every action from here on, including this one).
+  const fetchAgentEmail = await getAgentEmail();
+  sendMessage({ action: 'RECORD_FETCH', bookingId: id, agentEmail: fetchAgentEmail, workerUrl: DEFAULT_WORKER_URL });
 }
 
 // ── Render booking ────────────────────────────────────────────────────────────

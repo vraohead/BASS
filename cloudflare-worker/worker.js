@@ -19,6 +19,12 @@
 //   GET  /debug-env      -> { hasSlackToken, hasOpenAiKey, slackChannelId, version }
 //   POST /verify          { imageBase64, mimeType, facts: {date,time,pax,price,product}, bookingId?, agentEmail?, vendor? }
 //                          -> { checks: [...], pageType, pageTypeNote }
+//   POST /record-fetch    { bookingId, agentEmail } -> { ok: true } — logged the instant a booking
+//                          is pulled up in the extension (stage:'fetched'), before any verification
+//                          happens. Feeds fetchedBookingCount/fetchedBookingIds and per-person
+//                          activity in the reports below; deliberately excluded from
+//                          uniqueBookingCount (which stays "verified", not "merely opened") and
+//                          never posted to Slack — see summarizeEvents().
 //                             each check is { label, expected, status, seenValue } where
 //                             status is "match", "mismatch" (read, but contradicts the
 //                             record — seenValue required), or "not_found" (missing/
@@ -188,7 +194,7 @@
 
 // Bump this string whenever you paste a new version into the dashboard —
 // visiting GET /debug-env instantly confirms whether a deploy took effect.
-const WORKER_VERSION = '2026-09-21-11';
+const WORKER_VERSION = '2026-09-21-12';
 
 // Formats an ISO timestamp as a clean IST string, e.g. "6 Sep 2026, 10:44 PM IST".
 function formatIST(isoString) {
@@ -256,6 +262,10 @@ export default {
 
     if (request.method === 'POST' && url.pathname === '/verify') {
       return handleVerify(request, env, ctx);
+    }
+
+    if (request.method === 'POST' && url.pathname === '/record-fetch') {
+      return handleRecordFetch(request, env);
     }
 
     if (request.method === 'GET' && url.pathname === '/admin/send-daily-code') {
@@ -891,6 +901,35 @@ async function postPreOverrideFlag(env, { bookingId, agentEmail, vendor, product
   }
 }
 
+// ── /record-fetch — logs the moment a booking is pulled up ────────────────────
+// Fired the instant a Fetch succeeds in the extension, before AI Verify or
+// Confirm & Flag ever run — this is also the extension's first chance to grab
+// the agent's email (see getAgentEmail() in popup.js), so a booking that's
+// only ever fetched and never verified is still attributed. Log-only: no
+// OpenAI call, no Slack post (a message per fetch would flood the channel) —
+// just a KV entry for the reports below.
+async function handleRecordFetch(request, env) {
+  let body;
+  try {
+    body = await request.json();
+  } catch (err) {
+    return cors(JSON.stringify({ error: 'Invalid JSON body' }), 400);
+  }
+
+  const { bookingId, agentEmail } = body;
+  if (!bookingId) {
+    return cors(JSON.stringify({ error: 'bookingId is required' }), 400);
+  }
+
+  await recordVerifyEvent(env, {
+    bookingId,
+    agentEmail: agentEmail || null,
+    stage: 'fetched',
+  });
+
+  return cors(JSON.stringify({ ok: true }), 200);
+}
+
 // ── Usage tracking + report ──────────────────────────────────────────────────
 // One permanent, append-only event log — every successful /verify call that
 // carries a bookingId and/or agentEmail writes one entry (never overwritten,
@@ -973,10 +1012,18 @@ function summarizeEvents(events) {
   // exactly what these two separate counts are for.
   const preOverrideFlagIds = new Set();
   const overrideConfirmedIds = new Set();
+  // Bookings Fetched: logged the instant a booking is pulled up (stage:
+  // 'fetched', from /record-fetch), before any verification happens — a much
+  // lower bar than "verified", so it's tracked in its own Set rather than
+  // folded into bookingIds/uniqueBookingCount, which stays "AI-verified" as
+  // labeled everywhere it's reported.
+  const fetchedIds = new Set();
   let fullMatchChecks = 0, partialMatchChecks = 0, checksWithData = 0;
 
   for (const e of events) {
-    if (e.bookingId) {
+    if (e.bookingId && e.stage === 'fetched') {
+      fetchedIds.add(e.bookingId);
+    } else if (e.bookingId) {
       bookingIds.add(e.bookingId);
       const bucket = pageTypeBookingIds[e.pageType];
       if (bucket) bucket.add(e.bookingId);
@@ -1023,6 +1070,8 @@ function summarizeEvents(events) {
 
   return {
     uniqueBookingCount: bookingIds.size,
+    fetchedBookingCount: fetchedIds.size,
+    fetchedBookingIds: [...fetchedIds],
     ticketBookingIds: [...pageTypeBookingIds.ticket],
     ticketBookingCount: pageTypeBookingIds.ticket.size,
     otherPageBookingIds: [...pageTypeBookingIds.other],
@@ -1443,8 +1492,13 @@ async function handleAdminUsageReportRange(request, env, url) {
   const summary = summarizeEvents(events);
 
   // Same shape as /admin/channel-report's `bookings`, so the admin page can
-  // render either source with one set of functions.
-  const sorted = [...events].sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime());
+  // render either source with one set of functions. Excludes stage:'fetched'
+  // entries — this table is the verification history (flagged/confirmed),
+  // and a row per plain booking-lookup would flood it; fetched bookings are
+  // still fully counted in `summary` above via fetchedBookingCount.
+  const sorted = [...events]
+    .filter(e => e.stage !== 'fetched')
+    .sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime());
   const bookings = sorted.slice(0, USAGE_BOOKINGS_MAX_ROWS).map(e => ({
     bookingId: e.bookingId,
     stage: e.stage || null,
@@ -2155,8 +2209,13 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
          contradicts the record, before anyone has done anything about it.
          Override Confirmed = an agent actually resolved one via Override and
          confirmed. Same booking can appear in one or both — the gap between
-         the two counts is bookings flagged but never confirmed either way. -->
-    <div class="two-col">
+         the two counts is bookings flagged but never confirmed either way.
+         Bookings Fetched = logged the instant a booking is pulled up, before
+         any verification — a much lower bar, so it's a separate count, not
+         folded into "Unique bookings verified" above. Only ever populated
+         from the Dashboard source (KV log) — the channel never sees a
+         message per fetch, that would flood it. -->
+    <div class="three-col">
       <div class="status-tile warn">
         <span class="stlabel"><span class="stdot"></span>🚩 Pre-Override Flags</span>
         <span class="stvalue tabular" id="tile-pre-override">—</span>
@@ -2166,6 +2225,11 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
         <span class="stlabel"><span class="stdot"></span>✅ Override Confirmed</span>
         <span class="stvalue tabular" id="tile-override-confirmed">—</span>
         <span class="stpct" id="tile-override-confirmed-pct">resolved and confirmed</span>
+      </div>
+      <div class="status-tile">
+        <span class="stlabel"><span class="stdot"></span>📥 Bookings Fetched</span>
+        <span class="stvalue tabular" id="tile-fetched">—</span>
+        <span class="stpct" id="tile-fetched-pct">pulled up, verified or not</span>
       </div>
     </div>
 
@@ -2612,6 +2676,11 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
       : 'all resolved';
     document.getElementById('tile-override-confirmed').textContent = d.overrideConfirmedCount || 0;
     document.getElementById('tile-override-confirmed-pct').textContent = 'resolved and confirmed';
+
+    document.getElementById('tile-fetched').textContent = d.fetchedBookingCount || 0;
+    document.getElementById('tile-fetched-pct').textContent = d.source === 'channel'
+      ? 'channel source has no fetch data'
+      : 'pulled up, verified or not';
 
     renderRankList(document.getElementById('vendor-list'), d.perVendorUniqueBookings.map(function (r) { return { name: r[0], value: r[1] }; }));
     renderRankList(document.getElementById('product-list'), d.perProductUniqueBookings.map(function (r) { return { name: r.product + (r.vendor ? ' · ' + r.vendor : ''), value: r.uniqueBookingCount }; }));
