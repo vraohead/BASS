@@ -60,10 +60,14 @@
 //                          counts side by side for the same window, so a
 //                          future under-counting bug shows up as a gap here
 //                          instead of silently skewing the usage numbers.
-//   GET  /admin/channel-last-24h?password=...  -> reads the Confirm & Flag
-//                          channel directly (not the KV log) for a rolling
-//                          24h window: total unique booking IDs flagged, and
-//                          per email how many unique booking IDs they flagged.
+//   GET  /admin/channel-report?password=...&start=&end=&filter=  -> the primary,
+//                          channel-based usage report — reads the Confirm & Flag
+//                          channel directly (not the KV log) for any date range
+//                          (default: last rolling 24h). filter is 'all' (default),
+//                          'mismatch' (only bookings with an acknowledged skip),
+//                          or 'fullmatch'. Returns unique booking count, the
+//                          actual list of flagged booking IDs (capped at 500,
+//                          newest first), and a per-person breakdown.
 //   GET  /admin/config?password=...           -> secret/binding status (admin-only)
 //   POST /admin/request-code { password } -> generate + Slack-post an admin
 //                                             code, reusable all day (admin-only)
@@ -164,7 +168,7 @@
 
 // Bump this string whenever you paste a new version into the dashboard —
 // visiting GET /debug-env instantly confirms whether a deploy took effect.
-const WORKER_VERSION = '2026-09-21-03';
+const WORKER_VERSION = '2026-09-21-04';
 
 // Formats an ISO timestamp as a clean IST string, e.g. "6 Sep 2026, 10:44 PM IST".
 function formatIST(isoString) {
@@ -258,8 +262,8 @@ export default {
       return handleAdminChannelAudit(request, env, url);
     }
 
-    if (request.method === 'GET' && url.pathname === '/admin/channel-last-24h') {
-      return handleAdminChannelLast24h(request, env, url);
+    if (request.method === 'GET' && url.pathname === '/admin/channel-report') {
+      return handleAdminChannelReport(request, env, url);
     }
 
     if (request.method === 'GET' && url.pathname === '/admin/config') {
@@ -811,17 +815,28 @@ function summarizeEvents(events) {
 //
 // Parses only the exact text handleConfirmFlag() itself generates — a
 // change to that message format must be mirrored here.
+// Slack auto-linkifies anything email-shaped in posted mrkdwn text into
+// `<mailto:x@y.com|x@y.com>` — that's what actually comes back in the
+// message's `text` field from conversations.history, not the plain address
+// we originally sent. Every value pulled out of a message has to go through
+// this before use, or "Confirmed by" ends up with the raw Slack link markup.
+function stripSlackLink(s) {
+  if (!s) return s;
+  const m = s.match(/^<(?:mailto:)?([^|>]+)(?:\|[^>]*)?>$/);
+  return m ? m[1] : s;
+}
+
 function parseConfirmFlagMessage(text, ts) {
   if (!text) return null;
   const retroactive = text.includes('Booking Confirmed — Late');
   if (!retroactive && !text.includes('Booking Verification Confirmed')) return null; // not one of ours
 
-  const bookingId = text.match(/\*Booking ID:\*\s*(\S+)/)?.[1];
-  const agentEmail = text.match(/\*Confirmed by:\*\s*(\S+)/)?.[1];
+  const bookingId = stripSlackLink(text.match(/\*Booking ID:\*\s*(\S+)/)?.[1]);
+  const agentEmail = stripSlackLink(text.match(/\*Confirmed by:\*\s*(\S+)/)?.[1]);
   if (!bookingId && !agentEmail) return null;
 
-  const tourId = text.match(/\*Tour ID:\*\s*(\S+)/)?.[1];
-  const vendorId = text.match(/\*Vendor ID:\*\s*(\S+)/)?.[1];
+  const tourId = stripSlackLink(text.match(/\*Tour ID:\*\s*(\S+)/)?.[1]);
+  const vendorId = stripSlackLink(text.match(/\*Vendor ID:\*\s*(\S+)/)?.[1]);
 
   const parseFieldList = raw => (raw || '').split('  |  ').filter(Boolean).map(part => {
     const m = part.match(/^(.+?):\s*(.*)$/);
@@ -1142,21 +1157,34 @@ async function handleAdminChannelAudit(request, env, url) {
   }
 }
 
-// Reads the Confirm & Flag channel directly (not the KV log) for a rolling
-// last-24-hours window: total unique booking IDs flagged, and per email how
-// many (unique) booking IDs they flagged — a channel-sourced cross-check of
-// the same shape as the per-person Slack report, so the two can be compared
-// side by side.
-async function handleAdminChannelLast24h(request, env, url) {
+// The channel is the primary, ground-truth source for usage reporting — this
+// is the main channel-based report: any date range, an optional filter, the
+// actual list of flagged booking IDs (not just a count), and a per-person
+// breakdown, all read straight from the Confirm & Flag channel. The KV-log
+// dashboard (summarizeEvents(), the analytics section above) stays as a
+// separate, secondary section — this endpoint never touches it.
+const CHANNEL_REPORT_MAX_ROWS = 500;
+
+async function handleAdminChannelReport(request, env, url) {
   const password = url.searchParams.get('password') || '';
   if (password !== getAdminPassword(env)) {
     return cors(JSON.stringify({ error: 'Wrong password' }), 401);
   }
   const nowMs = Date.now();
-  const sinceMs = nowMs - 24 * 60 * 60 * 1000;
+  const startParam = url.searchParams.get('start');
+  const endParam = url.searchParams.get('end');
+  const startMs = startParam ? new Date(startParam).getTime() : nowMs - 24 * 60 * 60 * 1000;
+  const endMs = endParam ? new Date(endParam).getTime() : nowMs;
+  const filter = url.searchParams.get('filter') || 'all'; // 'all' | 'mismatch' | 'fullmatch'
 
   try {
-    const messages = await fetchConfirmFlagSlackMessages(env, sinceMs, nowMs);
+    let messages = await fetchConfirmFlagSlackMessages(env, startMs, endMs);
+    if (filter === 'mismatch') {
+      messages = messages.filter(m => m.mismatchedFields.length > 0);
+    } else if (filter === 'fullmatch') {
+      messages = messages.filter(m => m.totalChecks > 0 && m.mismatchedFields.length === 0);
+    }
+
     const uniqueBookingIds = new Set(messages.filter(m => m.bookingId).map(m => m.bookingId));
     const perPerson = new Map(); // email -> Set(bookingId)
     for (const m of messages) {
@@ -1168,13 +1196,27 @@ async function handleAdminChannelLast24h(request, env, url) {
       .map(([email, set]) => [email, set.size])
       .sort((a, b) => b[1] - a[1]);
 
+    const sorted = [...messages].sort((a, b) => parseFloat(b.ts) - parseFloat(a.ts));
+    const bookings = sorted.slice(0, CHANNEL_REPORT_MAX_ROWS).map(m => ({
+      bookingId: m.bookingId,
+      agentEmail: m.agentEmail,
+      at: m.at,
+      tourId: m.tourId,
+      vendorId: m.vendorId,
+      mismatchedFields: m.mismatchedFields,
+      retroactive: m.retroactive,
+    }));
+
     return cors(JSON.stringify({
       ok: true,
-      since: new Date(sinceMs).toISOString(),
-      until: new Date(nowMs).toISOString(),
+      start: new Date(startMs).toISOString(),
+      end: new Date(endMs).toISOString(),
+      filter,
       messageCount: messages.length,
       uniqueBookingCount: uniqueBookingIds.size,
       perPersonUniqueBookings,
+      bookings,
+      bookingsTruncated: sorted.length > CHANNEL_REPORT_MAX_ROWS,
     }), 200);
   } catch (err) {
     return cors(JSON.stringify({ error: err.message }), 502);
@@ -1557,6 +1599,7 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
   .rank-fill.mismatch { background: var(--crit); }
   .rank-value { font-size: 12.5px; font-weight: 600; text-align: right; }
   .empty-note { font-size: 12.5px; color: var(--ink-muted); font-style: italic; font-family: 'Instrument Serif', Georgia, serif; padding: 10px 2px; }
+  .table-wrap { overflow-x: auto; }
   .an-table { width: 100%; border-collapse: collapse; font-size: 13px; }
   .an-table th { text-align: left; font-size: 10.5px; text-transform: uppercase; letter-spacing: .05em; color: var(--ink-muted); font-weight: 600; padding: 0 10px 9px; border-bottom: 1px solid var(--line); }
   .an-table td { padding: 10px 10px; border-bottom: 1px solid var(--line); color: var(--ink-2); }
@@ -1589,11 +1632,82 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
       No CONFIG KV namespace bound yet — codes can't be generated or verified. Bind one in Settings → Bindings → KV Namespace → name it <b>CONFIG</b> to fix this.
     </div>
 
-    <!-- ── Analytics — was the separate Verify Pulse page, now lives here ── -->
+    <!-- ── Channel Report — the primary source: read live, straight from the
+         Confirm & Flag channel, not the KV usage log below. ── -->
     <div class="topbar">
       <div>
+        <h2>Channel <em>Report</em></h2>
+        <p>Read live from the Confirm &amp; Flag channel — the primary source</p>
+      </div>
+      <div class="topbar-right">
+        <div class="range-group" id="ch-range-group">
+          <button type="button" class="range-btn active" data-range="1">Today</button>
+          <button type="button" class="range-btn" data-range="7">7D</button>
+          <button type="button" class="range-btn" data-range="30">30D</button>
+          <button type="button" class="range-btn" data-range="90">90D</button>
+          <button type="button" class="range-btn" data-range="custom">Custom…</button>
+        </div>
+        <div class="custom-range" id="ch-custom-range">
+          <input type="datetime-local" id="ch-custom-start">
+          <span style="color:var(--ink-muted);font-size:12px;">to</span>
+          <input type="datetime-local" id="ch-custom-end">
+          <button type="button" class="secondary tiny" id="ch-custom-apply-btn">Apply</button>
+        </div>
+        <button type="button" class="secondary tiny" id="ch-refresh-btn">↻ Refresh</button>
+      </div>
+    </div>
+
+    <div class="topbar-right" style="justify-content:flex-start; padding-bottom:14px; margin-top:-10px;">
+      <span style="font-size:12px; color:var(--ink-muted); margin-right:2px;">Filter:</span>
+      <div class="range-group" id="ch-filter-group">
+        <button type="button" class="range-btn active" data-filter="all">All</button>
+        <button type="button" class="range-btn" data-filter="mismatch">Mismatched only</button>
+        <button type="button" class="range-btn" data-filter="fullmatch">Full match only</button>
+      </div>
+    </div>
+
+    <p class="status-line" id="ch-status-line">Loading…</p>
+
+    <div class="two-col">
+      <div class="card kpi-tile">
+        <span class="kpi-label">Unique Bookings Flagged</span>
+        <span class="kpi-value tabular" id="ch-kpi-bookings">—</span>
+        <span class="kpi-sub" id="ch-kpi-bookings-sub">&nbsp;</span>
+      </div>
+      <div class="card kpi-tile">
+        <span class="kpi-label">Messages in Channel</span>
+        <span class="kpi-value tabular" id="ch-kpi-messages">—</span>
+        <span class="kpi-sub">For the selected range and filter</span>
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:20px;">
+      <h2 style="font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);font-weight:600;margin:0 0 14px;">Flagged booking IDs</h2>
+      <div class="table-wrap" style="max-height:340px; overflow-y:auto;">
+        <table class="an-table">
+          <thead><tr><th>Booking ID</th><th>Agent</th><th>Mismatched fields</th><th>At</th></tr></thead>
+          <tbody id="ch-booking-table-body"></tbody>
+        </table>
+      </div>
+      <p class="muted" id="ch-booking-truncated-note" style="display:none; margin-top:8px;">Showing the first 500 — narrow the range or filter to see the rest.</p>
+    </div>
+
+    <div class="card" style="margin-bottom:24px;">
+      <h2 style="font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);font-weight:600;margin:0 0 14px;">Per person</h2>
+      <table class="an-table">
+        <thead><tr><th>Agent</th><th class="num">Unique bookings</th></tr></thead>
+        <tbody id="ch-person-table-body"></tbody>
+      </table>
+    </div>
+
+    <!-- ── Dashboard — the secondary, KV-usage-log-based section. The
+         Channel Report above is the primary source; this stays useful for
+         AI Verify-specific quality metrics (match rate, vendor/experience
+         breakdowns) the channel alone doesn't carry. ── -->
+    <div class="topbar" style="margin-top:8px;">
+      <div>
         <h2>Verify <em>Pulse</em></h2>
-        <p>AI Verify usage &amp; quality</p>
+        <p>Dashboard (from the internal usage log) — AI Verify usage &amp; quality</p>
       </div>
       <div class="topbar-right">
         <div class="range-group" id="range-group">
@@ -1772,17 +1886,6 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
 
     <div class="card">
       <div class="card-head">
-        <h2>📣 Channel — last 24 hours</h2>
-        <button type="button" class="info-btn" data-info="channel-24h">i</button>
-      </div>
-      <p class="sub-label" style="margin:0 0 12px">Reads the Confirm &amp; Flag channel directly (not the dashboard log) for the last rolling 24 hours — total unique booking IDs flagged, and how many each person flagged.</p>
-      <button class="secondary" id="channel-24h-btn">Fetch last 24 hours</button>
-      <p class="msg" id="channel-24h-msg"></p>
-      <div id="channel-24h-results" style="display:none; margin-top:10px; font-size:13px; line-height:1.7;"></div>
-    </div>
-
-    <div class="card">
-      <div class="card-head">
         <h2>🩺 Status</h2>
         <button type="button" class="info-btn" data-info="status">i</button>
       </div>
@@ -1820,7 +1923,6 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
     'agent-report': 'Posts to the passcode channel by default, same as the usage report \\u2014 check the box first if you also want this in the main team channel. Checks run per person over a true rolling last-24-hours window (not tied to calendar days), plus total unique bookings each person has actioned, all-time. Posts automatically once a day; this button sends it on demand too.',
     'backfill': 'Confirm & Flag started logging usage here only from a certain point on \\u2014 anything confirmed before that only exists as a Slack message. This reads the Confirm & Flag channel\\'s history for the chosen window and fills in the missing entries. Each one is keyed by its Slack message, so re-running this for the same days never double-counts \\u2014 safe to click again. Needs the Slack bot token to have channel-history read access; a \\u201cmissing_scope\\u201d error means that needs adding in the Slack app\\'s OAuth settings first.',
     'channel-audit': 'A sanity check, not a report \\u2014 counts Confirm & Flag messages in the channel for the range selected above and compares that to what\\'s logged here. They won\\'t match perfectly forever (a message posted seconds before/after a range boundary can land on one side only), but a large or growing gap usually means something stopped recording \\u2014 catch it here before the usage numbers quietly go stale.',
-    'channel-24h': 'Sourced straight from the Confirm & Flag channel\\'s own message history, not the dashboard log below \\u2014 a true rolling 24 hours from right now, not tied to calendar days. Unique booking IDs flagged in that window, plus how many (unique) booking IDs each person flagged. Costs a Slack API call, so it only runs when you click it.',
   };
   var infoPopover = null;
   function closeInfoPopover() {
@@ -1873,6 +1975,7 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
         loginCard.style.display = 'none';
         dashboard.style.display = 'block';
         render(r.data);
+        loadChannelReport();
         loadAnalyticsData();
         return true;
       })
@@ -2024,35 +2127,94 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
       });
   });
 
-  document.getElementById('channel-24h-btn').addEventListener('click', function () {
-    var btn = this;
-    var msg = document.getElementById('channel-24h-msg');
-    var resultsEl = document.getElementById('channel-24h-results');
-    btn.disabled = true;
-    resultsEl.style.display = 'none';
-    msg.textContent = 'Reading the channel — this can take a moment…'; msg.className = 'msg';
-    fetch('/admin/channel-last-24h?password=' + encodeURIComponent(password))
+  // ── Channel Report — the primary, channel-sourced report. Independent
+  // date range/filter state from the KV-log analytics section below; both
+  // read from the same admin 'password', nothing else shared between them.
+  var chState = { rangeDays: 1, customStart: null, customEnd: null, filter: 'all' };
+
+  function computeChRange() {
+    if (chState.rangeDays === 'custom' && chState.customStart && chState.customEnd) {
+      return { start: chState.customStart, end: chState.customEnd };
+    }
+    var end = new Date();
+    var start = new Date(end.getTime() - chState.rangeDays * 24 * 60 * 60 * 1000);
+    return { start: start.toISOString(), end: end.toISOString() };
+  }
+
+  function renderChannelReport(d) {
+    document.getElementById('ch-status-line').textContent =
+      'Showing ' + fmtRange(d.start, d.end) + ' · filter: ' + d.filter + ' · updated ' + new Date().toLocaleTimeString();
+    document.getElementById('ch-kpi-bookings').textContent = d.uniqueBookingCount;
+    document.getElementById('ch-kpi-bookings-sub').textContent = d.filter === 'all' ? 'All Confirm & Flag activity' : 'Filter: ' + d.filter;
+    document.getElementById('ch-kpi-messages').textContent = d.messageCount;
+
+    document.getElementById('ch-booking-table-body').innerHTML = d.bookings.length
+      ? d.bookings.map(function (b) {
+          var mismatch = (b.mismatchedFields || []).length ? escHtml(b.mismatchedFields.join(', ')) : '<span class="muted">none</span>';
+          var when = b.at ? new Date(b.at).toLocaleString() : '—';
+          return '<tr><td>' + escHtml(b.bookingId || '—') + (b.retroactive ? ' <span class="muted">(late)</span>' : '') + '</td>' +
+            '<td>' + escHtml(b.agentEmail || '—') + '</td>' +
+            '<td>' + mismatch + '</td>' +
+            '<td>' + escHtml(when) + '</td></tr>';
+        }).join('')
+      : '<tr><td colspan="4" class="empty-note">No Confirm & Flag activity for this range and filter.</td></tr>';
+    document.getElementById('ch-booking-truncated-note').style.display = d.bookingsTruncated ? 'block' : 'none';
+
+    document.getElementById('ch-person-table-body').innerHTML = d.perPersonUniqueBookings.length
+      ? d.perPersonUniqueBookings.map(function (row, i) {
+          return '<tr><td><span class="rank-badge">' + (i + 1) + '</span>' + escHtml(row[0]) + '</td><td class="num tabular">' + row[1] + '</td></tr>';
+        }).join('')
+      : '<tr><td colspan="2" class="empty-note">No one has flagged a booking in this range.</td></tr>';
+  }
+
+  function loadChannelReport() {
+    if (!password) return;
+    var range = computeChRange();
+    document.getElementById('ch-status-line').textContent = 'Reading the channel — this can take a moment…';
+    fetch('/admin/channel-report?password=' + encodeURIComponent(password) +
+      '&start=' + encodeURIComponent(range.start) + '&end=' + encodeURIComponent(range.end) +
+      '&filter=' + encodeURIComponent(chState.filter))
       .then(function (res) { return res.json().then(function (data) { return { ok: res.ok, data: data }; }); })
       .then(function (r) {
-        btn.disabled = false;
-        if (!r.ok || !r.data.ok) { msg.textContent = (r.data && r.data.error) || 'Failed'; msg.className = 'msg err'; return; }
-        msg.textContent = '';
-        var d = r.data;
-        var perPersonLines = d.perPersonUniqueBookings.length
-          ? d.perPersonUniqueBookings.map(function (row) {
-              return '<div>' + escHtml(row[0]) + ': <b>' + row[1] + '</b> unique booking(s)</div>';
-            }).join('')
-          : '<div class="muted">No Confirm & Flag activity in the last 24 hours.</div>';
-        resultsEl.innerHTML =
-          '<div><b>' + d.uniqueBookingCount + '</b> unique booking(s) flagged — ' + d.messageCount + ' message(s)</div>' +
-          '<div style="margin-top:8px"><b>Per person:</b></div>' + perPersonLines;
-        resultsEl.style.display = 'block';
+        if (!r.ok || !r.data.ok) {
+          document.getElementById('ch-status-line').textContent = 'Could not load data: ' + ((r.data && r.data.error) || ('HTTP ' + (r.status || '?')));
+          return;
+        }
+        renderChannelReport(r.data);
       })
       .catch(function (err) {
-        btn.disabled = false;
-        msg.textContent = 'Request failed: ' + err.message; msg.className = 'msg err';
+        document.getElementById('ch-status-line').textContent = 'Request failed: ' + err.message;
       });
+  }
+
+  document.querySelectorAll('#ch-range-group .range-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var range = btn.getAttribute('data-range');
+      document.querySelectorAll('#ch-range-group .range-btn').forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      if (range === 'custom') { document.getElementById('ch-custom-range').classList.add('open'); return; }
+      document.getElementById('ch-custom-range').classList.remove('open');
+      chState.rangeDays = parseInt(range, 10);
+      loadChannelReport();
+    });
   });
+  document.getElementById('ch-custom-apply-btn').addEventListener('click', function () {
+    var s = document.getElementById('ch-custom-start').value, e = document.getElementById('ch-custom-end').value;
+    if (!s || !e) return;
+    chState.rangeDays = 'custom';
+    chState.customStart = new Date(s).toISOString();
+    chState.customEnd = new Date(e).toISOString();
+    loadChannelReport();
+  });
+  document.querySelectorAll('#ch-filter-group .range-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      document.querySelectorAll('#ch-filter-group .range-btn').forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      chState.filter = btn.getAttribute('data-filter');
+      loadChannelReport();
+    });
+  });
+  document.getElementById('ch-refresh-btn').addEventListener('click', loadChannelReport);
 
   // ── Analytics — merged in from the former separate /dashboard page.
   // Reuses the same admin 'password' already unlocked above — no separate
@@ -2160,10 +2322,10 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
       });
   }
 
-  document.querySelectorAll('.range-btn').forEach(function (btn) {
+  document.querySelectorAll('#range-group .range-btn').forEach(function (btn) {
     btn.addEventListener('click', function () {
       var range = btn.getAttribute('data-range');
-      document.querySelectorAll('.range-btn').forEach(function (b) { b.classList.remove('active'); });
+      document.querySelectorAll('#range-group .range-btn').forEach(function (b) { b.classList.remove('active'); });
       btn.classList.add('active');
       if (range === 'custom') { document.getElementById('custom-range').classList.add('open'); return; }
       document.getElementById('custom-range').classList.remove('open');
