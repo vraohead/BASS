@@ -1206,6 +1206,8 @@ function buildVerifySection(flat, guestData) {
       mimeType,
       verifiedAt: new Date().toISOString(),
       workerUrl: DEFAULT_WORKER_URL,
+      vendor: vendorName,
+      product,
     });
 
     confirmBtn.disabled = false;
@@ -1384,6 +1386,8 @@ function buildLateConfirmSection(flat) {
       mimeType,
       verifiedAt: new Date().toISOString(),
       workerUrl: DEFAULT_WORKER_URL,
+      vendor: getPrimaryVendor(flat)?.vendorName || '',
+      product: flat.productName || getPrimaryVendor(flat)?.productName || '',
     });
 
     confirmBtn.disabled = false;

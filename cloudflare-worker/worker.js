@@ -28,8 +28,11 @@
 //                             slice of tracking, the AI check itself is
 //                             unaffected.
 //   POST /confirm-flag     { bookingId, agentEmail, confirmed, skipped,
-//                            imageBase64?, mimeType?, verifiedAt }
+//                            imageBase64?, mimeType?, verifiedAt, vendor?, product? }
 //                          -> { ok: true, steps: [...], screenshotError? }
+//                          Also records a verifylog: event (same as /verify) so every
+//                          Confirm & Flag click counts toward usage — this fires far more
+//                          often than AI Verify itself, so it's the real usage signal.
 //   GET  /admin/send-daily-code?password=...    -> manually trigger the Slack post (for testing)
 //   GET  /admin/send-usage-report?password=...&alsoMainChannel=  -> send the totals report to
 //                                                   the passcode channel right now (also wired to
@@ -141,7 +144,7 @@
 
 // Bump this string whenever you paste a new version into the dashboard —
 // visiting GET /debug-env instantly confirms whether a deploy took effect.
-const WORKER_VERSION = '2026-09-20-08';
+const WORKER_VERSION = '2026-09-21-01';
 
 // Formats an ISO timestamp as a clean IST string, e.g. "6 Sep 2026, 10:44 PM IST".
 function formatIST(isoString) {
@@ -204,7 +207,7 @@ export default {
     }
 
     if (request.method === 'POST' && url.pathname === '/confirm-flag') {
-      return handleConfirmFlag(request, env);
+      return handleConfirmFlag(request, env, ctx);
     }
 
     if (request.method === 'POST' && url.pathname === '/verify') {
@@ -937,7 +940,7 @@ async function handleAdminUsageReportRange(request, env, url) {
 
 // ── /confirm-flag — post to Slack (message + screenshot, unified) ─────────────
 
-async function handleConfirmFlag(request, env) {
+async function handleConfirmFlag(request, env, ctx) {
   const steps = [];
   const logStep = (step, ok, detail) => steps.push({ step, ok, detail, at: new Date().toISOString() });
 
@@ -952,8 +955,25 @@ async function handleConfirmFlag(request, env) {
 
   const {
     bookingId, agentEmail, confirmed = [], skipped = [], retroactive = false,
-    imageBase64, mimeType = 'image/png', verifiedAt,
+    imageBase64, mimeType = 'image/png', verifiedAt, vendor, product,
   } = body;
+
+  // This is the real, common usage signal — every Confirm & Flag click,
+  // whether or not AI Verify ran on this booking — so it counts toward
+  // "unique bookings actioned" the same way an AI Verify check does.
+  // mismatchedFields here means "skipped despite a mismatch", not an AI
+  // classification, but summarizeEvents() treats both the same way.
+  if (ctx) {
+    ctx.waitUntil(recordVerifyEvent(env, {
+      bookingId: bookingId || null,
+      agentEmail: agentEmail || null,
+      vendor: vendor || null,
+      product: product || null,
+      pageType: null,
+      totalChecks: confirmed.length + skipped.length,
+      mismatchedFields: skipped.map(s => s.label),
+    }));
+  }
 
   if (!env.SLACK_BOT_TOKEN) {
     logStep('check_slack_token', false, 'SLACK_BOT_TOKEN secret not set');
