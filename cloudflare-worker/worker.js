@@ -180,7 +180,7 @@
 
 // Bump this string whenever you paste a new version into the dashboard —
 // visiting GET /debug-env instantly confirms whether a deploy took effect.
-const WORKER_VERSION = '2026-09-21-07';
+const WORKER_VERSION = '2026-09-21-08';
 
 // Formats an ISO timestamp as a clean IST string, e.g. "6 Sep 2026, 10:44 PM IST".
 function formatIST(isoString) {
@@ -856,7 +856,12 @@ function parseConfirmFlagMessage(text, ts) {
 
   const tourId = stripSlackLink(text.match(/\*Tour ID:\*\s*(\S+)/)?.[1]);
   const vendorId = stripSlackLink(text.match(/\*Vendor ID:\*\s*(\S+)/)?.[1]);
-  const vendorProductLine = text.match(/\*Vendor:\*\s*(.+?)\s*\|\s*\*Experience:\*\s*(.+)/);
+  // Non-greedy + lookahead stop: this line may continue with "  |  *Tour
+  // ID:* ..." right after the experience name, which a plain (.+) would
+  // swallow into the captured product name.
+  // Accepts either separator: "·" is current, "|" is what messages posted
+  // earlier the same day this feature shipped used.
+  const vendorProductLine = text.match(/\*Vendor:\*\s*(.+?)\s*(?:·|\|)\s*\*Experience:\*\s*(.+?)(?=\s*\|\s*\*Tour ID:\*|\n|$)/);
   const vendor = vendorProductLine?.[1]?.trim();
   const product = vendorProductLine?.[2]?.trim();
   // Mirrors handleConfirmFlag()'s label choices exactly. "Final ticket" is
@@ -878,22 +883,42 @@ function parseConfirmFlagMessage(text, ts) {
     else if (/Checkout page/i.test(pageTypeLineRaw)) pageType = 'checkout';
   }
 
+  // Current format puts each entry on its own "• " bullet line under a bold
+  // header; messages posted before that change have the same entries
+  // pipe-joined directly after the header on one line. This normalizes
+  // either shape back to a single pipe-joined string so the rest of the
+  // parsing below (unchanged) doesn't care which one it got.
+  const extractFieldBlock = headerText => {
+    const idx = text.indexOf(headerText);
+    if (idx === -1) return null;
+    const afterLines = text.slice(idx + headerText.length).split('\n');
+    const sameLineRest = afterLines[0].trim();
+    if (sameLineRest) return sameLineRest; // old single-line format
+    const bullets = [];
+    for (let i = 1; i < afterLines.length; i++) {
+      const t = afterLines[i].trim();
+      if (!t.startsWith('•')) break;
+      bullets.push(t.replace(/^•\s*/, ''));
+    }
+    return bullets.length ? bullets.join('  |  ') : null;
+  };
+
   const parseFieldList = raw => (raw || '').split('  |  ').filter(Boolean).map(part => {
     const m = part.match(/^(.+?):\s*(.*)$/);
     return m ? { label: m[1].trim(), value: m[2].trim() } : { label: part.trim(), value: '' };
   });
-  const matchedRaw = text.match(/\*Matched:\*\s*(.+)/)?.[1];
+  const matchedRaw = extractFieldBlock('*Matched:*');
   // "Skipped (not found)" is the current label; older messages posted before
-  // this wording change say "Skipped (mismatch acknowledged)" — match either
-  // so historical channel history (backfill, audit) still parses correctly.
-  const skippedRaw = text.match(/\*Skipped \((?:not found|mismatch acknowledged)\):\*\s*(.+)/)?.[1];
+  // this wording change say "Skipped (mismatch acknowledged)" — try both so
+  // historical channel history (backfill, audit) still parses correctly.
+  const skippedRaw = extractFieldBlock('*Skipped (not found):*') || extractFieldBlock('*Skipped (mismatch acknowledged):*');
   const confirmed = parseFieldList(matchedRaw);
   const skipped = parseFieldList(skippedRaw);
 
-  // "label — expected X, screenshot shows Y (reason: Z)" per entry — only
-  // the label matters for mismatchedFields aggregation, so that's all this
-  // pulls out; the fuller detail stays in the Slack message itself.
-  const overriddenRaw = text.match(/\*:rotating_light: Confirmed despite mismatch:\*\s*(.+)/)?.[1];
+  // "label — expected X, shows Y (reason)" per entry — only the label
+  // matters for mismatchedFields aggregation, so that's all this pulls out;
+  // the fuller detail stays in the Slack message itself.
+  const overriddenRaw = extractFieldBlock('*:rotating_light: Confirmed despite mismatch:*');
   const overriddenLabels = (overriddenRaw || '').split('  |  ').filter(Boolean)
     .map(part => part.split(' — ')[0].trim());
 
@@ -1380,27 +1405,36 @@ async function handleConfirmFlag(request, env, ctx) {
     pageTypeLine = '*Page type:* :warning: Incorrect flag — other (not a checkout page or a ticket)';
   }
 
+  // One bullet per field, on its own line — a pipe-joined single line reads
+  // as a wall of text once there's more than one or two mismatches (this is
+  // what agents actually see in the channel, so it has to stay scannable).
+  const bulletBlock = (header, items, formatFn) =>
+    items.length ? `${header}\n${items.map(c => `• ${formatFn(c)}`).join('\n')}` : null;
+
   const lines = [
     retroactive
       ? ':rotating_light: *Booking Confirmed — Late (no prior verification run)*'
       : ':white_check_mark: *Booking Verification Confirmed*',
-    `*Booking ID:* ${bookingId || 'n/a'}`,
-    `*Confirmed by:* ${agentEmail || 'unknown'}`,
-    (vendor || product) ? `*Vendor:* ${vendor || 'n/a'}  |  *Experience:* ${product || 'n/a'}` : null,
-    (tourId || vendorId) ? `*Tour ID:* ${tourId || 'n/a'}  |  *Vendor ID:* ${vendorId || 'n/a'}` : null,
+    `*Booking ID:* ${bookingId || 'n/a'} · *Confirmed by:* ${agentEmail || 'unknown'}`,
+    (vendor || product || tourId || vendorId)
+      ? [
+          (vendor || product) ? `*Vendor:* ${vendor || 'n/a'} · *Experience:* ${product || 'n/a'}` : null,
+          (tourId || vendorId) ? `*Tour ID:* ${tourId || 'n/a'} · *Vendor ID:* ${vendorId || 'n/a'}` : null,
+        ].filter(Boolean).join('  |  ')
+      : null,
     pageTypeLine,
-    confirmed.length
-      ? `*Matched:* ${confirmed.map(c => `${c.label}: ${c.value}`).join('  |  ')}`
-      : null,
-    skipped.length
-      ? `*Skipped (not found):* ${skipped.map(c => `${c.label}: ${c.value}`).join('  |  ')}`
-      : null,
-    overridden.length
-      ? `*:rotating_light: Confirmed despite mismatch:* ${overridden.map(c => `${c.label} — expected ${c.expected || 'n/a'}, screenshot shows ${c.value || 'n/a'} (reason: ${c.reason || 'none given'})`).join('  |  ')}`
-      : null,
+    '',
+    bulletBlock('*Matched:*', confirmed, c => `${c.label}: ${c.value}`),
+    bulletBlock('*Skipped (not found):*', skipped, c => `${c.label}: ${c.value}`),
+    bulletBlock(
+      '*:rotating_light: Confirmed despite mismatch:*',
+      overridden,
+      c => `${c.label} — expected ${c.expected || 'n/a'}, shows ${c.value || 'n/a'} (${c.reason || 'no reason given'})`
+    ),
     retroactive ? '*Note:* Confirmed via Late Confirm — ticket was already booked, verification step was skipped at the time.' : null,
+    '',
     verifiedAt ? `*At:* ${formatIST(verifiedAt)}` : null,
-  ].filter(Boolean).join('\n');
+  ].filter(v => v !== null).join('\n');
 
   // If there's a screenshot, post it as ONE unified message — the text goes
   // in as the file's initial_comment, so Slack renders text + image together
