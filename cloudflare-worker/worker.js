@@ -188,7 +188,7 @@
 
 // Bump this string whenever you paste a new version into the dashboard —
 // visiting GET /debug-env instantly confirms whether a deploy took effect.
-const WORKER_VERSION = '2026-09-21-10';
+const WORKER_VERSION = '2026-09-21-11';
 
 // Formats an ISO timestamp as a clean IST string, e.g. "6 Sep 2026, 10:44 PM IST".
 function formatIST(isoString) {
@@ -530,6 +530,60 @@ function downgradeFalseTimeMismatches(checks) {
   }
 }
 
+const MONTH_NUMBERS = {
+  jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
+  jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12,
+};
+const pad2 = n => String(n).padStart(2, '0');
+
+// Same failure mode as time above, for dates — the prompt already says
+// "14 Sep 2026", "2026-09-14", "Sep 14, 2026", "14/09/2026" can all be the
+// same calendar date, but the model can still misjudge two differently-
+// formatted-but-identical dates as a mismatch. Parsing to a plain
+// YYYY-MM-DD and comparing is deterministic, so it catches that slip the
+// same way the time guard does, without needing any judgment of its own.
+function parseDateToISODay(str) {
+  if (!str) return null;
+  const s = String(str).trim();
+
+  let m = s.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/); // 2026-07-29
+  if (m) return `${m[1]}-${pad2(m[2])}-${pad2(m[3])}`;
+
+  m = s.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/); // 29/07/2026 (day-month-year)
+  if (m) {
+    const day = parseInt(m[1], 10), month = parseInt(m[2], 10);
+    if (day > 12 && month <= 12) return `${m[3]}-${pad2(month)}-${pad2(day)}`;
+    if (month > 12 && day <= 12) return `${m[3]}-${pad2(day)}-${pad2(month)}`;
+    return `${m[3]}-${pad2(month)}-${pad2(day)}`; // ambiguous — assume day-month-year
+  }
+
+  m = s.match(/^(\d{1,2})\s+([A-Za-z]{3,9}),?\s+(\d{4})$/); // 29 Jul 2026
+  if (m) {
+    const mon = MONTH_NUMBERS[m[2].slice(0, 3).toLowerCase()];
+    if (mon) return `${m[3]}-${pad2(mon)}-${pad2(m[1])}`;
+  }
+
+  m = s.match(/^([A-Za-z]{3,9})\s+(\d{1,2}),?\s+(\d{4})$/); // Jul 29, 2026 / Jul 29 2026
+  if (m) {
+    const mon = MONTH_NUMBERS[m[1].slice(0, 3).toLowerCase()];
+    if (mon) return `${m[3]}-${pad2(mon)}-${pad2(m[2])}`;
+  }
+
+  return null;
+}
+
+function downgradeFalseDateMismatches(checks) {
+  for (const c of checks || []) {
+    if (c.status !== 'mismatch' || !/date/i.test(c.label || '')) continue;
+    const expectedDay = parseDateToISODay(c.expected);
+    const seenDay = parseDateToISODay(c.seenValue);
+    if (expectedDay !== null && seenDay !== null && expectedDay === seenDay) {
+      c.status = 'match';
+      c.seenValue = '';
+    }
+  }
+}
+
 // The prompt instructs the model to include one check per non-empty field
 // (see the "Rules" section above), but that's still just an instruction —
 // nothing in the schema enforces it, and a busy/uncertain completion can
@@ -745,6 +799,7 @@ Rules:
   }
 
   downgradeFalseTimeMismatches(result.checks);
+  downgradeFalseDateMismatches(result.checks);
   result.checks = fillMissingChecks(result.checks, expectedFields);
 
   // Fire-and-forget: logs one permanent usage event for the reports below
