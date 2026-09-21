@@ -27,9 +27,14 @@
 //                             report below — omitting any just skips that
 //                             slice of tracking, the AI check itself is
 //                             unaffected.
-//   POST /confirm-flag     { bookingId, agentEmail, confirmed, skipped,
+//   POST /confirm-flag     { bookingId, agentEmail, confirmed, skipped, overridden,
 //                            imageBase64?, mimeType?, verifiedAt, vendor?, product?,
 //                            vendorId?, tourId?, pageType? }
+//                          skipped = {label,value}[] for a NOT-FOUND field (checkbox-skip in the
+//                          extension); overridden = {label,value,expected,reason}[] for a field
+//                          AI Verify actually read and found to CONTRADICT the booking record — a
+//                          stricter path in the extension (typed reason required, not a checkbox),
+//                          called out in its own alert line since it's the higher-severity case.
 //                          vendor/product/pageType go into both the Slack alert text AND
 //                          the verifylog: KV entry — vendorId/tourId (Scorpio/Aries lookup)
 //                          go into the alert text only, not the usage log.
@@ -175,7 +180,7 @@
 
 // Bump this string whenever you paste a new version into the dashboard —
 // visiting GET /debug-env instantly confirms whether a deploy took effect.
-const WORKER_VERSION = '2026-09-21-06';
+const WORKER_VERSION = '2026-09-21-07';
 
 // Formats an ISO timestamp as a clean IST string, e.g. "6 Sep 2026, 10:44 PM IST".
 function formatIST(isoString) {
@@ -527,17 +532,22 @@ async function handleVerify(request, env, ctx) {
   // Deliberately verbose and explicit — the aim is to eliminate manual
   // re-checking entirely, not just catch the easy cases. Every rule below
   // exists because a naive exact-string-match prompt used to miss it.
-  const prompt = `You are a meticulous booking-verification assistant. Agents capture this screenshot BEFORE finalizing a booking on a vendor site, to catch mistakes (wrong date, wrong pax, wrong tour) while they can still be fixed — so it should show the CHECKOUT / CART / PAYMENT page with the booking details entered but not yet confirmed, not an already-issued ticket. Getting the field checks wrong in either direction causes real problems — a false "found: true" lets a mistake through, and a false "found: false" creates needless manual review — so read carefully and think about what's actually shown before answering.
+  const prompt = `You are a meticulous booking-verification assistant. Agents capture this screenshot BEFORE finalizing a booking on a vendor site, to catch mistakes (wrong date, wrong pax, wrong tour) while they can still be fixed — so it should show the CHECKOUT / CART / PAYMENT page with the booking details entered but not yet confirmed, not an already-issued ticket. Getting a field's status wrong causes real problems in either direction — calling a genuine mismatch a "match" lets a mistake through, and calling a merely-unclear field a "mismatch" causes needless alarm — so read carefully and think about what's actually shown before answering.
 
 Booking record to match against the screenshot:
 ${factLines}
 
-How to judge each field:
-1. Date: dates are often written in completely different formats between the booking record and the screenshot (e.g. "14 Sep 2026", "2026-09-14", "Sep 14, 2026", "14/09/2026" can all be the SAME date). Parse both and compare the actual calendar date, not the text formatting. Only mark found:false if the calendar date shown is genuinely different, missing, or illegible.
-2. Time: same principle — "3:00 PM", "15:00", and "3 PM" are the same time of day. Allow for a different timezone label as long as the underlying time is consistent with the booking; only mark found:false if the actual time of day is genuinely different or not shown.
-3. Total pax (guests): look for the TOTAL guest/pax/ticket count shown in the screenshot. If the screenshot breaks pax down by type (e.g. "2 Adults, 1 Child"), add them up yourself and compare the sum to the expected total — do not mark found:false just because no single number matches if the breakdown sums to the expected total.
+How to judge each field — for every field, decide between three states:
+- "match": the value shown is unambiguously the same as expected (after the format-tolerance rules below).
+- "mismatch": the field IS visible and readable in the screenshot, but shows a DIFFERENT value than expected — a genuine contradiction, not just a formatting difference. When you report this, you must also give seenValue: the actual value you read from the screenshot.
+- "not_found": the field is missing, blank, cropped off, or too illegible to read at all — there is nothing to compare, so this is not a contradiction, just an absence. seenValue should be an empty string.
+
+Per-field tolerance rules (apply before deciding match vs. mismatch):
+1. Date: dates are often written in completely different formats between the booking record and the screenshot (e.g. "14 Sep 2026", "2026-09-14", "Sep 14, 2026", "14/09/2026" can all be the SAME date). Parse both and compare the actual calendar date, not the text formatting. Only mark mismatch if the calendar date shown is genuinely a different date.
+2. Time: same principle — "3:00 PM", "15:00", and "3 PM" are the same time of day. Allow for a different timezone label as long as the underlying time is consistent with the booking; only mark mismatch if the actual time of day is genuinely different.
+3. Total pax (guests): look for the TOTAL guest/pax/ticket count shown in the screenshot. If the screenshot breaks pax down by type (e.g. "2 Adults, 1 Child"), add them up yourself and compare the sum to the expected total — do not mark mismatch just because no single number matches if the breakdown sums to the expected total.
 4. Net price: ignore currency symbol, comma, and decimal-formatting differences; compare the numeric amount itself.
-5. Product / experience name: compare the tour/experience/product name shown in the screenshot against the expected name. Minor wording differences (abbreviations, punctuation, added suffixes like "- with hotel pickup", capitalization) still count as a match if it is clearly the same experience. A genuinely different tour or activity is not a match.
+5. Product / experience name: compare the tour/experience/product name shown in the screenshot against the expected name. Minor wording differences (abbreviations, punctuation, added suffixes like "- with hotel pickup", capitalization) still count as a match if it is clearly the same experience. A genuinely different tour or activity is a mismatch, not a not_found.
 
 Separately — always answer this regardless of the fields above:
 6. Page type: classify what the screenshot actually shows, as exactly one of:
@@ -546,11 +556,12 @@ Separately — always answer this regardless of the fields above:
    - "other": neither of the above — a blank/loading page, an error page, a login/session-expired screen, an unrelated page, or anything else that isn't a checkout page or a ticket. Use this rather than forcing a screenshot into "checkout" or "ticket" when it's genuinely neither.
 
 Reply ONLY with valid JSON in this exact shape — no markdown, no extra text:
-{"checks":[{"label":"Date","expected":"${date}","found":true},{"label":"Time","expected":"${time}","found":false}],"pageType":"checkout","pageTypeNote":""}
+{"checks":[{"label":"Date","expected":"${date}","status":"match","seenValue":""},{"label":"Time","expected":"${time}","status":"mismatch","seenValue":"11:00 AM"}],"pageType":"checkout","pageTypeNote":""}
 
 Rules:
 - Only include a check for a field if its expected value above is non-empty.
-- Set found to true only when the value is unambiguously present after applying the format-tolerance rules above.
+- status must be exactly one of "match", "mismatch", or "not_found" per the definitions above.
+- seenValue is required (non-empty) when status is "mismatch", and must be an empty string otherwise.
 - pageType must be exactly one of "checkout", "ticket", or "other" per the definitions above.
 - pageTypeNote: if pageType is not "checkout", a short (under 15 words) reason why (e.g. "Shows a confirmed booking number and QR code — this is an issued ticket, not a checkout page", or "Blank/loading page — no booking content visible yet"); otherwise an empty string.`;
 
@@ -570,11 +581,12 @@ Rules:
           items: {
             type: 'object',
             properties: {
-              label:    { type: 'string' },
-              expected: { type: 'string' },
-              found:    { type: 'boolean' },
+              label:     { type: 'string' },
+              expected:  { type: 'string' },
+              status:    { type: 'string', enum: ['match', 'mismatch', 'not_found'] },
+              seenValue: { type: 'string' },
             },
-            required: ['label', 'expected', 'found'],
+            required: ['label', 'expected', 'status', 'seenValue'],
             additionalProperties: false,
           },
         },
@@ -669,7 +681,7 @@ Rules:
   // stats, vendor/experience breakdowns, per-person breakdowns, and custom
   // date-range queries all derive from this same log). Never blocks the
   // response on this.
-  const mismatchedFields = (result.checks || []).filter(c => c.found === false).map(c => c.label);
+  const mismatchedFields = (result.checks || []).filter(c => c.status !== 'match').map(c => c.label);
   ctx.waitUntil(recordVerifyEvent(env, {
     bookingId: bookingId || null,
     agentEmail: agentEmail || null,
@@ -871,9 +883,19 @@ function parseConfirmFlagMessage(text, ts) {
     return m ? { label: m[1].trim(), value: m[2].trim() } : { label: part.trim(), value: '' };
   });
   const matchedRaw = text.match(/\*Matched:\*\s*(.+)/)?.[1];
-  const skippedRaw = text.match(/\*Skipped \(mismatch acknowledged\):\*\s*(.+)/)?.[1];
+  // "Skipped (not found)" is the current label; older messages posted before
+  // this wording change say "Skipped (mismatch acknowledged)" — match either
+  // so historical channel history (backfill, audit) still parses correctly.
+  const skippedRaw = text.match(/\*Skipped \((?:not found|mismatch acknowledged)\):\*\s*(.+)/)?.[1];
   const confirmed = parseFieldList(matchedRaw);
   const skipped = parseFieldList(skippedRaw);
+
+  // "label — expected X, screenshot shows Y (reason: Z)" per entry — only
+  // the label matters for mismatchedFields aggregation, so that's all this
+  // pulls out; the fuller detail stays in the Slack message itself.
+  const overriddenRaw = text.match(/\*:rotating_light: Confirmed despite mismatch:\*\s*(.+)/)?.[1];
+  const overriddenLabels = (overriddenRaw || '').split('  |  ').filter(Boolean)
+    .map(part => part.split(' — ')[0].trim());
 
   return {
     bookingId: bookingId === 'n/a' ? null : bookingId || null,
@@ -883,8 +905,8 @@ function parseConfirmFlagMessage(text, ts) {
     vendor: vendor === 'n/a' ? null : vendor || null,
     product: product === 'n/a' ? null : product || null,
     pageType: pageType || null,
-    totalChecks: confirmed.length + skipped.length,
-    mismatchedFields: skipped.map(s => s.label),
+    totalChecks: confirmed.length + skipped.length + overriddenLabels.length,
+    mismatchedFields: skipped.map(s => s.label).concat(overriddenLabels),
     retroactive,
     at: new Date(parseFloat(ts) * 1000).toISOString(),
     ts,
@@ -1307,15 +1329,17 @@ async function handleConfirmFlag(request, env, ctx) {
   }
 
   const {
-    bookingId, agentEmail, confirmed = [], skipped = [], retroactive = false,
+    bookingId, agentEmail, confirmed = [], skipped = [], overridden = [], retroactive = false,
     imageBase64, mimeType = 'image/png', verifiedAt, vendor, product, vendorId, tourId, pageType,
   } = body;
 
   // This is the real, common usage signal — every Confirm & Flag click,
   // whether or not AI Verify ran on this booking — so it counts toward
   // "unique bookings actioned" the same way an AI Verify check does.
-  // mismatchedFields here means "skipped despite a mismatch", not an AI
-  // classification, but summarizeEvents() treats both the same way.
+  // mismatchedFields covers both skipped (not found) and overridden (a
+  // genuine contradiction, confirmed anyway) — summarizeEvents() treats
+  // both the same way for match-rate/most-mismatched purposes; only the
+  // Slack alert text below distinguishes the two by severity.
   // pageType is only ever set when AI Verify actually ran first (never for
   // Late Confirm) — passed through as-is, null otherwise.
   if (ctx) {
@@ -1325,8 +1349,8 @@ async function handleConfirmFlag(request, env, ctx) {
       vendor: vendor || null,
       product: product || null,
       pageType: pageType || null,
-      totalChecks: confirmed.length + skipped.length,
-      mismatchedFields: skipped.map(s => s.label),
+      totalChecks: confirmed.length + skipped.length + overridden.length,
+      mismatchedFields: skipped.map(s => s.label).concat(overridden.map(o => o.label)),
     }));
   }
 
@@ -1369,7 +1393,10 @@ async function handleConfirmFlag(request, env, ctx) {
       ? `*Matched:* ${confirmed.map(c => `${c.label}: ${c.value}`).join('  |  ')}`
       : null,
     skipped.length
-      ? `*Skipped (mismatch acknowledged):* ${skipped.map(c => `${c.label}: ${c.value}`).join('  |  ')}`
+      ? `*Skipped (not found):* ${skipped.map(c => `${c.label}: ${c.value}`).join('  |  ')}`
+      : null,
+    overridden.length
+      ? `*:rotating_light: Confirmed despite mismatch:* ${overridden.map(c => `${c.label} — expected ${c.expected || 'n/a'}, screenshot shows ${c.value || 'n/a'} (reason: ${c.reason || 'none given'})`).join('  |  ')}`
       : null,
     retroactive ? '*Note:* Confirmed via Late Confirm — ticket was already booked, verification step was skipped at the time.' : null,
     verifiedAt ? `*At:* ${formatIST(verifiedAt)}` : null,

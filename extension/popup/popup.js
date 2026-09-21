@@ -778,47 +778,95 @@ document.addEventListener('paste', e => {
 // text — no AI call needed. Used both by the standalone "Capture Response"
 // pane and to cross-check the AI Verify result when both were captured.
 function computeTextChecks(text, { date, time, pax, price, product }) {
+  // A plain substring search can only tell us present-or-absent — it has no
+  // way to know what WRONG value is shown, so it only ever produces 'match'
+  // or 'not_found', never 'mismatch'.
   return [
-    { label: 'Date',      expected: date,    found: date    ? text.includes(date)  : null },
-    { label: 'Time',      expected: time,    found: time    ? text.includes(time.substring(0,5)) : null },
-    { label: 'Pax',       expected: pax,     found: pax     ? new RegExp(`\\b${pax}\\b`).test(text) : null },
-    { label: 'Net Price', expected: price,   found: price   ? text.includes(price) : null },
-    { label: 'Product',   expected: product, found: product ? text.toLowerCase().includes(product.toLowerCase()) : null },
-  ].filter(c => c.expected && c.found !== null);
+    { label: 'Date',      expected: date,    status: date    ? (text.includes(date) ? 'match' : 'not_found') : null },
+    { label: 'Time',      expected: time,    status: time    ? (text.includes(time.substring(0,5)) ? 'match' : 'not_found') : null },
+    { label: 'Pax',       expected: pax,     status: pax     ? (new RegExp(`\\b${pax}\\b`).test(text) ? 'match' : 'not_found') : null },
+    { label: 'Net Price', expected: price,   status: price   ? (text.includes(price) ? 'match' : 'not_found') : null },
+    { label: 'Product',   expected: product, status: product ? (text.toLowerCase().includes(product.toLowerCase()) ? 'match' : 'not_found') : null },
+  ].filter(c => c.expected && c.status !== null).map(c => ({ ...c, seenValue: '' }));
 }
 
 function renderVerifyRow(c, i) {
-  const matched = c.found;
+  const expected = escHtml(String(c.expected ?? ''));
+  const seen = escHtml(String(c.seenValue ?? ''));
+  const label = escHtml(c.label);
+  const dataAttrs = `data-idx="${i}" data-label="${label}" data-expected="${expected}" data-seen="${seen}"`;
+
+  if (c.status === 'match') {
+    return `<div class="verify-result-row match" ${dataAttrs}>
+      <span class="vr-icon">✓</span>
+      <span class="vr-label">${label}</span>
+      <span class="vr-value">${expected}</span>
+      <span class="vr-status">Found</span>
+    </div>`;
+  }
+
+  if (c.status === 'mismatch') {
+    // Strict path: the field WAS readable and it contradicts the booking
+    // record — a checkbox is too easy to click without reading, so this
+    // needs a typed reason before the Override button even enables.
+    return `<div class="verify-result-row nomatch mismatch" ${dataAttrs}>
+      <span class="vr-icon">⚠️</span>
+      <span class="vr-label">${label}</span>
+      <span class="vr-value">Expected: ${expected} — Screenshot shows: ${seen}</span>
+      <span class="vr-status">Mismatch</span>
+      <div class="vr-override-row">
+        <input type="text" class="vr-override-reason" placeholder="Why is this okay to confirm anyway?">
+        <button type="button" class="vr-override-btn" disabled>Override</button>
+      </div>
+    </div>`;
+  }
+
+  // not_found: nothing to contradict, just missing/unclear — the lighter
+  // one-click checkbox is proportionate here.
   const skipId = `vr-skip-${i}`;
-  const skipChk = matched ? '' : `
+  return `<div class="verify-result-row nomatch not-found" ${dataAttrs}>
+    <span class="vr-icon">✗</span>
+    <span class="vr-label">${label}</span>
+    <span class="vr-value">${expected}</span>
+    <span class="vr-status">Not found</span>
     <label class="vr-skip-label" for="${skipId}">
       <input type="checkbox" class="vr-skip-chk" id="${skipId}"> Skip
-    </label>`;
-  return `<div class="verify-result-row ${matched ? 'match' : 'nomatch'}" data-idx="${i}">
-    <span class="vr-icon">${matched ? '✓' : '✗'}</span>
-    <span class="vr-label">${escHtml(c.label)}</span>
-    <span class="vr-value">${escHtml(String(c.expected ?? ''))}</span>
-    <span class="vr-status">${matched ? 'Found' : 'Not found'}</span>
-    ${skipChk}
+    </label>
   </div>`;
 }
 
 function wireSkipBoxes(container, confirmRow) {
   const totalMismatches = container.querySelectorAll('.verify-result-row.nomatch').length;
   const update = () => {
-    const skipped = [...container.querySelectorAll('.verify-result-row.nomatch.skipped')];
+    const resolved = [...container.querySelectorAll('.verify-result-row.nomatch.skipped, .verify-result-row.nomatch.overridden')];
     if (confirmRow) {
-      // Every mismatch must be explicitly skipped before confirming — if
-      // there were no mismatches at all, that's trivially already true.
-      const allSkipped = skipped.length === totalMismatches;
-      confirmRow.hidden = !allSkipped;
+      // Every mismatch must be explicitly skipped or overridden before
+      // confirming — if there were no mismatches at all, that's trivially true.
+      const allResolved = resolved.length === totalMismatches;
+      confirmRow.hidden = !allResolved;
       const lbl = confirmRow.querySelector('.verify-confirm-count');
-      if (lbl) lbl.textContent = totalMismatches ? `${skipped.length}/${totalMismatches} skipped` : 'All fields matched';
+      if (lbl) lbl.textContent = totalMismatches ? `${resolved.length}/${totalMismatches} resolved` : 'All fields matched';
     }
   };
   container.querySelectorAll('.vr-skip-chk').forEach(chk => {
     chk.addEventListener('change', () => {
       chk.closest('.verify-result-row').classList.toggle('skipped', chk.checked);
+      update();
+    });
+  });
+  container.querySelectorAll('.vr-override-reason').forEach(input => {
+    const btn = input.closest('.verify-result-row').querySelector('.vr-override-btn');
+    input.addEventListener('input', () => { btn.disabled = !input.value.trim(); });
+  });
+  container.querySelectorAll('.vr-override-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const row = btn.closest('.verify-result-row');
+      const input = row.querySelector('.vr-override-reason');
+      if (!input.value.trim()) return;
+      row.classList.add('overridden');
+      input.disabled = true;
+      btn.disabled = true;
+      btn.textContent = 'Overridden ✓';
       update();
     });
   });
@@ -1069,6 +1117,12 @@ function buildVerifySection(flat, guestData) {
     // counts as found if either the AI (on the image) or the plain text
     // match confirms it — combining both catches more real matches than
     // either alone, which is the point (fewer false "not found" flags).
+    // A text-only check can only ever say match/not_found (see
+    // computeTextChecks), so it can rescue a false not_found into a match,
+    // but it can never downgrade or confirm an AI-reported mismatch — the
+    // AI's read of the actual screenshot is the stricter, more specific
+    // signal there, and a plain substring hit elsewhere on the page doesn't
+    // disprove a genuine wrong-value contradiction.
     let checks = result.checks || [];
     let crossCheckedNote = '';
     if (sec._capturedResponseText) {
@@ -1076,8 +1130,14 @@ function buildVerifySection(flat, guestData) {
       const byLabel = new Map(checks.map(c => [c.label, { ...c }]));
       for (const tc of textChecks) {
         const existing = byLabel.get(tc.label);
-        if (existing) existing.found = existing.found || tc.found;
-        else byLabel.set(tc.label, tc);
+        if (existing) {
+          if (existing.status === 'not_found' && tc.status === 'match') {
+            existing.status = 'match';
+            existing.seenValue = '';
+          }
+        } else {
+          byLabel.set(tc.label, tc);
+        }
       }
       checks = [...byLabel.values()];
       crossCheckedNote = '<p class="verify-cross-checked">✓ Cross-checked against the page\'s text content too.</p>';
@@ -1151,22 +1211,33 @@ function buildVerifySection(flat, guestData) {
 
   confirmBtn.addEventListener('click', async () => {
     // Defense in depth: even though the button is only revealed once every
-    // mismatch is skipped, never allow a partial confirmation through.
+    // mismatch is resolved (skipped or overridden), never allow a partial
+    // confirmation through.
     const totalMismatches = sec.querySelectorAll('.verify-result-row.nomatch').length;
-    const skippedMismatches = sec.querySelectorAll('.verify-result-row.nomatch.skipped').length;
-    if (totalMismatches > 0 && skippedMismatches < totalMismatches) {
-      confirmStatus.textContent = `Check "Skip" for all ${totalMismatches} mismatched field(s) before confirming.`;
+    const resolvedMismatches = sec.querySelectorAll('.verify-result-row.nomatch.skipped, .verify-result-row.nomatch.overridden').length;
+    if (totalMismatches > 0 && resolvedMismatches < totalMismatches) {
+      confirmStatus.textContent = `Resolve all ${totalMismatches} mismatched field(s) before confirming.`;
       confirmStatus.className = 'verify-confirm-status status-err';
       return;
     }
 
     const rowData = row => ({
-      label: row.querySelector('.vr-label')?.textContent.trim() || '',
-      value: row.querySelector('.vr-value')?.textContent.trim() || '',
+      label: row.dataset.label || '',
+      value: row.dataset.expected || '',
     });
     const allRows = [...sec.querySelectorAll('.verify-result-row')];
     const confirmed = allRows.filter(r => r.classList.contains('match')).map(rowData);
     const skipped = allRows.filter(r => r.classList.contains('skipped')).map(rowData);
+    // Overridden rows carry the seen (wrong) value and the agent's reason —
+    // a stronger, more visible audit trail than a plain skip, since these
+    // are the cases where AI Verify actually caught something contradicting
+    // the booking record.
+    const overridden = allRows.filter(r => r.classList.contains('overridden')).map(row => ({
+      label: row.dataset.label || '',
+      value: row.dataset.seen || '',
+      expected: row.dataset.expected || '',
+      reason: row.querySelector('.vr-override-reason')?.value.trim() || '',
+    }));
 
     confirmBtn.disabled = true;
     confirmBtn.textContent = '⏳ Sending…';
@@ -1211,6 +1282,7 @@ function buildVerifySection(flat, guestData) {
       agentEmail,
       confirmed,
       skipped,
+      overridden,
       imageBase64,
       mimeType,
       verifiedAt: new Date().toISOString(),
@@ -1393,6 +1465,7 @@ function buildLateConfirmSection(flat) {
       agentEmail,
       confirmed: [],
       skipped: [],
+      overridden: [],
       retroactive: true,
       imageBase64,
       mimeType,
