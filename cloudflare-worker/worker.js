@@ -19,14 +19,22 @@
 //   GET  /debug-env      -> { hasSlackToken, hasOpenAiKey, slackChannelId, version }
 //   POST /verify          { imageBase64, mimeType, facts: {date,time,pax,price,product}, bookingId?, agentEmail?, vendor? }
 //                          -> { checks: [...], pageType, pageTypeNote }
-//                             pageType is "checkout" (expected), "ticket"
-//                             (already-issued ticket instead — the flagged
-//                             case), or "other" (neither — blank/error/
-//                             unrelated page). bookingId, agentEmail, and
-//                             vendor (all optional) only feed the usage
-//                             report below — omitting any just skips that
-//                             slice of tracking, the AI check itself is
-//                             unaffected.
+//                             each check is { label, expected, status, seenValue } where
+//                             status is "match", "mismatch" (read, but contradicts the
+//                             record — seenValue required), or "not_found" (missing/
+//                             illegible, nothing to compare). pageType is "checkout"
+//                             (expected), "ticket" (already-issued ticket instead — the
+//                             flagged case), or "other" (neither — blank/error/unrelated
+//                             page). bookingId, agentEmail, and vendor (all optional) only
+//                             feed the usage report below — omitting any just skips that
+//                             slice of tracking, the AI check itself is unaffected.
+//                             If any check comes back "mismatch", this also posts a
+//                             ":triangular_flag_on_post: Mismatch Flagged" alert to the
+//                             confirm-flag channel immediately (stage: 'flagged') — this
+//                             is the only trace left behind for a booking that never makes
+//                             it to Confirm & Flag at all. See stage/strictMismatchFields
+//                             in recordVerifyEvent() and the Pre-Override Flags /
+//                             Override Confirmed dashboard tiles.
 //   POST /confirm-flag     { bookingId, agentEmail, confirmed, skipped, overridden,
 //                            imageBase64?, mimeType?, verifiedAt, vendor?, product?,
 //                            vendorId?, tourId?, pageType? }
@@ -180,7 +188,7 @@
 
 // Bump this string whenever you paste a new version into the dashboard —
 // visiting GET /debug-env instantly confirms whether a deploy took effect.
-const WORKER_VERSION = '2026-09-21-08';
+const WORKER_VERSION = '2026-09-21-09';
 
 // Formats an ISO timestamp as a clean IST string, e.g. "6 Sep 2026, 10:44 PM IST".
 function formatIST(isoString) {
@@ -681,18 +689,75 @@ Rules:
   // stats, vendor/experience breakdowns, per-person breakdowns, and custom
   // date-range queries all derive from this same log). Never blocks the
   // response on this.
+  // mismatchedFields covers both not_found and mismatch (kept for existing
+  // full/partial-match aggregation); strictMismatchFields is only the
+  // 'mismatch' subset — fields AI Verify actually read and found to
+  // contradict the record, i.e. ones that will need an override, not just
+  // a skip. stage:'flagged' marks this as the moment of detection, distinct
+  // from stage:'confirmed' on the later /confirm-flag event for the same
+  // booking — see the "Pre-Override Flags" vs "Override Confirmed" tiles.
   const mismatchedFields = (result.checks || []).filter(c => c.status !== 'match').map(c => c.label);
+  const strictMismatchFields = (result.checks || []).filter(c => c.status === 'mismatch').map(c => c.label);
   ctx.waitUntil(recordVerifyEvent(env, {
     bookingId: bookingId || null,
     agentEmail: agentEmail || null,
     vendor: vendor || null,
-    product: product || null,
+    product: facts.product || null,
     pageType: result.pageType || null,
     totalChecks: (result.checks || []).length,
     mismatchedFields,
+    stage: 'flagged',
+    strictMismatchFields,
   }));
 
+  // A genuine mismatch (not just "couldn't tell") is worth flagging the
+  // moment it's caught, not only once someone gets around to confirming —
+  // this is the one channel-visible trace of a mismatch for a booking that
+  // never makes it to Confirm & Flag at all.
+  if (strictMismatchFields.length && bookingId) {
+    ctx.waitUntil(postPreOverrideFlag(env, {
+      bookingId, agentEmail, vendor, product: facts.product || '',
+      checks: result.checks || [],
+    }));
+  }
+
   return cors(JSON.stringify({ ...result, steps }), 200);
+}
+
+// Posted the moment AI Verify itself catches a genuine mismatch — before
+// the agent has done anything about it (skip, override, or just move on).
+// This is what makes "someone saw a mismatch and never confirmed anything"
+// visible at all — without this, that case leaves zero trace anywhere.
+// Best-effort: never throws past its own ctx.waitUntil, since a Slack
+// hiccup here must never affect the AI Verify result itself. No screenshot
+// attached (keeps this fast and simple) — the full picture, with the
+// image, comes later if/when Confirm & Flag is actually clicked.
+async function postPreOverrideFlag(env, { bookingId, agentEmail, vendor, product, checks }) {
+  if (!env.SLACK_BOT_TOKEN) return;
+  const mismatches = (checks || []).filter(c => c.status === 'mismatch');
+  if (!mismatches.length) return;
+
+  const text = [
+    ':triangular_flag_on_post: *Mismatch Flagged — Awaiting Review*',
+    `*Booking ID:* ${bookingId || 'n/a'} · *Flagged by:* ${agentEmail || 'unknown'}`,
+    (vendor || product) ? `*Vendor:* ${vendor || 'n/a'} · *Experience:* ${product || 'n/a'}` : null,
+    '',
+    `*Mismatched fields:*\n${mismatches.map(c => `• ${c.label} — expected ${c.expected || 'n/a'}, shows ${c.seenValue || 'n/a'}`).join('\n')}`,
+  ].filter(v => v !== null).join('\n');
+
+  try {
+    const res = await fetch('https://slack.com/api/chat.postMessage', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${env.SLACK_BOT_TOKEN}`,
+        'Content-Type': 'application/json; charset=utf-8',
+      },
+      body: JSON.stringify({ channel: SLACK_CHANNEL_ID, text }),
+    });
+    await res.json();
+  } catch (_) {
+    // Best-effort only — see comment above.
+  }
 }
 
 // ── Usage tracking + report ──────────────────────────────────────────────────
@@ -703,7 +768,10 @@ Rules:
 // Cheap at this team's scale (a few dozen entries a day at most).
 const VERIFY_LOG_PREFIX = 'verifylog:';
 
-async function recordVerifyEvent(env, { bookingId, agentEmail, vendor, product, pageType, totalChecks, mismatchedFields, key, at }) {
+async function recordVerifyEvent(env, {
+  bookingId, agentEmail, vendor, product, pageType, totalChecks, mismatchedFields,
+  stage, strictMismatchFields, key, at,
+}) {
   if (!env.CONFIG) return;
   if (!bookingId && !agentEmail) return; // nothing worth logging
   // KV metadata is capped at 1024 bytes — keep this to short scalars/labels,
@@ -711,6 +779,11 @@ async function recordVerifyEvent(env, { bookingId, agentEmail, vendor, product, 
   // `key`/`at` are only ever passed by the Slack backfill (see below), so a
   // re-run overwrites the same entry instead of double-counting it — normal
   // /verify and /confirm-flag calls always get a fresh random key and "now".
+  // `stage` distinguishes the moment of detection ('flagged', from /verify)
+  // from the moment of resolution ('confirmed', from /confirm-flag) for the
+  // same booking; `strictMismatchFields` is the subset of mismatchedFields
+  // that are genuine contradictions (status 'mismatch') rather than merely
+  // not_found — see the Pre-Override Flags / Override Confirmed tiles.
   await env.CONFIG.put(key || `${VERIFY_LOG_PREFIX}${crypto.randomUUID()}`, '1', {
     metadata: {
       bookingId: bookingId || null,
@@ -720,6 +793,8 @@ async function recordVerifyEvent(env, { bookingId, agentEmail, vendor, product, 
       pageType: pageType || null, // 'checkout' | 'ticket' | 'other' | null (unknown/older event)
       totalChecks: totalChecks || 0,
       mismatchedFields: mismatchedFields && mismatchedFields.length ? mismatchedFields : undefined,
+      stage: stage || null, // 'flagged' | 'confirmed' | null (unknown/older event)
+      strictMismatchFields: strictMismatchFields && strictMismatchFields.length ? strictMismatchFields : undefined,
       at: at || new Date().toISOString(),
     },
   });
@@ -758,6 +833,15 @@ function summarizeEvents(events) {
   const perProductBookings = new Map();    // "vendor|product" -> Set(bookingId), plus a display label
   const productLabels = new Map();
   const fieldMismatchCounts = new Map();   // field label -> count of times it was mismatched
+  // Pre-Override Flags: bookings where a genuine mismatch was caught at
+  // detection time (stage:'flagged', from /verify) — regardless of whether
+  // anyone ever did anything about it. Override Confirmed: bookings where
+  // an agent actually resolved a mismatch via Override and confirmed
+  // (stage:'confirmed', from /confirm-flag). Same booking ID can appear in
+  // both, or only in the first (flagged, never confirmed) — that gap is
+  // exactly what these two separate counts are for.
+  const preOverrideFlagIds = new Set();
+  const overrideConfirmedIds = new Set();
   let fullMatchChecks = 0, partialMatchChecks = 0, checksWithData = 0;
 
   for (const e of events) {
@@ -765,6 +849,11 @@ function summarizeEvents(events) {
       bookingIds.add(e.bookingId);
       const bucket = pageTypeBookingIds[e.pageType];
       if (bucket) bucket.add(e.bookingId);
+
+      if ((e.strictMismatchFields || []).length) {
+        if (e.stage === 'flagged') preOverrideFlagIds.add(e.bookingId);
+        else if (e.stage === 'confirmed') overrideConfirmedIds.add(e.bookingId);
+      }
 
       if (e.vendor) {
         if (!perVendorBookings.has(e.vendor)) perVendorBookings.set(e.vendor, new Set());
@@ -809,6 +898,11 @@ function summarizeEvents(events) {
     otherPageBookingCount: pageTypeBookingIds.other.size,
     checkoutBookingCount: pageTypeBookingIds.checkout.size,
 
+    preOverrideFlagCount: preOverrideFlagIds.size,
+    preOverrideFlagBookingIds: [...preOverrideFlagIds],
+    overrideConfirmedCount: overrideConfirmedIds.size,
+    overrideConfirmedBookingIds: [...overrideConfirmedIds],
+
     checksWithData,
     fullMatchChecks,
     partialMatchChecks,
@@ -847,11 +941,15 @@ function stripSlackLink(s) {
 
 function parseConfirmFlagMessage(text, ts) {
   if (!text) return null;
+  const isPreOverrideFlag = text.includes('Mismatch Flagged — Awaiting Review');
   const retroactive = text.includes('Booking Confirmed — Late');
-  if (!retroactive && !text.includes('Booking Verification Confirmed')) return null; // not one of ours
+  const isConfirm = retroactive || text.includes('Booking Verification Confirmed');
+  if (!isPreOverrideFlag && !isConfirm) return null; // not one of ours
 
   const bookingId = stripSlackLink(text.match(/\*Booking ID:\*\s*(\S+)/)?.[1]);
-  const agentEmail = stripSlackLink(text.match(/\*Confirmed by:\*\s*(\S+)/)?.[1]);
+  // Pre-override flag messages say "Flagged by"; confirm messages say
+  // "Confirmed by" — same person, different verb for the different moment.
+  const agentEmail = stripSlackLink(text.match(/\*(?:Confirmed|Flagged) by:\*\s*(\S+)/)?.[1]);
   if (!bookingId && !agentEmail) return null;
 
   const tourId = stripSlackLink(text.match(/\*Tour ID:\*\s*(\S+)/)?.[1]);
@@ -864,6 +962,53 @@ function parseConfirmFlagMessage(text, ts) {
   const vendorProductLine = text.match(/\*Vendor:\*\s*(.+?)\s*(?:·|\|)\s*\*Experience:\*\s*(.+?)(?=\s*\|\s*\*Tour ID:\*|\n|$)/);
   const vendor = vendorProductLine?.[1]?.trim();
   const product = vendorProductLine?.[2]?.trim();
+
+  // Current format puts each entry on its own "• " bullet line under a bold
+  // header; messages posted before that change have the same entries
+  // pipe-joined directly after the header on one line. This normalizes
+  // either shape back to a single pipe-joined string so the parsing below
+  // doesn't care which one it got.
+  const extractFieldBlock = headerText => {
+    const idx = text.indexOf(headerText);
+    if (idx === -1) return null;
+    const afterLines = text.slice(idx + headerText.length).split('\n');
+    const sameLineRest = afterLines[0].trim();
+    if (sameLineRest) return sameLineRest; // old single-line format
+    const bullets = [];
+    for (let i = 1; i < afterLines.length; i++) {
+      const t = afterLines[i].trim();
+      if (!t.startsWith('•')) break;
+      bullets.push(t.replace(/^•\s*/, ''));
+    }
+    return bullets.length ? bullets.join('  |  ') : null;
+  };
+
+  if (isPreOverrideFlag) {
+    // No pageType, no Matched/Skipped/Overridden sections here — just the
+    // mismatches AI Verify caught at detection time, before anyone has
+    // acted on them. "label — expected X, shows Y" per entry, same shape
+    // the confirm message's override line uses, just no reason yet.
+    const mismatchRaw = extractFieldBlock('*Mismatched fields:*');
+    const strictMismatchFields = (mismatchRaw || '').split('  |  ').filter(Boolean)
+      .map(part => part.split(' — ')[0].trim());
+    return {
+      bookingId: bookingId === 'n/a' ? null : bookingId || null,
+      agentEmail: agentEmail === 'unknown' ? null : agentEmail || null,
+      tourId: null,
+      vendorId: null,
+      vendor: vendor === 'n/a' ? null : vendor || null,
+      product: product === 'n/a' ? null : product || null,
+      pageType: null,
+      totalChecks: strictMismatchFields.length,
+      mismatchedFields: strictMismatchFields,
+      strictMismatchFields,
+      stage: 'flagged',
+      retroactive: false,
+      at: new Date(parseFloat(ts) * 1000).toISOString(),
+      ts,
+    };
+  }
+
   // Mirrors handleConfirmFlag()'s label choices exactly. "Final ticket" is
   // the expected Late Confirm outcome, not an AI classification — it's
   // deliberately left out of pageType here too, same as recordVerifyEvent()
@@ -882,26 +1027,6 @@ function parseConfirmFlagMessage(text, ts) {
     else if (/Incorrect flag.*other/i.test(pageTypeLineRaw)) pageType = 'other';
     else if (/Checkout page/i.test(pageTypeLineRaw)) pageType = 'checkout';
   }
-
-  // Current format puts each entry on its own "• " bullet line under a bold
-  // header; messages posted before that change have the same entries
-  // pipe-joined directly after the header on one line. This normalizes
-  // either shape back to a single pipe-joined string so the rest of the
-  // parsing below (unchanged) doesn't care which one it got.
-  const extractFieldBlock = headerText => {
-    const idx = text.indexOf(headerText);
-    if (idx === -1) return null;
-    const afterLines = text.slice(idx + headerText.length).split('\n');
-    const sameLineRest = afterLines[0].trim();
-    if (sameLineRest) return sameLineRest; // old single-line format
-    const bullets = [];
-    for (let i = 1; i < afterLines.length; i++) {
-      const t = afterLines[i].trim();
-      if (!t.startsWith('•')) break;
-      bullets.push(t.replace(/^•\s*/, ''));
-    }
-    return bullets.length ? bullets.join('  |  ') : null;
-  };
 
   const parseFieldList = raw => (raw || '').split('  |  ').filter(Boolean).map(part => {
     const m = part.match(/^(.+?):\s*(.*)$/);
@@ -932,6 +1057,8 @@ function parseConfirmFlagMessage(text, ts) {
     pageType: pageType || null,
     totalChecks: confirmed.length + skipped.length + overriddenLabels.length,
     mismatchedFields: skipped.map(s => s.label).concat(overriddenLabels),
+    strictMismatchFields: overriddenLabels,
+    stage: 'confirmed',
     retroactive,
     at: new Date(parseFloat(ts) * 1000).toISOString(),
     ts,
@@ -990,6 +1117,8 @@ async function backfillFromSlack(env, { since, until }) {
       pageType: null,
       totalChecks: m.totalChecks,
       mismatchedFields: m.mismatchedFields,
+      stage: m.stage,
+      strictMismatchFields: m.strictMismatchFields,
       key: `${VERIFY_LOG_PREFIX}slackbackfill:${m.ts}`,
       at: m.at,
     });
@@ -1180,6 +1309,7 @@ async function handleAdminUsageReportRange(request, env, url) {
   const sorted = [...events].sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime());
   const bookings = sorted.slice(0, USAGE_BOOKINGS_MAX_ROWS).map(e => ({
     bookingId: e.bookingId,
+    stage: e.stage || null,
     agentEmail: e.email,
     at: e.at,
     tourId: null,
@@ -1303,14 +1433,19 @@ async function handleAdminChannelReport(request, env, url) {
     // into the shape summarizeEvents() already expects, so "unique booking",
     // "per person", vendor/experience breakdowns, and match-rate all mean
     // exactly the same thing whether the source is the channel or the log.
+    // This includes both stages (Pre-Override Flag and Override Confirmed)
+    // — a booking that generated both still counts once in uniqueBookingCount
+    // (Set-deduped by bookingId), and the two stages get their own counts.
     const summary = summarizeEvents(messages.map(m => ({
       bookingId: m.bookingId, email: m.agentEmail, vendor: m.vendor, product: m.product,
       pageType: m.pageType, totalChecks: m.totalChecks, mismatchedFields: m.mismatchedFields,
+      stage: m.stage, strictMismatchFields: m.strictMismatchFields,
     })));
 
     const sorted = [...messages].sort((a, b) => parseFloat(b.ts) - parseFloat(a.ts));
     const bookings = sorted.slice(0, USAGE_BOOKINGS_MAX_ROWS).map(m => ({
       bookingId: m.bookingId,
+      stage: m.stage || null,
       agentEmail: m.agentEmail,
       at: m.at,
       tourId: m.tourId,
@@ -1376,6 +1511,8 @@ async function handleConfirmFlag(request, env, ctx) {
       pageType: pageType || null,
       totalChecks: confirmed.length + skipped.length + overridden.length,
       mismatchedFields: skipped.map(s => s.label).concat(overridden.map(o => o.label)),
+      stage: 'confirmed',
+      strictMismatchFields: overridden.map(o => o.label),
     }));
   }
 
@@ -1876,6 +2013,24 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
       </div>
     </div>
 
+    <!-- Pre-Override Flag = the moment AI Verify caught a field that genuinely
+         contradicts the record, before anyone has done anything about it.
+         Override Confirmed = an agent actually resolved one via Override and
+         confirmed. Same booking can appear in one or both — the gap between
+         the two counts is bookings flagged but never confirmed either way. -->
+    <div class="two-col">
+      <div class="status-tile warn">
+        <span class="stlabel"><span class="stdot"></span>🚩 Pre-Override Flags</span>
+        <span class="stvalue tabular" id="tile-pre-override">—</span>
+        <span class="stpct" id="tile-pre-override-pct">mismatch caught at detection</span>
+      </div>
+      <div class="status-tile good">
+        <span class="stlabel"><span class="stdot"></span>✅ Override Confirmed</span>
+        <span class="stvalue tabular" id="tile-override-confirmed">—</span>
+        <span class="stpct" id="tile-override-confirmed-pct">resolved and confirmed</span>
+      </div>
+    </div>
+
     <div class="two-col">
       <div class="card">
         <h2 style="font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);font-weight:600;margin:0 0 14px;">Top vendors</h2>
@@ -1913,7 +2068,7 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
       <h2 style="font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);font-weight:600;margin:0 0 14px;">Flagged booking IDs</h2>
       <div class="table-wrap" style="max-height:340px; overflow-y:auto;">
         <table class="an-table">
-          <thead><tr><th>Booking ID</th><th>Agent</th><th>Mismatched fields</th><th>At</th></tr></thead>
+          <thead><tr><th>Booking ID</th><th>Stage</th><th>Agent</th><th>Mismatched fields</th><th>At</th></tr></thead>
           <tbody id="booking-table-body"></tbody>
         </table>
       </div>
@@ -2310,6 +2465,16 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
     document.getElementById('tile-incorrect').textContent = incorrectFlagIds.size;
     document.getElementById('tile-incorrect-pct').textContent = pct(incorrectFlagIds.size, d.uniqueBookingCount) + ' of all unique bookings';
 
+    var preOverrideIds = d.preOverrideFlagBookingIds || [];
+    var overrideConfirmedIds = d.overrideConfirmedBookingIds || [];
+    var stillOutstanding = preOverrideIds.filter(function (id) { return overrideConfirmedIds.indexOf(id) === -1; });
+    document.getElementById('tile-pre-override').textContent = d.preOverrideFlagCount || 0;
+    document.getElementById('tile-pre-override-pct').textContent = stillOutstanding.length
+      ? stillOutstanding.length + ' not yet confirmed'
+      : 'all resolved';
+    document.getElementById('tile-override-confirmed').textContent = d.overrideConfirmedCount || 0;
+    document.getElementById('tile-override-confirmed-pct').textContent = 'resolved and confirmed';
+
     renderRankList(document.getElementById('vendor-list'), d.perVendorUniqueBookings.map(function (r) { return { name: r[0], value: r[1] }; }));
     renderRankList(document.getElementById('product-list'), d.perProductUniqueBookings.map(function (r) { return { name: r.product + (r.vendor ? ' · ' + r.vendor : ''), value: r.uniqueBookingCount }; }));
     renderRankList(document.getElementById('field-list'), d.fieldMismatchCounts.map(function (r) { return { name: r[0], value: r[1] }; }), { mismatch: true });
@@ -2324,12 +2489,18 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
       ? d.bookings.map(function (b) {
           var mismatch = (b.mismatchedFields || []).length ? escHtml(b.mismatchedFields.join(', ')) : '<span class="muted">none</span>';
           var when = b.at ? new Date(b.at).toLocaleString() : '—';
+          var stageLabel = b.stage === 'flagged'
+            ? '<span style="color:var(--warn);font-weight:600;">🚩 Flagged</span>'
+            : b.stage === 'confirmed'
+            ? '<span style="color:var(--good);font-weight:600;">✅ Confirmed</span>'
+            : '<span class="muted">—</span>';
           return '<tr><td>' + escHtml(b.bookingId || '—') + (b.retroactive ? ' <span class="muted">(late)</span>' : '') + '</td>' +
+            '<td>' + stageLabel + '</td>' +
             '<td>' + escHtml(b.agentEmail || '—') + '</td>' +
             '<td>' + mismatch + '</td>' +
             '<td>' + escHtml(when) + '</td></tr>';
         }).join('')
-      : '<tr><td colspan="4" class="empty-note">No activity for this range, source, and filter.</td></tr>';
+      : '<tr><td colspan="5" class="empty-note">No activity for this range, source, and filter.</td></tr>';
     document.getElementById('booking-truncated-note').style.display = d.bookingsTruncated ? 'block' : 'none';
 
     var personRows = d.perPersonUniqueBookings.map(function (row) {
