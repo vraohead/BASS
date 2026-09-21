@@ -866,7 +866,10 @@ function _getVerifyFacts(flat, guestData) {
 
 function buildVerifySection(flat, guestData) {
   const { date, time, pax, price, product } = _getVerifyFacts(flat, guestData);
-  const vendorName = getPrimaryVendor(flat)?.vendorName || '';
+  const primaryVendor = getPrimaryVendor(flat);
+  const vendorName = primaryVendor?.vendorName || '';
+  const vendorId = primaryVendor?.vendorId || flat.vendorId || '';
+  const tourId = primaryVendor?.tourId || flat.tourId || '';
   const cur2 = flat.currency || flat.currencyName || flat.tourCurrency || '';
   const displayPrice = price ? `${cur2} ${price}`.trim() : '—';
 
@@ -1208,6 +1211,8 @@ function buildVerifySection(flat, guestData) {
       workerUrl: DEFAULT_WORKER_URL,
       vendor: vendorName,
       product,
+      vendorId,
+      tourId,
     });
 
     confirmBtn.disabled = false;
@@ -1388,6 +1393,8 @@ function buildLateConfirmSection(flat) {
       workerUrl: DEFAULT_WORKER_URL,
       vendor: getPrimaryVendor(flat)?.vendorName || '',
       product: flat.productName || getPrimaryVendor(flat)?.productName || '',
+      vendorId: getPrimaryVendor(flat)?.vendorId || flat.vendorId || '',
+      tourId: getPrimaryVendor(flat)?.tourId || flat.tourId || '',
     });
 
     confirmBtn.disabled = false;

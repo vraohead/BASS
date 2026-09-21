@@ -28,7 +28,11 @@
 //                             slice of tracking, the AI check itself is
 //                             unaffected.
 //   POST /confirm-flag     { bookingId, agentEmail, confirmed, skipped,
-//                            imageBase64?, mimeType?, verifiedAt, vendor?, product? }
+//                            imageBase64?, mimeType?, verifiedAt, vendor?, product?,
+//                            vendorId?, tourId? }
+//                          vendorId/tourId are pushed into the Slack alert text
+//                          (Scorpio/Aries lookup) but not into the usage log —
+//                          vendor/product (names) are what the dashboard aggregates by.
 //                          -> { ok: true, steps: [...], screenshotError? }
 //                          Also records a verifylog: event (same as /verify) so every
 //                          Confirm & Flag click counts toward usage — this fires far more
@@ -56,6 +60,10 @@
 //                          counts side by side for the same window, so a
 //                          future under-counting bug shows up as a gap here
 //                          instead of silently skewing the usage numbers.
+//   GET  /admin/channel-last-24h?password=...  -> reads the Confirm & Flag
+//                          channel directly (not the KV log) for a rolling
+//                          24h window: total unique booking IDs flagged, and
+//                          per email how many unique booking IDs they flagged.
 //   GET  /admin/config?password=...           -> secret/binding status (admin-only)
 //   POST /admin/request-code { password } -> generate + Slack-post an admin
 //                                             code, reusable all day (admin-only)
@@ -156,7 +164,7 @@
 
 // Bump this string whenever you paste a new version into the dashboard —
 // visiting GET /debug-env instantly confirms whether a deploy took effect.
-const WORKER_VERSION = '2026-09-21-02';
+const WORKER_VERSION = '2026-09-21-03';
 
 // Formats an ISO timestamp as a clean IST string, e.g. "6 Sep 2026, 10:44 PM IST".
 function formatIST(isoString) {
@@ -248,6 +256,10 @@ export default {
 
     if (request.method === 'GET' && url.pathname === '/admin/channel-audit') {
       return handleAdminChannelAudit(request, env, url);
+    }
+
+    if (request.method === 'GET' && url.pathname === '/admin/channel-last-24h') {
+      return handleAdminChannelLast24h(request, env, url);
     }
 
     if (request.method === 'GET' && url.pathname === '/admin/config') {
@@ -808,6 +820,9 @@ function parseConfirmFlagMessage(text, ts) {
   const agentEmail = text.match(/\*Confirmed by:\*\s*(\S+)/)?.[1];
   if (!bookingId && !agentEmail) return null;
 
+  const tourId = text.match(/\*Tour ID:\*\s*(\S+)/)?.[1];
+  const vendorId = text.match(/\*Vendor ID:\*\s*(\S+)/)?.[1];
+
   const parseFieldList = raw => (raw || '').split('  |  ').filter(Boolean).map(part => {
     const m = part.match(/^(.+?):\s*(.*)$/);
     return m ? { label: m[1].trim(), value: m[2].trim() } : { label: part.trim(), value: '' };
@@ -820,6 +835,8 @@ function parseConfirmFlagMessage(text, ts) {
   return {
     bookingId: bookingId === 'n/a' ? null : bookingId || null,
     agentEmail: agentEmail === 'unknown' ? null : agentEmail || null,
+    tourId: tourId === 'n/a' ? null : tourId || null,
+    vendorId: vendorId === 'n/a' ? null : vendorId || null,
     totalChecks: confirmed.length + skipped.length,
     mismatchedFields: skipped.map(s => s.label),
     retroactive,
@@ -1125,6 +1142,45 @@ async function handleAdminChannelAudit(request, env, url) {
   }
 }
 
+// Reads the Confirm & Flag channel directly (not the KV log) for a rolling
+// last-24-hours window: total unique booking IDs flagged, and per email how
+// many (unique) booking IDs they flagged — a channel-sourced cross-check of
+// the same shape as the per-person Slack report, so the two can be compared
+// side by side.
+async function handleAdminChannelLast24h(request, env, url) {
+  const password = url.searchParams.get('password') || '';
+  if (password !== getAdminPassword(env)) {
+    return cors(JSON.stringify({ error: 'Wrong password' }), 401);
+  }
+  const nowMs = Date.now();
+  const sinceMs = nowMs - 24 * 60 * 60 * 1000;
+
+  try {
+    const messages = await fetchConfirmFlagSlackMessages(env, sinceMs, nowMs);
+    const uniqueBookingIds = new Set(messages.filter(m => m.bookingId).map(m => m.bookingId));
+    const perPerson = new Map(); // email -> Set(bookingId)
+    for (const m of messages) {
+      if (!m.agentEmail) continue;
+      if (!perPerson.has(m.agentEmail)) perPerson.set(m.agentEmail, new Set());
+      if (m.bookingId) perPerson.get(m.agentEmail).add(m.bookingId);
+    }
+    const perPersonUniqueBookings = [...perPerson.entries()]
+      .map(([email, set]) => [email, set.size])
+      .sort((a, b) => b[1] - a[1]);
+
+    return cors(JSON.stringify({
+      ok: true,
+      since: new Date(sinceMs).toISOString(),
+      until: new Date(nowMs).toISOString(),
+      messageCount: messages.length,
+      uniqueBookingCount: uniqueBookingIds.size,
+      perPersonUniqueBookings,
+    }), 200);
+  } catch (err) {
+    return cors(JSON.stringify({ error: err.message }), 502);
+  }
+}
+
 // ── /confirm-flag — post to Slack (message + screenshot, unified) ─────────────
 
 async function handleConfirmFlag(request, env, ctx) {
@@ -1142,7 +1198,7 @@ async function handleConfirmFlag(request, env, ctx) {
 
   const {
     bookingId, agentEmail, confirmed = [], skipped = [], retroactive = false,
-    imageBase64, mimeType = 'image/png', verifiedAt, vendor, product,
+    imageBase64, mimeType = 'image/png', verifiedAt, vendor, product, vendorId, tourId,
   } = body;
 
   // This is the real, common usage signal — every Confirm & Flag click,
@@ -1177,6 +1233,7 @@ async function handleConfirmFlag(request, env, ctx) {
       : ':white_check_mark: *Booking Verification Confirmed*',
     `*Booking ID:* ${bookingId || 'n/a'}`,
     `*Confirmed by:* ${agentEmail || 'unknown'}`,
+    (tourId || vendorId) ? `*Tour ID:* ${tourId || 'n/a'}  |  *Vendor ID:* ${vendorId || 'n/a'}` : null,
     confirmed.length
       ? `*Matched:* ${confirmed.map(c => `${c.label}: ${c.value}`).join('  |  ')}`
       : null,
@@ -1715,6 +1772,17 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
 
     <div class="card">
       <div class="card-head">
+        <h2>📣 Channel — last 24 hours</h2>
+        <button type="button" class="info-btn" data-info="channel-24h">i</button>
+      </div>
+      <p class="sub-label" style="margin:0 0 12px">Reads the Confirm &amp; Flag channel directly (not the dashboard log) for the last rolling 24 hours — total unique booking IDs flagged, and how many each person flagged.</p>
+      <button class="secondary" id="channel-24h-btn">Fetch last 24 hours</button>
+      <p class="msg" id="channel-24h-msg"></p>
+      <div id="channel-24h-results" style="display:none; margin-top:10px; font-size:13px; line-height:1.7;"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
         <h2>🩺 Status</h2>
         <button type="button" class="info-btn" data-info="status">i</button>
       </div>
@@ -1752,6 +1820,7 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
     'agent-report': 'Posts to the passcode channel by default, same as the usage report \\u2014 check the box first if you also want this in the main team channel. Checks run per person over a true rolling last-24-hours window (not tied to calendar days), plus total unique bookings each person has actioned, all-time. Posts automatically once a day; this button sends it on demand too.',
     'backfill': 'Confirm & Flag started logging usage here only from a certain point on \\u2014 anything confirmed before that only exists as a Slack message. This reads the Confirm & Flag channel\\'s history for the chosen window and fills in the missing entries. Each one is keyed by its Slack message, so re-running this for the same days never double-counts \\u2014 safe to click again. Needs the Slack bot token to have channel-history read access; a \\u201cmissing_scope\\u201d error means that needs adding in the Slack app\\'s OAuth settings first.',
     'channel-audit': 'A sanity check, not a report \\u2014 counts Confirm & Flag messages in the channel for the range selected above and compares that to what\\'s logged here. They won\\'t match perfectly forever (a message posted seconds before/after a range boundary can land on one side only), but a large or growing gap usually means something stopped recording \\u2014 catch it here before the usage numbers quietly go stale.',
+    'channel-24h': 'Sourced straight from the Confirm & Flag channel\\'s own message history, not the dashboard log below \\u2014 a true rolling 24 hours from right now, not tied to calendar days. Unique booking IDs flagged in that window, plus how many (unique) booking IDs each person flagged. Costs a Slack API call, so it only runs when you click it.',
   };
   var infoPopover = null;
   function closeInfoPopover() {
@@ -1947,6 +2016,36 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
           '<div style="margin-top:6px" class="' + (gap > 0 ? 'msg err' : 'msg ok') + '">' +
           (gap > 0 ? gap + ' booking(s) in the channel are missing here — try Backfill from Slack, or widen its day range.' : 'No gap for this range.') +
           '</div>';
+        resultsEl.style.display = 'block';
+      })
+      .catch(function (err) {
+        btn.disabled = false;
+        msg.textContent = 'Request failed: ' + err.message; msg.className = 'msg err';
+      });
+  });
+
+  document.getElementById('channel-24h-btn').addEventListener('click', function () {
+    var btn = this;
+    var msg = document.getElementById('channel-24h-msg');
+    var resultsEl = document.getElementById('channel-24h-results');
+    btn.disabled = true;
+    resultsEl.style.display = 'none';
+    msg.textContent = 'Reading the channel — this can take a moment…'; msg.className = 'msg';
+    fetch('/admin/channel-last-24h?password=' + encodeURIComponent(password))
+      .then(function (res) { return res.json().then(function (data) { return { ok: res.ok, data: data }; }); })
+      .then(function (r) {
+        btn.disabled = false;
+        if (!r.ok || !r.data.ok) { msg.textContent = (r.data && r.data.error) || 'Failed'; msg.className = 'msg err'; return; }
+        msg.textContent = '';
+        var d = r.data;
+        var perPersonLines = d.perPersonUniqueBookings.length
+          ? d.perPersonUniqueBookings.map(function (row) {
+              return '<div>' + escHtml(row[0]) + ': <b>' + row[1] + '</b> unique booking(s)</div>';
+            }).join('')
+          : '<div class="muted">No Confirm & Flag activity in the last 24 hours.</div>';
+        resultsEl.innerHTML =
+          '<div><b>' + d.uniqueBookingCount + '</b> unique booking(s) flagged — ' + d.messageCount + ' message(s)</div>' +
+          '<div style="margin-top:8px"><b>Per person:</b></div>' + perPersonLines;
         resultsEl.style.display = 'block';
       })
       .catch(function (err) {
