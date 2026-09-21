@@ -175,7 +175,7 @@
 
 // Bump this string whenever you paste a new version into the dashboard —
 // visiting GET /debug-env instantly confirms whether a deploy took effect.
-const WORKER_VERSION = '2026-09-21-05';
+const WORKER_VERSION = '2026-09-21-06';
 
 // Formats an ISO timestamp as a clean IST string, e.g. "6 Sep 2026, 10:44 PM IST".
 function formatIST(isoString) {
@@ -1672,6 +1672,7 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
   .kpi-sub { font-size: 12px; color: var(--ink-2); }
   .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 20px; }
   .three-col { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 20px; }
+  .four-col { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 20px; }
   .status-tile { border-radius: 14px; padding: 16px 18px; display: flex; flex-direction: column; gap: 5px; border: 1px solid var(--border); }
   .status-tile .stlabel { font-size: 12px; font-weight: 600; display: flex; align-items: center; color: var(--ink-2); }
   .status-tile .stdot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; margin-right: 7px; }
@@ -1699,7 +1700,7 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
     border-radius: 50%; background: var(--accent-wash); color: var(--accent); font-size: 11px; font-weight: 700; margin-right: 9px;
   }
   @media (max-width: 760px) {
-    .kpi-grid { grid-template-columns: repeat(2, 1fr); }
+    .kpi-grid, .four-col { grid-template-columns: repeat(2, 1fr); }
     .two-col, .three-col { grid-template-columns: 1fr; }
     .rank-row { grid-template-columns: 96px 1fr 30px; }
   }
@@ -1791,7 +1792,7 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
       </div>
     </div>
 
-    <div class="three-col">
+    <div class="four-col">
       <div class="status-tile good">
         <span class="stlabel"><span class="stdot"></span>Checkout page</span>
         <span class="stvalue tabular" id="tile-checkout">—</span>
@@ -1806,6 +1807,11 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
         <span class="stlabel"><span class="stdot"></span>Other / unclear</span>
         <span class="stvalue tabular" id="tile-other">—</span>
         <span class="stpct" id="tile-other-pct">not a checkout or a ticket</span>
+      </div>
+      <div class="status-tile crit">
+        <span class="stlabel"><span class="stdot"></span>⚠️ Incorrect flags</span>
+        <span class="stvalue tabular" id="tile-incorrect">—</span>
+        <span class="stpct" id="tile-incorrect-pct">AI Verify caught something wrong</span>
       </div>
     </div>
 
@@ -2236,6 +2242,12 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
     document.getElementById('tile-checkout-pct').textContent = pct(d.checkoutBookingCount, totalTagged) + ' of tagged screenshots — good';
     document.getElementById('tile-ticket-pct').textContent = pct(d.ticketBookingCount, totalTagged) + ' of tagged screenshots — flag';
     document.getElementById('tile-other-pct').textContent = pct(d.otherPageBookingCount, totalTagged) + ' of tagged screenshots';
+
+    // Union, not a sum — the same booking can show up in both buckets across
+    // more than one confirmation, and this should still count it once.
+    var incorrectFlagIds = new Set((d.ticketBookingIds || []).concat(d.otherPageBookingIds || []));
+    document.getElementById('tile-incorrect').textContent = incorrectFlagIds.size;
+    document.getElementById('tile-incorrect-pct').textContent = pct(incorrectFlagIds.size, d.uniqueBookingCount) + ' of all unique bookings';
 
     renderRankList(document.getElementById('vendor-list'), d.perVendorUniqueBookings.map(function (r) { return { name: r[0], value: r[1] }; }));
     renderRankList(document.getElementById('product-list'), d.perProductUniqueBookings.map(function (r) { return { name: r.product + (r.vendor ? ' · ' + r.vendor : ''), value: r.uniqueBookingCount }; }));
