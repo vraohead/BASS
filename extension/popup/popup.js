@@ -1330,7 +1330,13 @@ function buildVerifySection(flat, guestData) {
     if (result?.steps) console.log('[BA] /confirm-flag steps:', result.steps);
 
     if (result?.ok) {
-      confirmStatus.textContent = result.screenshotError ? `✓ Flagged (screenshot: ${result.screenshotError})` : '✓ Flagged';
+      // Done — hide the button so it can't be clicked again, and show a
+      // clear terminal state instead of a status line sitting next to a
+      // still-live button.
+      confirmBtn.hidden = true;
+      const countLbl = confirmRow.querySelector('.verify-confirm-count');
+      if (countLbl) countLbl.hidden = true;
+      confirmStatus.textContent = result.screenshotError ? `✅ Already flagged (screenshot: ${result.screenshotError})` : '✅ Already flagged';
       confirmStatus.className = result.screenshotError ? 'verify-confirm-status status-warn' : 'verify-confirm-status status-ok';
     } else {
       confirmStatus.textContent = result?.error || 'Failed';
@@ -1513,7 +1519,8 @@ function buildLateConfirmSection(flat) {
     if (result?.steps) console.log('[BA] /confirm-flag (late) steps:', result.steps);
 
     if (result?.ok) {
-      confirmStatus.textContent = result.screenshotError ? `✓ Flagged (screenshot: ${result.screenshotError})` : '✓ Flagged';
+      confirmBtn.hidden = true;
+      confirmStatus.textContent = result.screenshotError ? `✅ Already flagged (screenshot: ${result.screenshotError})` : '✅ Already flagged';
       confirmStatus.className = result.screenshotError ? 'verify-confirm-status late-confirm-status status-warn' : 'verify-confirm-status late-confirm-status status-ok';
     } else {
       confirmStatus.textContent = result?.error || 'Failed';
