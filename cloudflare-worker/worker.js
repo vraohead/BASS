@@ -44,6 +44,18 @@
 //                             that window — doesn't post to Slack, rendered inline on
 //                             the admin page (its "Custom range report" card), and is
 //                             the same shape a future dashboard would read from
+//   POST /admin/backfill-from-slack { password, since?, until? } -> reads the
+//                          main confirm-flag channel and writes any missing
+//                          verifylog: entries for that range (default: last
+//                          30 days). Re-running it for an overlapping range
+//                          is safe — each entry is keyed off the Slack
+//                          message's own timestamp, so it overwrites rather
+//                          than duplicates. One-time historical import only;
+//                          /confirm-flag itself has logged live since -01.
+//   GET  /admin/channel-audit?password=...&start=&end=  -> channel vs KV-log
+//                          counts side by side for the same window, so a
+//                          future under-counting bug shows up as a gap here
+//                          instead of silently skewing the usage numbers.
 //   GET  /admin/config?password=...           -> secret/binding status (admin-only)
 //   POST /admin/request-code { password } -> generate + Slack-post an admin
 //                                             code, reusable all day (admin-only)
@@ -144,7 +156,7 @@
 
 // Bump this string whenever you paste a new version into the dashboard —
 // visiting GET /debug-env instantly confirms whether a deploy took effect.
-const WORKER_VERSION = '2026-09-21-01';
+const WORKER_VERSION = '2026-09-21-02';
 
 // Formats an ISO timestamp as a clean IST string, e.g. "6 Sep 2026, 10:44 PM IST".
 function formatIST(isoString) {
@@ -228,6 +240,14 @@ export default {
 
     if (request.method === 'GET' && url.pathname === '/admin/usage-report-range') {
       return handleAdminUsageReportRange(request, env, url);
+    }
+
+    if (request.method === 'POST' && url.pathname === '/admin/backfill-from-slack') {
+      return handleAdminBackfillFromSlack(request, env);
+    }
+
+    if (request.method === 'GET' && url.pathname === '/admin/channel-audit') {
+      return handleAdminChannelAudit(request, env, url);
     }
 
     if (request.method === 'GET' && url.pathname === '/admin/config') {
@@ -648,12 +668,15 @@ Rules:
 // Cheap at this team's scale (a few dozen entries a day at most).
 const VERIFY_LOG_PREFIX = 'verifylog:';
 
-async function recordVerifyEvent(env, { bookingId, agentEmail, vendor, product, pageType, totalChecks, mismatchedFields }) {
+async function recordVerifyEvent(env, { bookingId, agentEmail, vendor, product, pageType, totalChecks, mismatchedFields, key, at }) {
   if (!env.CONFIG) return;
   if (!bookingId && !agentEmail) return; // nothing worth logging
   // KV metadata is capped at 1024 bytes — keep this to short scalars/labels,
   // never raw screenshot data or full AI output.
-  await env.CONFIG.put(`${VERIFY_LOG_PREFIX}${crypto.randomUUID()}`, '1', {
+  // `key`/`at` are only ever passed by the Slack backfill (see below), so a
+  // re-run overwrites the same entry instead of double-counting it — normal
+  // /verify and /confirm-flag calls always get a fresh random key and "now".
+  await env.CONFIG.put(key || `${VERIFY_LOG_PREFIX}${crypto.randomUUID()}`, '1', {
     metadata: {
       bookingId: bookingId || null,
       email: agentEmail || null,
@@ -662,7 +685,7 @@ async function recordVerifyEvent(env, { bookingId, agentEmail, vendor, product, 
       pageType: pageType || null, // 'checkout' | 'ticket' | 'other' | null (unknown/older event)
       totalChecks: totalChecks || 0,
       mismatchedFields: mismatchedFields && mismatchedFields.length ? mismatchedFields : undefined,
-      at: new Date().toISOString(),
+      at: at || new Date().toISOString(),
     },
   });
 }
@@ -763,6 +786,106 @@ function summarizeEvents(events) {
       .map(([key, set]) => ({ ...productLabels.get(key), uniqueBookingCount: set.size }))
       .sort((a, b) => b.uniqueBookingCount - a.uniqueBookingCount),
   };
+}
+
+// ── Reading the Confirm & Flag channel back — for a one-time historical
+// backfill (events from before this Worker version started logging
+// /confirm-flag) and for an ongoing audit that catches future silent
+// under-counting by comparing "what Slack shows" against "what the KV log
+// has". Needs the bot token to carry the channels:history (or groups:history
+// for a private channel) scope in addition to chat:write/files:write — if
+// it doesn't, Slack returns { ok:false, error:"missing_scope" } and that
+// error is surfaced as-is in the response so it's obvious what to fix.
+//
+// Parses only the exact text handleConfirmFlag() itself generates — a
+// change to that message format must be mirrored here.
+function parseConfirmFlagMessage(text, ts) {
+  if (!text) return null;
+  const retroactive = text.includes('Booking Confirmed — Late');
+  if (!retroactive && !text.includes('Booking Verification Confirmed')) return null; // not one of ours
+
+  const bookingId = text.match(/\*Booking ID:\*\s*(\S+)/)?.[1];
+  const agentEmail = text.match(/\*Confirmed by:\*\s*(\S+)/)?.[1];
+  if (!bookingId && !agentEmail) return null;
+
+  const parseFieldList = raw => (raw || '').split('  |  ').filter(Boolean).map(part => {
+    const m = part.match(/^(.+?):\s*(.*)$/);
+    return m ? { label: m[1].trim(), value: m[2].trim() } : { label: part.trim(), value: '' };
+  });
+  const matchedRaw = text.match(/\*Matched:\*\s*(.+)/)?.[1];
+  const skippedRaw = text.match(/\*Skipped \(mismatch acknowledged\):\*\s*(.+)/)?.[1];
+  const confirmed = parseFieldList(matchedRaw);
+  const skipped = parseFieldList(skippedRaw);
+
+  return {
+    bookingId: bookingId === 'n/a' ? null : bookingId || null,
+    agentEmail: agentEmail === 'unknown' ? null : agentEmail || null,
+    totalChecks: confirmed.length + skipped.length,
+    mismatchedFields: skipped.map(s => s.label),
+    retroactive,
+    at: new Date(parseFloat(ts) * 1000).toISOString(),
+    ts,
+  };
+}
+
+// Pages through conversations.history for the main confirm-flag channel
+// between sinceMs/untilMs (both epoch ms), parsing every message that looks
+// like one of our own Confirm & Flag posts. Slack's `oldest`/`latest` are
+// seconds-based and exclusive/inclusive respectively — see Slack's docs;
+// treated as approximate here since we re-filter by parsed `at` anyway.
+async function fetchConfirmFlagSlackMessages(env, sinceMs, untilMs) {
+  if (!env.SLACK_BOT_TOKEN) throw new Error('SLACK_BOT_TOKEN secret not set');
+  const parsed = [];
+  let cursor;
+  do {
+    const params = new URLSearchParams({
+      channel: SLACK_CHANNEL_ID,
+      oldest: String(sinceMs / 1000),
+      latest: String(untilMs / 1000),
+      inclusive: 'true',
+      limit: '200',
+    });
+    if (cursor) params.set('cursor', cursor);
+    const res = await fetch(`https://slack.com/api/conversations.history?${params}`, {
+      headers: { Authorization: `Bearer ${env.SLACK_BOT_TOKEN}` },
+    });
+    const data = await res.json();
+    if (!data.ok) throw new Error(`Slack conversations.history failed: ${data.error}`);
+    for (const msg of data.messages || []) {
+      const p = parseConfirmFlagMessage(msg.text, msg.ts);
+      if (p) parsed.push(p);
+    }
+    cursor = data.has_more ? data.response_metadata?.next_cursor : undefined;
+  } while (cursor);
+  return parsed;
+}
+
+// One-time (or re-run-safe) historical backfill — writes a verifylog: entry
+// for every parsed Confirm & Flag message in range that doesn't already have
+// one, keyed deterministically off the Slack message's own timestamp so
+// running this twice for an overlapping range never double-counts.
+async function backfillFromSlack(env, { since, until }) {
+  const sinceMs = since ? new Date(since).getTime() : Date.now() - 30 * 24 * 60 * 60 * 1000;
+  const untilMs = until ? new Date(until).getTime() : Date.now();
+  const messages = await fetchConfirmFlagSlackMessages(env, sinceMs, untilMs);
+
+  let backfilled = 0, skippedUnparseable = 0;
+  for (const m of messages) {
+    if (!m.bookingId && !m.agentEmail) { skippedUnparseable++; continue; }
+    await recordVerifyEvent(env, {
+      bookingId: m.bookingId,
+      agentEmail: m.agentEmail,
+      vendor: null,
+      product: null,
+      pageType: null,
+      totalChecks: m.totalChecks,
+      mismatchedFields: m.mismatchedFields,
+      key: `${VERIFY_LOG_PREFIX}slackbackfill:${m.ts}`,
+      at: m.at,
+    });
+    backfilled++;
+  }
+  return { scanned: messages.length, backfilled, skippedUnparseable };
 }
 
 // Posts `text` to the passcode/admin channel (DAILY_CODE_CHANNEL_ID) always,
@@ -936,6 +1059,70 @@ async function handleAdminUsageReportRange(request, env, url) {
   const events = await listVerifyEvents(env, { start, end });
   const summary = summarizeEvents(events);
   return cors(JSON.stringify({ ok: true, start, end, totalEvents: events.length, ...summary }), 200);
+}
+
+// One-time (safely re-runnable) historical import — reads the Confirm & Flag
+// channel directly and writes any missing verifylog: entries for the given
+// range. Meant for backfilling activity that happened before this Worker
+// version started logging /confirm-flag calls; not needed going forward.
+async function handleAdminBackfillFromSlack(request, env) {
+  let body;
+  try {
+    body = await request.json();
+  } catch (err) {
+    return cors(JSON.stringify({ error: 'Invalid JSON body' }), 400);
+  }
+  if (body.password !== getAdminPassword(env)) {
+    return cors(JSON.stringify({ error: 'Wrong password' }), 401);
+  }
+  if (!env.CONFIG) {
+    return cors(JSON.stringify({ error: 'No CONFIG KV namespace bound' }), 500);
+  }
+  try {
+    const result = await backfillFromSlack(env, { since: body.since, until: body.until });
+    return cors(JSON.stringify({ ok: true, ...result }), 200);
+  } catch (err) {
+    return cors(JSON.stringify({ error: err.message }), 502);
+  }
+}
+
+// Ongoing cross-check, not a one-time thing — compares what the Confirm &
+// Flag channel actually shows against what the KV log has for the same
+// window, so a future silent under-counting bug (a bad deploy, a dropped
+// waitUntil, a schema change) shows up as a gap here instead of going
+// unnoticed. On-demand only (costs a Slack API call), never automatic.
+async function handleAdminChannelAudit(request, env, url) {
+  const password = url.searchParams.get('password') || '';
+  if (password !== getAdminPassword(env)) {
+    return cors(JSON.stringify({ error: 'Wrong password' }), 401);
+  }
+  if (!env.CONFIG) {
+    return cors(JSON.stringify({ error: 'No CONFIG KV namespace bound' }), 500);
+  }
+  const start = url.searchParams.get('start') || null;
+  const end = url.searchParams.get('end') || null;
+  const startMs = start ? new Date(start).getTime() : Date.now() - 30 * 24 * 60 * 60 * 1000;
+  const endMs = end ? new Date(end).getTime() : Date.now();
+
+  try {
+    const [channelMessages, dashboardEvents] = await Promise.all([
+      fetchConfirmFlagSlackMessages(env, startMs, endMs),
+      listVerifyEvents(env, { start: new Date(startMs).toISOString(), end: new Date(endMs).toISOString() }),
+    ]);
+    const channelBookingIds = new Set(channelMessages.filter(m => m.bookingId).map(m => m.bookingId));
+    const dashboardSummary = summarizeEvents(dashboardEvents);
+    return cors(JSON.stringify({
+      ok: true,
+      start: new Date(startMs).toISOString(),
+      end: new Date(endMs).toISOString(),
+      channelMessageCount: channelMessages.length,
+      channelUniqueBookingCount: channelBookingIds.size,
+      dashboardEventCount: dashboardEvents.length,
+      dashboardUniqueBookingCount: dashboardSummary.uniqueBookingCount,
+    }), 200);
+  } catch (err) {
+    return cors(JSON.stringify({ error: err.message }), 502);
+  }
 }
 
 // ── /confirm-flag — post to Slack (message + screenshot, unified) ─────────────
@@ -1505,6 +1692,29 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
 
     <div class="card">
       <div class="card-head">
+        <h2>📥 Backfill from Slack</h2>
+        <button type="button" class="info-btn" data-info="backfill">i</button>
+      </div>
+      <p class="sub-label" style="margin:0 0 12px">One-time import — reads the Confirm &amp; Flag channel and fills in usage for activity from before this Worker version started logging it live. Safe to re-run.</p>
+      <label for="backfill-days-input">Days back</label>
+      <input type="text" id="backfill-days-input" value="30" inputmode="numeric" />
+      <button class="secondary" id="backfill-btn" style="margin-top:2px">Backfill now</button>
+      <p class="msg" id="backfill-msg"></p>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2>🔍 Channel vs Dashboard audit</h2>
+        <button type="button" class="info-btn" data-info="channel-audit">i</button>
+      </div>
+      <p class="sub-label" style="margin:0 0 12px">Compares what the Confirm &amp; Flag channel actually shows against what's logged here, for the range currently selected above — a gap means something's under-counting.</p>
+      <button class="secondary" id="channel-audit-btn">Run audit for current range</button>
+      <p class="msg" id="channel-audit-msg"></p>
+      <div id="channel-audit-results" style="display:none; margin-top:10px; font-size:13px; line-height:1.7;"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
         <h2>🩺 Status</h2>
         <button type="button" class="info-btn" data-info="status">i</button>
       </div>
@@ -1540,6 +1750,8 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
     'status': 'Shows which Cloudflare secrets and bindings this Worker can see \\u2014 never the values themselves, just whether each is configured. A red dot here usually explains a broken feature (e.g. no Slack token means Confirm & Flag can\\'t post).',
     'usage-report': 'Posts to the passcode channel (the same one the instructions/admin codes go to), not the main team channel — this is admin-level data, not something the whole team needs in their feed. Check "Also send to the main team channel" before clicking to post there too. Unique bookings AI-verified all-time, and how many of those were flagged for an already-issued ticket instead of a checkout screenshot (also all-time). Posts automatically once a day; this button sends it on demand too.',
     'agent-report': 'Posts to the passcode channel by default, same as the usage report \\u2014 check the box first if you also want this in the main team channel. Checks run per person over a true rolling last-24-hours window (not tied to calendar days), plus total unique bookings each person has actioned, all-time. Posts automatically once a day; this button sends it on demand too.',
+    'backfill': 'Confirm & Flag started logging usage here only from a certain point on \\u2014 anything confirmed before that only exists as a Slack message. This reads the Confirm & Flag channel\\'s history for the chosen window and fills in the missing entries. Each one is keyed by its Slack message, so re-running this for the same days never double-counts \\u2014 safe to click again. Needs the Slack bot token to have channel-history read access; a \\u201cmissing_scope\\u201d error means that needs adding in the Slack app\\'s OAuth settings first.',
+    'channel-audit': 'A sanity check, not a report \\u2014 counts Confirm & Flag messages in the channel for the range selected above and compares that to what\\'s logged here. They won\\'t match perfectly forever (a message posted seconds before/after a range boundary can land on one side only), but a large or growing gap usually means something stopped recording \\u2014 catch it here before the usage numbers quietly go stale.',
   };
   var infoPopover = null;
   function closeInfoPopover() {
@@ -1679,6 +1891,63 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
         var allTimeCount = (r.data.allTimeUsage || []).length;
         msg.textContent = 'Sent to the passcode channel' + (alsoMain ? ' and the main channel' : '') + ' — ' + rosterCount + ' known agent(s) listed, ' + allTimeCount + ' with unique-booking history.';
         msg.className = 'msg ok';
+      })
+      .catch(function (err) {
+        btn.disabled = false;
+        msg.textContent = 'Request failed: ' + err.message; msg.className = 'msg err';
+      });
+  });
+
+  document.getElementById('backfill-btn').addEventListener('click', function () {
+    var btn = this;
+    var msg = document.getElementById('backfill-msg');
+    var days = parseInt(document.getElementById('backfill-days-input').value, 10);
+    if (!days || days < 1) { msg.textContent = 'Enter a positive number of days.'; msg.className = 'msg err'; return; }
+    var since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+    btn.disabled = true;
+    msg.textContent = 'Reading the channel — this can take a moment…'; msg.className = 'msg';
+    fetch('/admin/backfill-from-slack', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: password, since: since }),
+    })
+      .then(function (res) { return res.json().then(function (data) { return { ok: res.ok, data: data }; }); })
+      .then(function (r) {
+        btn.disabled = false;
+        if (!r.ok || !r.data.ok) { msg.textContent = (r.data && r.data.error) || 'Failed'; msg.className = 'msg err'; return; }
+        msg.textContent = 'Scanned ' + r.data.scanned + ' channel message(s) — backfilled ' + r.data.backfilled + ', skipped ' + r.data.skippedUnparseable + ' unparseable. Refresh above to see updated numbers.';
+        msg.className = 'msg ok';
+      })
+      .catch(function (err) {
+        btn.disabled = false;
+        msg.textContent = 'Request failed: ' + err.message; msg.className = 'msg err';
+      });
+  });
+
+  document.getElementById('channel-audit-btn').addEventListener('click', function () {
+    var btn = this;
+    var msg = document.getElementById('channel-audit-msg');
+    var resultsEl = document.getElementById('channel-audit-results');
+    var range = computeRange();
+    btn.disabled = true;
+    resultsEl.style.display = 'none';
+    msg.textContent = 'Reading the channel — this can take a moment…'; msg.className = 'msg';
+    fetch('/admin/channel-audit?password=' + encodeURIComponent(password) +
+      '&start=' + encodeURIComponent(range.start) + '&end=' + encodeURIComponent(range.end))
+      .then(function (res) { return res.json().then(function (data) { return { ok: res.ok, data: data }; }); })
+      .then(function (r) {
+        btn.disabled = false;
+        if (!r.ok || !r.data.ok) { msg.textContent = (r.data && r.data.error) || 'Failed'; msg.className = 'msg err'; return; }
+        msg.textContent = '';
+        var d = r.data;
+        var gap = d.channelUniqueBookingCount - d.dashboardUniqueBookingCount;
+        resultsEl.innerHTML =
+          '<div><b>Channel:</b> ' + d.channelMessageCount + ' message(s), ' + d.channelUniqueBookingCount + ' unique booking(s)</div>' +
+          '<div><b>Dashboard:</b> ' + d.dashboardEventCount + ' event(s), ' + d.dashboardUniqueBookingCount + ' unique booking(s)</div>' +
+          '<div style="margin-top:6px" class="' + (gap > 0 ? 'msg err' : 'msg ok') + '">' +
+          (gap > 0 ? gap + ' booking(s) in the channel are missing here — try Backfill from Slack, or widen its day range.' : 'No gap for this range.') +
+          '</div>';
+        resultsEl.style.display = 'block';
       })
       .catch(function (err) {
         btn.disabled = false;
