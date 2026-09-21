@@ -808,11 +808,11 @@ function renderVerifyRow(c, i) {
   if (c.status === 'mismatch') {
     // Strict path: the field WAS readable and it contradicts the booking
     // record — a checkbox is too easy to click without reading, so this
-    // needs a reason selected (and typed out, for "Other") before the
-    // Override button even enables. A dropdown of real recurring reasons
-    // beats free text for consistency and for reporting on why overrides
-    // happen later — "Other" still escapes to a text box for anything
-    // that doesn't fit.
+    // needs a reason picked from a dropdown of real recurring reasons
+    // (better than free text for consistency and for reporting on why
+    // overrides happen later). Picking a reason IS the override — no
+    // separate confirm button; "Other" escapes to a text box, resolved by
+    // pressing Enter or clicking away once something's typed.
     return `<div class="verify-result-row nomatch mismatch" ${dataAttrs}>
       <span class="vr-icon">⚠️</span>
       <span class="vr-label">${label}</span>
@@ -827,8 +827,7 @@ function renderVerifyRow(c, i) {
           <option value="Rebooked / changed manually at the desk">Rebooked / changed manually at the desk</option>
           <option value="__other__">Other (explain below)</option>
         </select>
-        <input type="text" class="vr-override-reason-other" placeholder="Explain why this is okay" hidden>
-        <button type="button" class="vr-override-btn" disabled>Override</button>
+        <input type="text" class="vr-override-reason-other" placeholder="Explain why this is okay — press Enter" hidden>
       </div>
     </div>`;
   }
@@ -866,39 +865,40 @@ function wireSkipBoxes(container, confirmRow) {
       update();
     });
   });
-  // Override reason: a dropdown of the real recurring reasons, with "Other"
-  // escaping to a text box. The Override button only enables once there's
-  // an actual final reason — a selected non-"Other" option, or "Other" with
-  // text actually typed in.
+  // Override reason: a dropdown of the real recurring reasons — picking one
+  // IS the override, no separate confirm button. "Other" escapes to a text
+  // box, applied on Enter or on blur once something's actually typed.
   container.querySelectorAll('.vr-override-reason-select').forEach(select => {
     const row = select.closest('.verify-result-row');
     const otherInput = row.querySelector('.vr-override-reason-other');
-    const btn = row.querySelector('.vr-override-btn');
-    const refresh = () => {
-      const isOther = select.value === '__other__';
-      otherInput.hidden = !isOther;
-      if (isOther) otherInput.focus();
-      const reason = isOther ? otherInput.value.trim() : select.value;
-      btn.disabled = !reason;
-    };
-    select.addEventListener('change', refresh);
-    otherInput.addEventListener('input', refresh);
-  });
-  container.querySelectorAll('.vr-override-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const row = btn.closest('.verify-result-row');
-      const select = row.querySelector('.vr-override-reason-select');
-      const otherInput = row.querySelector('.vr-override-reason-other');
-      const reason = select.value === '__other__' ? otherInput.value.trim() : select.value;
-      if (!reason) return;
+    const statusEl = row.querySelector('.vr-status');
+
+    const applyOverride = reason => {
+      if (!reason || row.classList.contains('overridden')) return;
       row.dataset.reason = reason;
       row.classList.add('overridden');
       select.disabled = true;
       otherInput.disabled = true;
-      btn.disabled = true;
-      btn.textContent = 'Overridden ✓';
+      otherInput.hidden = true;
+      if (statusEl) statusEl.textContent = 'Overridden ✓';
       update();
+    };
+
+    select.addEventListener('change', () => {
+      if (select.value === '__other__') {
+        otherInput.hidden = false;
+        otherInput.focus();
+        return;
+      }
+      applyOverride(select.value);
     });
+    otherInput.addEventListener('keydown', e => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        applyOverride(otherInput.value.trim());
+      }
+    });
+    otherInput.addEventListener('blur', () => applyOverride(otherInput.value.trim()));
   });
   update(); // compute initial state instead of leaving confirmRow stuck hidden
   return { totalMismatches };

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Booking Assistant",
-  "version": "10.0.8",
+  "version": "10.0.9",
   "description": "BMS/Box Office frontend — reads booking data directly from Box Office APIs using your existing session.",
   "permissions": ["sidePanel", "storage", "tabs", "activeTab", "scripting"],
   "host_permissions": [
