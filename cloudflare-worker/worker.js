@@ -188,7 +188,7 @@
 
 // Bump this string whenever you paste a new version into the dashboard —
 // visiting GET /debug-env instantly confirms whether a deploy took effect.
-const WORKER_VERSION = '2026-09-21-09';
+const WORKER_VERSION = '2026-09-21-10';
 
 // Formats an ISO timestamp as a clean IST string, e.g. "6 Sep 2026, 10:44 PM IST".
 function formatIST(isoString) {
@@ -495,6 +495,57 @@ async function handleAdminRequestCode(request, env) {
   return cors(JSON.stringify({ ok: true, code, expiresInSeconds: ttl, steps }), 200);
 }
 
+// gpt-4o-mini is instructed to treat "13:20" and "1:20 PM" as the same time
+// (tolerance rule 2 in the prompt below), but it can still get the 24-hour /
+// 12-hour conversion wrong and report a "mismatch" for a time that is
+// actually identical — as opposed to date/product-name tolerance, which
+// genuinely needs judgment, converting HH:MM(:SS) <-> H:MM AM/PM is a pure,
+// deterministic parse, so this catches and downgrades exactly that class of
+// AI arithmetic slip instead of trusting the model to always get it right.
+function parseClockTimeToMinutes(str) {
+  if (!str) return null;
+  const m = String(str).trim().match(/^(\d{1,2})(?::(\d{2}))?(?::(\d{2}))?\s*([AaPp]\.?[Mm]\.?)?$/);
+  if (!m) return null;
+  let hour = parseInt(m[1], 10);
+  const minute = m[2] ? parseInt(m[2], 10) : 0;
+  const meridiem = m[4] ? m[4].toLowerCase().replace(/\./g, '') : null;
+  if (hour > 23 || minute > 59) return null;
+  if (meridiem) {
+    if (hour < 1 || hour > 12) return null;
+    if (meridiem === 'pm' && hour !== 12) hour += 12;
+    if (meridiem === 'am' && hour === 12) hour = 0;
+  }
+  return hour * 60 + minute;
+}
+
+function downgradeFalseTimeMismatches(checks) {
+  for (const c of checks || []) {
+    if (c.status !== 'mismatch' || !/time/i.test(c.label || '')) continue;
+    const expectedMin = parseClockTimeToMinutes(c.expected);
+    const seenMin = parseClockTimeToMinutes(c.seenValue);
+    if (expectedMin !== null && seenMin !== null && expectedMin === seenMin) {
+      c.status = 'match';
+      c.seenValue = '';
+    }
+  }
+}
+
+// The prompt instructs the model to include one check per non-empty field
+// (see the "Rules" section above), but that's still just an instruction —
+// nothing in the schema enforces it, and a busy/uncertain completion can
+// still drop one. Rather than let a dropped field silently vanish from the
+// agent's results (looking like it was never checked at all), this fills
+// in a "not_found" placeholder for any expected field the model's response
+// didn't cover — same treatment as a field it saw but couldn't read.
+function fillMissingChecks(checks, expectedFields) {
+  const list = checks || [];
+  for (const f of expectedFields) {
+    const already = list.some(c => (c.label || '').trim().toLowerCase() === f.label.toLowerCase());
+    if (!already) list.push({ label: f.label, expected: f.value, status: 'not_found', seenValue: '' });
+  }
+  return list;
+}
+
 // ── /verify — AI screenshot verification ──────────────────────────────────────
 
 async function handleVerify(request, env, ctx) {
@@ -529,13 +580,21 @@ async function handleVerify(request, env, ctx) {
 
   const { date = '', time = '', pax = '', price = '', product = '' } = facts;
 
-  const factLines = [
-    date    ? `Date: ${date}`             : null,
-    time    ? `Time: ${time}`             : null,
-    pax     ? `Total pax (guests): ${pax}` : null,
-    price   ? `Net price: ${price}`       : null,
-    product ? `Product / experience name: ${product}` : null,
-  ].filter(Boolean).join('\n');
+  // label is the exact string the model must use for that field's check —
+  // spelling it out per-field (rather than leaving it to infer one from the
+  // description) is what the "one check per field" rule below can actually
+  // be verified against, both by the model and by the fallback further down
+  // that fills in any field the model still drops.
+  const expectedFields = [
+    { key: 'date',    label: 'Date',       value: date,    desc: `Date: ${date}` },
+    { key: 'time',    label: 'Time',       value: time,    desc: `Time: ${time}` },
+    { key: 'pax',     label: 'Pax',        value: pax,     desc: `Total pax (guests): ${pax}` },
+    { key: 'price',   label: 'Net Price',  value: price,   desc: `Net price: ${price}` },
+    { key: 'product', label: 'Product',    value: product, desc: `Product / experience name: ${product}` },
+  ].filter(f => f.value);
+
+  const factLines = expectedFields.map(f => f.desc).join('\n');
+  const labelList = expectedFields.map(f => `"${f.label}"`).join(', ');
 
   // Deliberately verbose and explicit — the aim is to eliminate manual
   // re-checking entirely, not just catch the easy cases. Every rule below
@@ -567,7 +626,8 @@ Reply ONLY with valid JSON in this exact shape — no markdown, no extra text:
 {"checks":[{"label":"Date","expected":"${date}","status":"match","seenValue":""},{"label":"Time","expected":"${time}","status":"mismatch","seenValue":"11:00 AM"}],"pageType":"checkout","pageTypeNote":""}
 
 Rules:
-- Only include a check for a field if its expected value above is non-empty.
+- Include exactly one check per field listed above — one for each of: ${labelList}. Do not omit any of them, even if you're unsure — use "not_found" rather than dropping a field entirely.
+- Use the label exactly as given above (e.g. "Net Price", not "Net price" or "Price") — this is how the results get matched back up on the agent's side.
 - status must be exactly one of "match", "mismatch", or "not_found" per the definitions above.
 - seenValue is required (non-empty) when status is "mismatch", and must be an empty string otherwise.
 - pageType must be exactly one of "checkout", "ticket", or "other" per the definitions above.
@@ -684,6 +744,9 @@ Rules:
     return cors(JSON.stringify({ error: lastError || 'AI Verify failed', raw: lastRaw, steps }), 502);
   }
 
+  downgradeFalseTimeMismatches(result.checks);
+  result.checks = fillMissingChecks(result.checks, expectedFields);
+
   // Fire-and-forget: logs one permanent usage event for the reports below
   // (booking-uniqueness, page-type tag distribution, match-rate/field-skip
   // stats, vendor/experience breakdowns, per-person breakdowns, and custom
@@ -734,15 +797,28 @@ Rules:
 // image, comes later if/when Confirm & Flag is actually clicked.
 async function postPreOverrideFlag(env, { bookingId, agentEmail, vendor, product, checks }) {
   if (!env.SLACK_BOT_TOKEN) return;
-  const mismatches = (checks || []).filter(c => c.status === 'mismatch');
+  const allChecks = checks || [];
+  const mismatches = allChecks.filter(c => c.status === 'mismatch');
   if (!mismatches.length) return;
+  const matched = allChecks.filter(c => c.status === 'match');
+  const notFound = allChecks.filter(c => c.status === 'not_found');
+
+  // One bullet per field, on its own line — same shape the Confirm & Flag
+  // alert below uses, so the two messages read consistently.
+  const bulletBlock = (header, items, formatFn) =>
+    items.length ? `${header}\n${items.map(c => `• ${formatFn(c)}`).join('\n')}` : null;
 
   const text = [
     ':triangular_flag_on_post: *Mismatch Flagged — Awaiting Review*',
     `*Booking ID:* ${bookingId || 'n/a'} · *Flagged by:* ${agentEmail || 'unknown'}`,
     (vendor || product) ? `*Vendor:* ${vendor || 'n/a'} · *Experience:* ${product || 'n/a'}` : null,
+    // Shows the mismatches in context — out of how many fields were actually
+    // checked, not just the bad news in isolation.
+    `*Fields checked:* ${allChecks.length} · *Matched:* ${matched.length} · *Mismatched:* ${mismatches.length}${notFound.length ? ` · *Not found:* ${notFound.length}` : ''}`,
     '',
-    `*Mismatched fields:*\n${mismatches.map(c => `• ${c.label} — expected ${c.expected || 'n/a'}, shows ${c.seenValue || 'n/a'}`).join('\n')}`,
+    bulletBlock('*Mismatched fields:*', mismatches, c => `${c.label} — expected ${c.expected || 'n/a'}, shows ${c.seenValue || 'n/a'}`),
+    bulletBlock('*Matched:*', matched, c => `${c.label}: ${c.expected || 'n/a'}`),
+    bulletBlock('*Not found:*', notFound, c => `${c.label}: expected ${c.expected || 'n/a'}`),
   ].filter(v => v !== null).join('\n');
 
   try {
@@ -967,30 +1043,41 @@ function parseConfirmFlagMessage(text, ts) {
   // header; messages posted before that change have the same entries
   // pipe-joined directly after the header on one line. This normalizes
   // either shape back to a single pipe-joined string so the parsing below
-  // doesn't care which one it got.
+  // doesn't care which one it got. Anchored to the START of a line (not a
+  // bare substring search) — the pre-override flag alert also mentions
+  // "*Matched:*"/"*Not found:*" inline in its summary counts line, which a
+  // plain indexOf would match instead of the real section header below it.
+  const lines = text.split('\n');
   const extractFieldBlock = headerText => {
-    const idx = text.indexOf(headerText);
+    const idx = lines.findIndex(l => l.trim().startsWith(headerText));
     if (idx === -1) return null;
-    const afterLines = text.slice(idx + headerText.length).split('\n');
-    const sameLineRest = afterLines[0].trim();
+    const sameLineRest = lines[idx].trim().slice(headerText.length).trim();
     if (sameLineRest) return sameLineRest; // old single-line format
     const bullets = [];
-    for (let i = 1; i < afterLines.length; i++) {
-      const t = afterLines[i].trim();
+    for (let i = idx + 1; i < lines.length; i++) {
+      const t = lines[i].trim();
       if (!t.startsWith('•')) break;
       bullets.push(t.replace(/^•\s*/, ''));
     }
     return bullets.length ? bullets.join('  |  ') : null;
   };
 
+  const parseFieldList = raw => (raw || '').split('  |  ').filter(Boolean).map(part => {
+    const m = part.match(/^(.+?):\s*(.*)$/);
+    return m ? { label: m[1].trim(), value: m[2].trim() } : { label: part.trim(), value: '' };
+  });
+
   if (isPreOverrideFlag) {
-    // No pageType, no Matched/Skipped/Overridden sections here — just the
-    // mismatches AI Verify caught at detection time, before anyone has
-    // acted on them. "label — expected X, shows Y" per entry, same shape
-    // the confirm message's override line uses, just no reason yet.
+    // No pageType, no Overridden section here — just what AI Verify saw at
+    // detection time, before anyone has acted on it: the mismatches ("label
+    // — expected X, shows Y", same shape the confirm message's override line
+    // uses, just no reason yet), plus what already matched and what wasn't
+    // found, so this alert reads as the full picture, not just the bad news.
     const mismatchRaw = extractFieldBlock('*Mismatched fields:*');
     const strictMismatchFields = (mismatchRaw || '').split('  |  ').filter(Boolean)
       .map(part => part.split(' — ')[0].trim());
+    const matched = parseFieldList(extractFieldBlock('*Matched:*'));
+    const notFound = parseFieldList(extractFieldBlock('*Not found:*'));
     return {
       bookingId: bookingId === 'n/a' ? null : bookingId || null,
       agentEmail: agentEmail === 'unknown' ? null : agentEmail || null,
@@ -999,8 +1086,8 @@ function parseConfirmFlagMessage(text, ts) {
       vendor: vendor === 'n/a' ? null : vendor || null,
       product: product === 'n/a' ? null : product || null,
       pageType: null,
-      totalChecks: strictMismatchFields.length,
-      mismatchedFields: strictMismatchFields,
+      totalChecks: strictMismatchFields.length + matched.length + notFound.length,
+      mismatchedFields: strictMismatchFields.concat(notFound.map(n => n.label)),
       strictMismatchFields,
       stage: 'flagged',
       retroactive: false,
@@ -1028,10 +1115,6 @@ function parseConfirmFlagMessage(text, ts) {
     else if (/Checkout page/i.test(pageTypeLineRaw)) pageType = 'checkout';
   }
 
-  const parseFieldList = raw => (raw || '').split('  |  ').filter(Boolean).map(part => {
-    const m = part.match(/^(.+?):\s*(.*)$/);
-    return m ? { label: m[1].trim(), value: m[2].trim() } : { label: part.trim(), value: '' };
-  });
   const matchedRaw = extractFieldBlock('*Matched:*');
   // "Skipped (not found)" is the current label; older messages posted before
   // this wording change say "Skipped (mismatch acknowledged)" — try both so
