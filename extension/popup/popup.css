@@ -717,12 +717,14 @@ details.instr-block:not([open]) .instr-block__header { border-bottom: none; }
   flex-wrap: wrap;
 }
 .verify-result-row.mismatch .vr-status { font-weight: 800; }
-.vr-override-row { display: flex; align-items: center; gap: 6px; width: 100%; margin-top: 6px; }
-.vr-override-reason {
-  flex: 1; font: inherit; font-size: 11px; padding: 5px 8px; border-radius: 6px;
+.vr-override-row { display: flex; align-items: center; gap: 6px; width: 100%; margin-top: 6px; flex-wrap: wrap; }
+.vr-override-reason-select, .vr-override-reason-other {
+  flex: 1; min-width: 140px; font: inherit; font-size: 11px; padding: 5px 8px; border-radius: 6px;
   border: 1px solid var(--border-strong); background: var(--surface); color: var(--text);
 }
-.vr-override-reason:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.vr-override-reason-select:focus-visible, .vr-override-reason-other:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 1px;
+}
 .vr-override-btn {
   font: inherit; font-size: 11px; font-weight: 700; padding: 5px 10px; border-radius: 6px;
   border: 1px solid var(--red); background: transparent; color: var(--red); cursor: pointer;

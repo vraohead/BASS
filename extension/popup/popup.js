@@ -808,14 +808,26 @@ function renderVerifyRow(c, i) {
   if (c.status === 'mismatch') {
     // Strict path: the field WAS readable and it contradicts the booking
     // record — a checkbox is too easy to click without reading, so this
-    // needs a typed reason before the Override button even enables.
+    // needs a reason selected (and typed out, for "Other") before the
+    // Override button even enables. A dropdown of real recurring reasons
+    // beats free text for consistency and for reporting on why overrides
+    // happen later — "Other" still escapes to a text box for anything
+    // that doesn't fit.
     return `<div class="verify-result-row nomatch mismatch" ${dataAttrs}>
       <span class="vr-icon">⚠️</span>
       <span class="vr-label">${label}</span>
       <span class="vr-value">Expected: ${expected} — Screenshot shows: ${seen}</span>
       <span class="vr-status">Mismatch</span>
       <div class="vr-override-row">
-        <input type="text" class="vr-override-reason" placeholder="Why is this okay to confirm anyway?">
+        <select class="vr-override-reason-select">
+          <option value="" selected disabled>Why is this okay to confirm anyway?</option>
+          <option value="Guest requested this change after booking">Guest requested this change after booking</option>
+          <option value="Confirmed correct value directly with guest">Confirmed correct value directly with guest</option>
+          <option value="Vendor site display/formatting issue, not a real mismatch">Vendor site display/formatting issue, not a real mismatch</option>
+          <option value="Rebooked / changed manually at the desk">Rebooked / changed manually at the desk</option>
+          <option value="__other__">Other (explain below)</option>
+        </select>
+        <input type="text" class="vr-override-reason-other" placeholder="Explain why this is okay" hidden>
         <button type="button" class="vr-override-btn" disabled>Override</button>
       </div>
     </div>`;
@@ -854,17 +866,35 @@ function wireSkipBoxes(container, confirmRow) {
       update();
     });
   });
-  container.querySelectorAll('.vr-override-reason').forEach(input => {
-    const btn = input.closest('.verify-result-row').querySelector('.vr-override-btn');
-    input.addEventListener('input', () => { btn.disabled = !input.value.trim(); });
+  // Override reason: a dropdown of the real recurring reasons, with "Other"
+  // escaping to a text box. The Override button only enables once there's
+  // an actual final reason — a selected non-"Other" option, or "Other" with
+  // text actually typed in.
+  container.querySelectorAll('.vr-override-reason-select').forEach(select => {
+    const row = select.closest('.verify-result-row');
+    const otherInput = row.querySelector('.vr-override-reason-other');
+    const btn = row.querySelector('.vr-override-btn');
+    const refresh = () => {
+      const isOther = select.value === '__other__';
+      otherInput.hidden = !isOther;
+      if (isOther) otherInput.focus();
+      const reason = isOther ? otherInput.value.trim() : select.value;
+      btn.disabled = !reason;
+    };
+    select.addEventListener('change', refresh);
+    otherInput.addEventListener('input', refresh);
   });
   container.querySelectorAll('.vr-override-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       const row = btn.closest('.verify-result-row');
-      const input = row.querySelector('.vr-override-reason');
-      if (!input.value.trim()) return;
+      const select = row.querySelector('.vr-override-reason-select');
+      const otherInput = row.querySelector('.vr-override-reason-other');
+      const reason = select.value === '__other__' ? otherInput.value.trim() : select.value;
+      if (!reason) return;
+      row.dataset.reason = reason;
       row.classList.add('overridden');
-      input.disabled = true;
+      select.disabled = true;
+      otherInput.disabled = true;
       btn.disabled = true;
       btn.textContent = 'Overridden ✓';
       update();
@@ -1236,7 +1266,7 @@ function buildVerifySection(flat, guestData) {
       label: row.dataset.label || '',
       value: row.dataset.seen || '',
       expected: row.dataset.expected || '',
-      reason: row.querySelector('.vr-override-reason')?.value.trim() || '',
+      reason: row.dataset.reason || '',
     }));
 
     confirmBtn.disabled = true;
