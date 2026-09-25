@@ -194,7 +194,7 @@
 
 // Bump this string whenever you paste a new version into the dashboard —
 // visiting GET /debug-env instantly confirms whether a deploy took effect.
-const WORKER_VERSION = '2026-09-21-12';
+const WORKER_VERSION = '2026-09-25-01';
 
 // Formats an ISO timestamp as a clean IST string, e.g. "6 Sep 2026, 10:44 PM IST".
 function formatIST(isoString) {
@@ -215,6 +215,15 @@ function formatIST(isoString) {
 // change these if the target Slack channels ever change.
 const SLACK_CHANNEL_ID = 'C0BV91K7F70';
 const DAILY_CODE_CHANNEL_ID = 'C0BKUTZ4ADN';
+const SLACK_WORKSPACE = 'headout';
+
+// Slack permalinks are just the workspace + channel + timestamp with its
+// decimal point stripped and a "p" prefix — no API call needed to build one.
+// Only ever meaningful for channel-sourced rows (an actual Slack message
+// exists); dashboard/KV-sourced events have no `ts` and get null here.
+function slackPermalink(ts) {
+  return ts ? `https://${SLACK_WORKSPACE}.slack.com/archives/${SLACK_CHANNEL_ID}/p${String(ts).replace('.', '')}` : null;
+}
 
 // Cloudflare Workers Builds (Git auto-deploy) has repeatedly wiped the
 // Dashboard-set ADMIN_PASSWORD secret on CI-triggered deploys, locking the
@@ -1511,6 +1520,7 @@ async function handleAdminUsageReportRange(request, env, url) {
     pageType: e.pageType,
     mismatchedFields: e.mismatchedFields || [],
     retroactive: null,
+    slackLink: null, // KV-sourced event, never has a Slack ts to build one from
   }));
 
   return cors(JSON.stringify({
@@ -1647,6 +1657,7 @@ async function handleAdminChannelReport(request, env, url) {
       pageType: m.pageType,
       mismatchedFields: m.mismatchedFields,
       retroactive: m.retroactive,
+      slackLink: slackPermalink(m.ts),
     }));
 
     return cors(JSON.stringify({
