@@ -21,6 +21,67 @@
 // sheet, so it MUST be changed from the placeholder below before deploying.
 const SHARED_SECRET = 'REPLACE_WITH_A_LONG_RANDOM_STRING';
 
+// ── Daily pull, on Apps Script's own clock (no Cloudflare cron needed) ──────
+// The Worker can push here on ITS schedule (see doPost above, and worker.js's
+// scheduled() cron), but Apps Script can also PULL on ITS OWN schedule,
+// independent of whatever time Cloudflare's cron happens to run at. This is
+// the "run once, it repeats every morning forever" path: createDailyTrigger()
+// installs a persistent time-driven trigger — you run it ONCE from the editor,
+// Google's own infrastructure then invokes pullFromWorkerAndSync() every day
+// around the chosen hour, with nothing further to do.
+//
+// Setup (one-time):
+//   1. Project Settings (gear icon, left sidebar) > Script Properties >
+//      Add property: ADMIN_PASSWORD = <the same admin password the Worker's
+//      dashboard login uses>. Never hardcode it in this file.
+//   2. Select createDailyTrigger in the function dropdown (editor toolbar) > Run.
+//      (One-time authorization prompt on first run — approve it.)
+//   3. Check Triggers (clock icon, left sidebar) — you should see one entry
+//      for pullFromWorkerAndSync, "Time-driven", firing daily.
+// To change the hour later, edit SYNC_HOUR below, then re-run
+// createDailyTrigger() (it removes the old one first, so this is safe to
+// re-run any time you want to change or just confirm the schedule).
+const WORKER_BASE_URL = 'https://bass-verify.vivek-rao.workers.dev';
+const SYNC_HOUR = 9; // 24h, in this Apps Script project's timezone (File > Project Settings)
+
+function pullFromWorkerAndSync() {
+  const password = PropertiesService.getScriptProperties().getProperty('ADMIN_PASSWORD');
+  if (!password) {
+    throw new Error('ADMIN_PASSWORD script property not set — see setup instructions at the top of this file.');
+  }
+  const url = WORKER_BASE_URL + '/admin/usage-report-range?password=' + encodeURIComponent(password);
+  const res = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+  const code = res.getResponseCode();
+  if (code < 200 || code >= 300) {
+    throw new Error('Worker returned HTTP ' + code + ': ' + res.getContentText().slice(0, 300));
+  }
+  const data = JSON.parse(res.getContentText());
+  if (!data.ok) {
+    throw new Error('Worker error: ' + (data.error || 'unknown'));
+  }
+  syncSnapshot(data);
+}
+
+function createDailyTrigger() {
+  removeDailyTrigger_(); // avoid stacking up duplicate triggers on repeat runs
+  ScriptApp.newTrigger('pullFromWorkerAndSync')
+    .timeBased()
+    .everyDays(1)
+    .atHour(SYNC_HOUR)
+    .create();
+  Logger.log('Daily trigger installed — pullFromWorkerAndSync will fire once a day, in the hour starting at ' + SYNC_HOUR + ':00.');
+}
+
+// Apps Script time-driven triggers give you an HOUR WINDOW, not an exact
+// minute — atHour(9) means "sometime between 9:00 and 9:59", not "at 9:00:00
+// sharp". That's a Google platform limitation, not something this code can
+// tighten further.
+function removeDailyTrigger_() {
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (t.getHandlerFunction() === 'pullFromWorkerAndSync') ScriptApp.deleteTrigger(t);
+  });
+}
+
 function doPost(e) {
   try {
     const body = JSON.parse((e && e.postData && e.postData.contents) || '{}');
