@@ -66,6 +66,10 @@
 //                                                   a button on the admin page); alsoMainChannel=true
 //                                                   also posts to the main confirm-flag channel
 //   GET  /admin/send-agent-report?password=...&alsoMainChannel=  -> same, for the per-person report
+//   GET  /admin/sync-to-sheet?password=...     -> pushes the all-time KV-log snapshot to
+//                             apps-script/dashboard-sync.gs (also wired to a button on the
+//                             admin page); posted automatically once a day (cron) too.
+//                             Needs the SHEETS_SYNC_SECRET Worker secret set.
 //   GET  /admin/usage-report-range?password=...&start=<ISO>&end=<ISO>&filter=
 //                          -> the KV-log source for the admin page's Channel/Dashboard
 //                             toggle: the full summarizeEvents() shape (see below) for
@@ -194,7 +198,7 @@
 
 // Bump this string whenever you paste a new version into the dashboard —
 // visiting GET /debug-env instantly confirms whether a deploy took effect.
-const WORKER_VERSION = '2026-09-25-01';
+const WORKER_VERSION = '2026-09-25-02';
 
 // Formats an ISO timestamp as a clean IST string, e.g. "6 Sep 2026, 10:44 PM IST".
 function formatIST(isoString) {
@@ -224,6 +228,14 @@ const SLACK_WORKSPACE = 'headout';
 function slackPermalink(ts) {
   return ts ? `https://${SLACK_WORKSPACE}.slack.com/archives/${SLACK_CHANNEL_ID}/p${String(ts).replace('.', '')}` : null;
 }
+
+// Google Apps Script Web App URL for apps-script/dashboard-sync.gs — not
+// sensitive on its own (the script's own SHARED_SECRET check is what actually
+// gates writes), so it's hardcoded here the same way SLACK_CHANNEL_ID is.
+// The matching secret, however, IS sensitive and lives only in the
+// SHEETS_SYNC_SECRET Worker secret (wrangler secret put SHEETS_SYNC_SECRET) —
+// it must be set to the exact same string as SHARED_SECRET in the .gs file.
+const SHEETS_SYNC_URL = 'https://script.google.com/macros/s/AKfycbybEfWQtPTQhOkJ2q-tWL_VDYdPOIo5-CYP3VRVbQ8Hz7QzRW-4uB9-9Qr_BNaXrRea0A/exec';
 
 // Cloudflare Workers Builds (Git auto-deploy) has repeatedly wiped the
 // Dashboard-set ADMIN_PASSWORD secret on CI-triggered deploys, locking the
@@ -305,6 +317,10 @@ export default {
       return handleAdminChannelReport(request, env, url);
     }
 
+    if (request.method === 'GET' && url.pathname === '/admin/sync-to-sheet') {
+      return handleAdminSyncToSheet(request, env, url);
+    }
+
     if (request.method === 'GET' && url.pathname === '/admin/config') {
       return handleAdminGetConfig(request, env, url);
     }
@@ -329,6 +345,7 @@ export default {
     ctx.waitUntil(sendDailyCodeToSlack(env));
     ctx.waitUntil(sendUsageReportToSlack(env));
     ctx.waitUntil(sendAgentUsageReportToSlack(env));
+    ctx.waitUntil(syncDashboardToSheet(env));
   },
 };
 
@@ -422,6 +439,7 @@ async function handleAdminGetConfig(request, env, url) {
     hasConfigKv: !!env.CONFIG,
     hasSlackToken: !!env.SLACK_BOT_TOKEN,
     hasOpenAiKey: !!env.OPENAI_API_KEY,
+    hasSheetsSyncSecret: !!env.SHEETS_SYNC_SECRET,
     dailyCodeChannelId: DAILY_CODE_CHANNEL_ID,
   }), 200);
 }
@@ -1411,6 +1429,58 @@ async function sendUsageReportToSlack(env, alsoMainChannel = false) {
   };
 }
 
+// Pushes the all-time KV-log snapshot to apps-script/dashboard-sync.gs — same
+// payload shape /admin/usage-report-range returns (summarizeEvents() output +
+// bookings), just POSTed instead of returned, with a `secret` field the
+// script checks against its own SHARED_SECRET. Posted automatically once a
+// day (see scheduled() below) and on demand via /admin/sync-to-sheet ("Sync
+// to Sheet now" on the admin page) for testing or an immediate refresh.
+async function syncDashboardToSheet(env) {
+  const steps = [];
+  const logStep = (step, ok, detail) => steps.push({ step, ok, detail, at: new Date().toISOString() });
+
+  if (!env.CONFIG) {
+    logStep('check_config', false, 'CONFIG KV binding missing');
+    return { ok: false, error: 'Worker misconfigured — no CONFIG KV namespace bound', steps };
+  }
+  if (!env.SHEETS_SYNC_SECRET) {
+    logStep('check_config', false, 'SHEETS_SYNC_SECRET secret not set');
+    return { ok: false, error: 'Worker misconfigured — run: wrangler secret put SHEETS_SYNC_SECRET (must match SHARED_SECRET in the .gs file)', steps };
+  }
+
+  const events = await listVerifyEvents(env);
+  const summary = summarizeEvents(events);
+  const { bookings, bookingsTruncated } = eventsToBookingsList(events);
+  const payload = {
+    secret: env.SHEETS_SYNC_SECRET,
+    ok: true,
+    source: 'dashboard',
+    start: null, end: null, filter: 'all',
+    totalEvents: events.length,
+    ...summary,
+    bookings,
+    bookingsTruncated,
+  };
+
+  try {
+    const res = await fetch(SHEETS_SYNC_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json().catch(() => ({}));
+    logStep('post_to_sheet', res.ok && data.ok === true, `HTTP ${res.status} — ${JSON.stringify(data).slice(0, 500)}`);
+    if (!res.ok || data.ok !== true) {
+      return { ok: false, error: data.error || `HTTP ${res.status}`, steps };
+    }
+  } catch (err) {
+    logStep('post_to_sheet', false, `Exception: ${err.message}`);
+    return { ok: false, error: err.message, steps };
+  }
+
+  return { ok: true, bookingCount: bookings.length, steps };
+}
+
 // Posted automatically once a day alongside the report above — also wired
 // to its own admin page button ("Send per-person report now") since it's a
 // distinct question (who's using it) from the totals report (how much has
@@ -1479,6 +1549,15 @@ async function handleAdminSendAgentReport(request, env, url) {
   return cors(JSON.stringify(result), result.ok ? 200 : 502);
 }
 
+async function handleAdminSyncToSheet(request, env, url) {
+  const password = url.searchParams.get('password') || '';
+  if (password !== getAdminPassword(env)) {
+    return cors(JSON.stringify({ error: 'Wrong password' }), 401);
+  }
+  const result = await syncDashboardToSheet(env);
+  return cors(JSON.stringify(result), result.ok ? 200 : 502);
+}
+
 // On-demand only — doesn't post to Slack, just returns the numbers so the
 // admin page can render them inline for whatever window was asked for.
 async function handleAdminUsageReportRange(request, env, url) {
@@ -1499,29 +1578,7 @@ async function handleAdminUsageReportRange(request, env, url) {
     events = events.filter(e => e.totalChecks > 0 && (e.mismatchedFields || []).length === 0);
   }
   const summary = summarizeEvents(events);
-
-  // Same shape as /admin/channel-report's `bookings`, so the admin page can
-  // render either source with one set of functions. Excludes stage:'fetched'
-  // entries — this table is the verification history (flagged/confirmed),
-  // and a row per plain booking-lookup would flood it; fetched bookings are
-  // still fully counted in `summary` above via fetchedBookingCount.
-  const sorted = [...events]
-    .filter(e => e.stage !== 'fetched')
-    .sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime());
-  const bookings = sorted.slice(0, USAGE_BOOKINGS_MAX_ROWS).map(e => ({
-    bookingId: e.bookingId,
-    stage: e.stage || null,
-    agentEmail: e.email,
-    at: e.at,
-    tourId: null,
-    vendorId: null,
-    vendor: e.vendor,
-    product: e.product,
-    pageType: e.pageType,
-    mismatchedFields: e.mismatchedFields || [],
-    retroactive: null,
-    slackLink: null, // KV-sourced event, never has a Slack ts to build one from
-  }));
+  const { bookings, bookingsTruncated } = eventsToBookingsList(events);
 
   return cors(JSON.stringify({
     ok: true,
@@ -1530,7 +1587,7 @@ async function handleAdminUsageReportRange(request, env, url) {
     totalEvents: events.length,
     ...summary,
     bookings,
-    bookingsTruncated: sorted.length > USAGE_BOOKINGS_MAX_ROWS,
+    bookingsTruncated,
   }), 200);
 }
 
@@ -1602,6 +1659,33 @@ async function handleAdminChannelAudit(request, env, url) {
 // /admin/usage-report-range return — same shape either way, so the admin
 // page renders whichever source is selected with one set of functions.
 const USAGE_BOOKINGS_MAX_ROWS = 500;
+
+// KV-log events -> the same `bookings` shape /admin/channel-report builds
+// from Slack messages — shared so /admin/usage-report-range and the sheet
+// sync (below) don't each keep their own copy of this mapping. Excludes
+// stage:'fetched' entries: this list is the verification history (flagged/
+// confirmed), and a row per plain booking-lookup would flood it; fetched
+// bookings are still fully counted via summarizeEvents()'s fetchedBookingCount.
+function eventsToBookingsList(events) {
+  const sorted = [...events]
+    .filter(e => e.stage !== 'fetched')
+    .sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime());
+  const bookings = sorted.slice(0, USAGE_BOOKINGS_MAX_ROWS).map(e => ({
+    bookingId: e.bookingId,
+    stage: e.stage || null,
+    agentEmail: e.email,
+    at: e.at,
+    tourId: null,
+    vendorId: null,
+    vendor: e.vendor,
+    product: e.product,
+    pageType: e.pageType,
+    mismatchedFields: e.mismatchedFields || [],
+    retroactive: null,
+    slackLink: null, // KV-sourced event, never has a Slack ts to build one from
+  }));
+  return { bookings, bookingsTruncated: sorted.length > USAGE_BOOKINGS_MAX_ROWS };
+}
 
 // The channel is the primary, ground-truth source for usage reporting — this
 // is the main channel-based report: any date range, an optional filter, the
@@ -2348,6 +2432,16 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
 
     <div class="card">
       <div class="card-head">
+        <h2>📄 Sync to Sheet</h2>
+        <button type="button" class="info-btn" data-info="sync-to-sheet">i</button>
+      </div>
+      <p class="sub-label" style="margin:0 0 12px">Pushes the same numbers as this dashboard (all-time) to a Google Sheet once a day automatically — Summary, Bookings (with a Slack link per row), per-person/vendor/experience breakdowns, and a running Sync Log so the headline numbers can be tracked over time. Click below to push it right now.</p>
+      <button class="secondary" id="sync-to-sheet-btn">Sync to Sheet now</button>
+      <p class="msg" id="sync-to-sheet-msg"></p>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
         <h2>📥 Backfill from Slack</h2>
         <button type="button" class="info-btn" data-info="backfill">i</button>
       </div>
@@ -2408,6 +2502,7 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
     'agent-report': 'Posts to the passcode channel by default, same as the usage report \\u2014 check the box first if you also want this in the main team channel. Checks run per person over a true rolling last-24-hours window (not tied to calendar days), plus total unique bookings each person has actioned, all-time. Posts automatically once a day; this button sends it on demand too.',
     'backfill': 'Confirm & Flag started logging usage here only from a certain point on \\u2014 anything confirmed before that only exists as a Slack message. This reads the Confirm & Flag channel\\'s history for the chosen window and fills in the missing entries. Each one is keyed by its Slack message, so re-running this for the same days never double-counts \\u2014 safe to click again. Needs the Slack bot token to have channel-history read access; a \\u201cmissing_scope\\u201d error means that needs adding in the Slack app\\'s OAuth settings first.',
     'channel-audit': 'A sanity check, not a report \\u2014 counts Confirm & Flag messages in the channel for the range selected above and compares that to what\\'s logged here. They won\\'t match perfectly forever (a message posted seconds before/after a range boundary can land on one side only), but a large or growing gap usually means something stopped recording \\u2014 catch it here before the usage numbers quietly go stale.',
+    'sync-to-sheet': 'Pushes the same all-time numbers this dashboard shows (Dashboard/KV source) to a Google Sheet via a small Apps Script Web App \\u2014 Summary, Bookings (each with a link straight to its Slack message, when one exists), per-person/vendor/experience breakdowns, and a Sync Log tab that appends one row per sync so you can see the headline numbers trend over time. Needs the SHEETS_SYNC_SECRET Worker secret set to match the Apps Script\\'s own SHARED_SECRET \\u2014 see the Status card below. Posts automatically once a day; this button sends it on demand too.',
   };
   var infoPopover = null;
   function closeInfoPopover() {
@@ -2442,7 +2537,8 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
     document.getElementById('status-grid').innerHTML =
       statusRow('Slack token', cfg.hasSlackToken) +
       statusRow('OpenAI key', cfg.hasOpenAiKey) +
-      statusRow('CONFIG KV bound', cfg.hasConfigKv);
+      statusRow('CONFIG KV bound', cfg.hasConfigKv) +
+      statusRow('Sheets sync secret', cfg.hasSheetsSyncSecret);
   }
 
   function unlock(pw, opts) {
@@ -2546,6 +2642,25 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
         var rosterCount = (r.data.last24hUsage || []).length;
         var allTimeCount = (r.data.allTimeUsage || []).length;
         msg.textContent = 'Sent to the passcode channel' + (alsoMain ? ' and the main channel' : '') + ' — ' + rosterCount + ' known agent(s) listed, ' + allTimeCount + ' with unique-booking history.';
+        msg.className = 'msg ok';
+      })
+      .catch(function (err) {
+        btn.disabled = false;
+        msg.textContent = 'Request failed: ' + err.message; msg.className = 'msg err';
+      });
+  });
+
+  document.getElementById('sync-to-sheet-btn').addEventListener('click', function () {
+    var btn = this;
+    var msg = document.getElementById('sync-to-sheet-msg');
+    btn.disabled = true;
+    msg.textContent = 'Syncing…'; msg.className = 'msg';
+    fetch('/admin/sync-to-sheet?password=' + encodeURIComponent(password))
+      .then(function (res) { return res.json().then(function (data) { return { ok: res.ok, data: data }; }); })
+      .then(function (r) {
+        btn.disabled = false;
+        if (!r.ok || !r.data.ok) { msg.textContent = (r.data && r.data.error) || 'Failed'; msg.className = 'msg err'; return; }
+        msg.textContent = 'Synced — ' + r.data.bookingCount + ' booking row(s) pushed.';
         msg.className = 'msg ok';
       })
       .catch(function (err) {
