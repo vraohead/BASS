@@ -269,7 +269,9 @@ function setupDailyUsageLayout_(ss) {
     .setValue('Choose a day and filter below. The report refreshes automatically after a control changes.')
     .setFontColor('#666666');
   sheet.getRange('A3:A5').setValues([['Date'], ['Source'], ['Filter']]).setFontWeight('bold');
-  sheet.getRange('B3').setValue(existingDate instanceof Date ? existingDate : new Date())
+  const defaultDate = new Date();
+  defaultDate.setHours(0, 0, 0, 0);
+  sheet.getRange('B3').setValue(existingDate instanceof Date ? existingDate : defaultDate)
     .setNumberFormat('dd mmm yyyy');
   sheet.getRange('B4').setValue(existingSource || 'Channel');
   sheet.getRange('B5').setValue(existingFilter || 'All');
