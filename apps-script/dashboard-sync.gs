@@ -343,8 +343,9 @@ function fetchDailyUsageReport_(sheet) {
   const tz = Session.getScriptTimeZone();
   const nextDate = new Date(selectedDate);
   nextDate.setDate(nextDate.getDate() + 1);
-  const start = Utilities.formatDate(selectedDate, tz, "yyyy-MM-dd'T'00:00:00Z");
-  const end = Utilities.formatDate(nextDate, tz, "yyyy-MM-dd'T'00:00:00Z");
+  const offset = Utilities.formatDate(selectedDate, tz, 'Z');
+  const start = Utilities.formatDate(selectedDate, tz, 'yyyy-MM-dd') + 'T00:00:00' + offset;
+  const end = Utilities.formatDate(nextDate, tz, 'yyyy-MM-dd') + 'T00:00:00' + offset;
   const source = sheet.getRange('B4').getValue() === 'Dashboard' ? 'Dashboard' : 'Channel';
   const filterLabel = sheet.getRange('B5').getValue() || 'All';
   const filter = filterLabel === 'Mismatched only' ? 'mismatch' :
@@ -414,6 +415,7 @@ function writeDailyUsageReport_(sheet, report) {
   );
 
   const bookingStart = 50;
+  if (sheet.getFilter()) sheet.getFilter().remove();
   const bookingHeaders = ['Booking ID', 'Stage', 'Agent', 'At', 'Vendor', 'Product', 'Page type', 'Mismatched fields', 'Slack link'];
   sheet.getRange(bookingStart, 1, 1, bookingHeaders.length).setValues([bookingHeaders])
     .setFontWeight('bold').setBackground('#1f4e78').setFontColor('#ffffff');
