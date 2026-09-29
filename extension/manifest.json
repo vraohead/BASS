@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Booking Assistant",
   "version": "10.0.10",
-  "description": "BMS/Box Office frontend — reads booking data directly from Box Office APIs using your existing session.",
+  "description": "AI-powered booking verification for Headout Reservation Operations. Verifies booking details before confirmation to prevent errors.",
   "permissions": ["sidePanel", "storage", "tabs", "activeTab", "scripting"],
   "host_permissions": [
     "https://box-office.headout.com/*",
@@ -17,5 +17,8 @@
   },
   "action": {
     "default_title": "Open Booking Assistant"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; style-src 'self' 'unsafe-inline'"
   }
 }
