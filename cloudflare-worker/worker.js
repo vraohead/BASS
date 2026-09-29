@@ -11,8 +11,18 @@
 //
 // Deploy (wrangler CLI, if available):
 //   wrangler deploy
-//   wrangler secret put OPENAI_API_KEY   <- paste key when prompted
-//   wrangler secret put SLACK_BOT_TOKEN  <- paste Slack bot token when prompted
+//   wrangler secret put OPENAI_API_KEY          <- paste key when prompted
+//   wrangler secret put SLACK_BOT_TOKEN         <- paste Slack bot token when prompted
+//   wrangler secret put ADMIN_PASSWORD          <- gates /admin/*
+//   wrangler secret put EXTENSION_SHARED_SECRET <- REQUIRED; gates /verify,
+//     /confirm-flag, /record-fetch, /verify-code against random internet
+//     abuse (the Worker URL is public — it ships inside the extension).
+//     Generate with `openssl rand -hex 32` and set the SAME value as
+//     EXTENSION_SHARED_SECRET in extension/background/service-worker.js.
+//     Without it, those four routes return 401 to every caller, including
+//     the real extension.
+//   Also set ALLOWED_EXTENSION_ORIGIN in wrangler.toml [vars] once the
+//   extension has a Chrome Web Store ID (see that file for details).
 //
 // Endpoints:
 //   GET  /               -> the admin control page (see "Admin page" below)
@@ -257,14 +267,110 @@ function getAdminPassword(env) {
   return env.ADMIN_PASSWORD;
 }
 
+// ── Extension-only endpoint protection ───────────────────────────────────────
+// /verify, /confirm-flag, and /record-fetch have no per-agent login (the
+// extension has none — it rides the agent's Box Office cookie for BMS calls
+// only, not for these). Without SOME gate, the Worker URL being public
+// (it ships inside popup.js as DEFAULT_WORKER_URL) plus CORS '*' meant
+// literally anyone on the internet could hit /verify and spend this
+// project's OpenAI budget, or spam fake events into the KV log/Slack/Sheet
+// via /confirm-flag and /record-fetch. Two independent layers close this:
+//
+// 1. EXTENSION_SHARED_SECRET (this function) — a value baked into the
+//    extension's service-worker.js and sent as the X-Extension-Secret
+//    header on every call to these three routes, checked against a
+//    Cloudflare secret of the same value. This does NOT stop a determined
+//    attacker who unpacks the extension (it's client-side, so it's
+//    extractable) — it stops casual/automated internet-wide abuse (random
+//    bots, scanners, anyone who stumbles on the URL) from a script that
+//    never looked at the extension's code.
+// 2. restrictedCors() below — once ALLOWED_EXTENSION_ORIGIN is set, this
+//    additionally blocks the browser-based vector (a malicious webpage's
+//    background JS calling this Worker from an ordinary visitor's browser).
+//
+// Neither layer is a substitute for the other; both are soft barriers
+// against different attacker shapes, on top of rate limiting (see below).
+function checkExtensionSecret(request, env) {
+  if (!env.EXTENSION_SHARED_SECRET) {
+    throw new Error(
+      'EXTENSION_SHARED_SECRET not configured. Set it in Cloudflare Dashboard:\n' +
+      '  Settings > Variables > Secrets > Add Variable\n' +
+      '  Name: EXTENSION_SHARED_SECRET\n' +
+      '  Value: (a long random string — e.g. `openssl rand -hex 32`)\n' +
+      'Or via CLI: wrangler secret put EXTENSION_SHARED_SECRET\n' +
+      'The SAME value must also be set as EXTENSION_SHARED_SECRET in extension/background/service-worker.js.'
+    );
+  }
+  return request.headers.get('X-Extension-Secret') === env.EXTENSION_SHARED_SECRET;
+}
+
+// CORS scoped to the extension's own origin once ALLOWED_EXTENSION_ORIGIN is
+// set (wrangler.toml [vars], e.g. "chrome-extension://<published-id>") —
+// until then, falls back to '*' (today's behavior) so this doesn't break
+// anything before the Web Store ID exists. Set it as soon as the extension
+// is published; see CHROME_STORE_COMPLIANCE.md.
+function restrictedCorsOrigin(request, env) {
+  const allowed = env.ALLOWED_EXTENSION_ORIGIN;
+  if (!allowed) return '*';
+  const origin = request.headers.get('Origin');
+  return origin === allowed ? origin : allowed;
+}
+
+// ── Rate limiting (KV-based, best-effort) ────────────────────────────────────
+// Cloudflare KV isn't strongly consistent, so under heavy concurrent abuse a
+// few extra requests can slip through a window boundary — this is a
+// deterrent against scripted/automated abuse, not a hard guarantee. It needs
+// no Durable Objects or paid add-ons, just the existing CONFIG KV binding.
+// Fails OPEN (allows the request) if CONFIG is unavailable or the caller's IP
+// is unknown, so a KV outage degrades to "no rate limiting" rather than
+// "Worker down" — availability over strictness for a low-value internal tool.
+async function checkRateLimit(env, bucket, request, limit, windowSeconds) {
+  const ip = request.headers.get('CF-Connecting-IP');
+  if (!env.CONFIG || !ip) return true;
+  const key = `ratelimit:${bucket}:${ip}`;
+  const current = await env.CONFIG.get(key);
+  const count = current ? parseInt(current, 10) : 0;
+  if (count >= limit) return false;
+  await env.CONFIG.put(key, String(count + 1), { expirationTtl: windowSeconds });
+  return true;
+}
+
+function tooManyRequests(corsOrigin) {
+  return new Response(JSON.stringify({ error: 'Too many requests — please wait a few minutes and try again.' }), {
+    status: 429,
+    headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': corsOrigin },
+  });
+}
+
+function unauthorized(corsOrigin, message) {
+  return new Response(JSON.stringify({ error: message || 'Unauthorized' }), {
+    status: 401,
+    headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': corsOrigin },
+  });
+}
+
+// Returns a cors()-shaped function pre-bound to a specific origin — used to
+// locally shadow the global cors() inside the extension-only handlers below,
+// so every existing `return cors(body, status)` call site inside them
+// automatically carries the restricted origin without editing each one.
+function scopedCors(origin) {
+  return (body, status) => cors(body, status, origin);
+}
+
+const EXTENSION_ONLY_PATHS = new Set(['/verify', '/confirm-flag', '/record-fetch', '/verify-code']);
+
 export default {
   async fetch(request, env, ctx) {
-    // CORS pre-flight — every route needs this handled first.
-    if (request.method === 'OPTIONS') {
-      return cors('', 204);
-    }
-
     const url = new URL(request.url);
+
+    // CORS pre-flight — every route needs this handled first. Must echo back
+    // the same origin the real request/response will use, or the browser
+    // blocks the actual call even when the handler's own response would have
+    // been fine — so this mirrors the extension-only vs. '*' split below.
+    if (request.method === 'OPTIONS') {
+      const origin = EXTENSION_ONLY_PATHS.has(url.pathname) ? restrictedCorsOrigin(request, env) : '*';
+      return cors('', 204, origin);
+    }
 
     if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '/admin')) {
       return htmlResponse(ADMIN_PAGE_HTML);
@@ -283,6 +389,8 @@ export default {
         hasSlackToken: !!env.SLACK_BOT_TOKEN,
         hasOpenAiKey: !!env.OPENAI_API_KEY,
         hasAdminPassword: !!env.ADMIN_PASSWORD,
+        hasExtensionSharedSecret: !!env.EXTENSION_SHARED_SECRET,
+        allowedExtensionOrigin: env.ALLOWED_EXTENSION_ORIGIN || null,
         hasConfigKv: !!env.CONFIG,
         slackChannelId: SLACK_CHANNEL_ID,
         dailyCodeChannelId: DAILY_CODE_CHANNEL_ID,
@@ -452,6 +560,8 @@ async function handleAdminGetConfig(request, env, url) {
     hasSlackToken: !!env.SLACK_BOT_TOKEN,
     hasOpenAiKey: !!env.OPENAI_API_KEY,
     hasSheetsSyncSecret: !!env.SHEETS_SYNC_SECRET,
+    hasExtensionSharedSecret: !!env.EXTENSION_SHARED_SECRET,
+    allowedExtensionOrigin: env.ALLOWED_EXTENSION_ORIGIN || null,
     dailyCodeChannelId: DAILY_CODE_CHANNEL_ID,
   }), 200);
 }
@@ -461,6 +571,18 @@ async function handleAdminGetConfig(request, env, url) {
 // instructions code never grants more than that one booking's unlock, and
 // is deleted immediately so it can never be redeemed twice.
 async function handleVerifyCode(request, env) {
+  const cors = scopedCors(restrictedCorsOrigin(request, env));
+
+  if (!checkExtensionSecret(request, env)) {
+    return unauthorized(restrictedCorsOrigin(request, env), 'Missing or invalid extension credentials');
+  }
+  // Stricter than the other routes — this endpoint is guessing a 6-digit
+  // code, so keep the attempt budget low enough that brute-forcing all
+  // 1,000,000 combinations isn't feasible within any rolling window.
+  if (!(await checkRateLimit(env, 'verify-code', request, 8, 600))) {
+    return tooManyRequests(restrictedCorsOrigin(request, env));
+  }
+
   let body;
   try {
     body = await request.json();
@@ -652,6 +774,18 @@ function fillMissingChecks(checks, expectedFields) {
 // ── /verify — AI screenshot verification ──────────────────────────────────────
 
 async function handleVerify(request, env, ctx) {
+  const cors = scopedCors(restrictedCorsOrigin(request, env));
+
+  if (!checkExtensionSecret(request, env)) {
+    return unauthorized(restrictedCorsOrigin(request, env), 'Missing or invalid extension credentials');
+  }
+  // This is the endpoint that spends the OPENAI_API_KEY budget on every call
+  // — the tightest limit of the three extension routes, since it's the one
+  // with a direct dollar cost per abused request.
+  if (!(await checkRateLimit(env, 'verify', request, 20, 300))) {
+    return tooManyRequests(restrictedCorsOrigin(request, env));
+  }
+
   const steps = [];
   const logStep = (step, ok, detail) => steps.push({ step, ok, detail, at: new Date().toISOString() });
 
@@ -669,6 +803,14 @@ async function handleVerify(request, env, ctx) {
   if (!imageBase64) {
     logStep('validate_input', false, 'imageBase64 missing');
     return cors(JSON.stringify({ error: 'imageBase64 is required', steps }), 400);
+  }
+  // A real checkout screenshot is a few hundred KB as base64; 15MB gives
+  // generous headroom while still capping how much an abusive caller can
+  // force through OpenAI (and through this Worker's own CPU/memory) per call.
+  const MAX_IMAGE_BASE64_CHARS = 15 * 1024 * 1024;
+  if (imageBase64.length > MAX_IMAGE_BASE64_CHARS) {
+    logStep('validate_input', false, `imageBase64 too large (${imageBase64.length} chars)`);
+    return cors(JSON.stringify({ error: 'Screenshot too large', steps }), 413);
   }
   logStep('validate_input', true, null);
 
@@ -948,6 +1090,15 @@ async function postPreOverrideFlag(env, { bookingId, agentEmail, vendor, product
 // OpenAI call, no Slack post (a message per fetch would flood the channel) —
 // just a KV entry for the reports below.
 async function handleRecordFetch(request, env) {
+  const cors = scopedCors(restrictedCorsOrigin(request, env));
+
+  if (!checkExtensionSecret(request, env)) {
+    return unauthorized(restrictedCorsOrigin(request, env), 'Missing or invalid extension credentials');
+  }
+  if (!(await checkRateLimit(env, 'record-fetch', request, 30, 300))) {
+    return tooManyRequests(restrictedCorsOrigin(request, env));
+  }
+
   let body;
   try {
     body = await request.json();
@@ -1775,6 +1926,15 @@ async function handleAdminChannelReport(request, env, url) {
 // ── /confirm-flag — post to Slack (message + screenshot, unified) ─────────────
 
 async function handleConfirmFlag(request, env, ctx) {
+  const cors = scopedCors(restrictedCorsOrigin(request, env));
+
+  if (!checkExtensionSecret(request, env)) {
+    return unauthorized(restrictedCorsOrigin(request, env), 'Missing or invalid extension credentials');
+  }
+  if (!(await checkRateLimit(env, 'confirm-flag', request, 20, 300))) {
+    return tooManyRequests(restrictedCorsOrigin(request, env));
+  }
+
   const steps = [];
   const logStep = (step, ok, detail) => steps.push({ step, ok, detail, at: new Date().toISOString() });
 
@@ -1985,14 +2145,17 @@ async function handleConfirmFlag(request, env, ctx) {
   return cors(JSON.stringify({ ok: true, screenshotError, steps, version: WORKER_VERSION }), 200);
 }
 
-function cors(body, status) {
+// origin defaults to '*' (admin/dashboard routes — real auth is the admin
+// password, so a wildcard origin here doesn't weaken anything). The three
+// extension-only routes pass restrictedCorsOrigin(request, env) instead.
+function cors(body, status, origin = '*') {
   return new Response(body, {
     status,
     headers: {
       'Content-Type': 'application/json',
-      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Origin': origin,
       'Access-Control-Allow-Methods': 'POST, OPTIONS, GET',
-      'Access-Control-Allow-Headers': 'Content-Type',
+      'Access-Control-Allow-Headers': 'Content-Type, X-Extension-Secret',
     },
   });
 }

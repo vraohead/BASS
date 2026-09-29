@@ -32,5 +32,25 @@ id = "81fab074760c4400b8ce1a1b45ad0745"
 # Non-secret config. SHEETS_SYNC_URL is the Apps Script /exec endpoint — not
 # sensitive on its own (writes are gated by SHEETS_SYNC_SECRET), but keeping it
 # here makes it easy to change without touching worker.js.
+#
+# ALLOWED_EXTENSION_ORIGIN locks CORS on /verify, /confirm-flag, /record-fetch,
+# and /verify-code to the extension's own origin instead of '*'. Set it to
+# "chrome-extension://<published-extension-id>" once the Chrome Web Store
+# listing exists (Developer Dashboard -> Items -> the extension's ID in the
+# URL/detail page). Left unset, those routes fall back to '*' (today's
+# behavior) so nothing breaks before the ID exists — but the real gate on
+# those routes is EXTENSION_SHARED_SECRET below, which is required either way.
 [vars]
 SHEETS_SYNC_URL = "https://script.google.com/macros/s/AKfycbybEfWQtPTQhOkJ2q-tWL_VDYdPOIo5-CYP3VRVbQ8Hz7QzRW-4uB9-9Qr_BNaXrRea0A/exec"
+# ALLOWED_EXTENSION_ORIGIN = "chrome-extension://REPLACE_WITH_PUBLISHED_EXTENSION_ID"
+
+# Secrets (set via `wrangler secret put <NAME>` or Dashboard -> Settings ->
+# Variables and Secrets — never declared here, since this file is committed):
+#   ADMIN_PASSWORD          - gates all /admin/* endpoints
+#   OPENAI_API_KEY          - AI Verify's vision calls
+#   SLACK_BOT_TOKEN         - posting to the Confirm & Flag channel
+#   SHEETS_SYNC_SECRET      - must match SHARED_SECRET in apps-script/dashboard-sync.gs
+#   EXTENSION_SHARED_SECRET - must match EXTENSION_SHARED_SECRET in
+#                             extension/background/service-worker.js; gates
+#                             /verify, /confirm-flag, /record-fetch, /verify-code
+#                             (generate with: openssl rand -hex 32)

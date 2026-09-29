@@ -9,6 +9,18 @@ This document covers all compliance requirements and justifications for publishi
 ✅ **CSP**: Properly defined in manifest (`'self'` only, `'unsafe-inline'` restricted to styles)
 ✅ **No Remote Code Execution**: No `eval()`, `Function()`, or dynamic script injection
 
+## Backend Endpoint Protection (post-publish setup)
+
+The Worker URL ships inside this extension (`DEFAULT_WORKER_URL` in `popup/popup.js`) and is therefore public. `/verify`, `/confirm-flag`, `/record-fetch`, and `/verify-code` are gated by two independent layers so the public URL alone isn't enough to abuse them:
+
+1. **`EXTENSION_SHARED_SECRET`** — a value the extension sends as `X-Extension-Secret` on every call to those four routes, checked against a matching Cloudflare secret. **Required before deploying** — without it, those routes return 401 even to the real extension.
+   - Generate: `openssl rand -hex 32`
+   - Set in Cloudflare: `wrangler secret put EXTENSION_SHARED_SECRET`
+   - Set the same value in `extension/background/service-worker.js` (`EXTENSION_SHARED_SECRET` constant)
+2. **`ALLOWED_EXTENSION_ORIGIN`** — once this extension has a Chrome Web Store item ID, set this Cloudflare var (`wrangler.toml [vars]`) to `chrome-extension://<the-id>` to restrict CORS on those same four routes to the extension's own origin, closing the "malicious webpage's background JS" vector. Find the ID on the item's page in the Developer Dashboard.
+
+Both routes also carry per-IP rate limiting (KV-based) — generous enough for normal agent usage, tight enough to blunt scripted abuse (`/verify` is the strictest since it spends the OpenAI budget directly).
+
 ## Permission Justifications
 
 ### Required Permissions

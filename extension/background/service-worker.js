@@ -4,6 +4,17 @@ chrome.runtime.onInstalled.addListener(() => {
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
 });
 
+// Sent as X-Extension-Secret on every call to the Worker's /verify,
+// /confirm-flag, /record-fetch, and /verify-code — must match the
+// EXTENSION_SHARED_SECRET Cloudflare secret exactly (generate a shared value
+// with `openssl rand -hex 32` and set it in both places). This is a soft
+// barrier, not a real secret: anyone who unpacks this extension can read it
+// here. Its purpose is to stop casual/automated internet-wide abuse of the
+// Worker's public URL (scripts that never looked at this code), not a
+// targeted attacker — the Worker's CORS restriction (ALLOWED_EXTENSION_ORIGIN)
+// and rate limiting are the other two independent layers on those routes.
+const EXTENSION_SHARED_SECRET = 'REPLACE_WITH_THE_SAME_VALUE_AS_CLOUDFLARE_EXTENSION_SHARED_SECRET';
+
 // Direct fetch from the service worker — Chrome extensions bypass CORS for
 // host_permissions URLs and share the browser's cookie jar, so BMS session
 // cookies are attached automatically via credentials:'include'. No tab needed.
@@ -105,7 +116,7 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
       try {
         const res = await fetch(`${workerUrl.replace(/\/$/, '')}/verify-code`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', 'X-Extension-Secret': EXTENSION_SHARED_SECRET },
           body: JSON.stringify({ code }),
         });
         const data = await res.json().catch(() => ({}));
@@ -125,7 +136,7 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
       try {
         const res = await fetch(`${workerUrl.replace(/\/$/, '')}/verify`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', 'X-Extension-Secret': EXTENSION_SHARED_SECRET },
           body: JSON.stringify({ imageBase64, mimeType, facts, bookingId, agentEmail, vendor }),
         });
         const data = await res.json();
@@ -208,7 +219,7 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
         const res = await fetch(`${workerUrl.replace(/\/$/, '')}/confirm-flag`, {
           method: 'POST',
           signal: controller.signal,
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', 'X-Extension-Secret': EXTENSION_SHARED_SECRET },
           body: JSON.stringify({ bookingId, agentEmail, confirmed, skipped, overridden, retroactive, imageBase64, mimeType, verifiedAt, vendor, product, vendorId, tourId, pageType }),
         });
         const data = await res.json().catch(() => ({}));
@@ -232,7 +243,7 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
       try {
         await fetch(`${workerUrl.replace(/\/$/, '')}/record-fetch`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', 'X-Extension-Secret': EXTENSION_SHARED_SECRET },
           body: JSON.stringify({ bookingId, agentEmail }),
         });
       } catch (_) {
