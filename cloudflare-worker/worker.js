@@ -229,13 +229,11 @@ function slackPermalink(ts) {
   return ts ? `https://${SLACK_WORKSPACE}.slack.com/archives/${SLACK_CHANNEL_ID}/p${String(ts).replace('.', '')}` : null;
 }
 
-// Google Apps Script Web App URL for apps-script/dashboard-sync.gs — not
-// sensitive on its own (the script's own SHARED_SECRET check is what actually
-// gates writes), so it's hardcoded here the same way SLACK_CHANNEL_ID is.
-// The matching secret, however, IS sensitive and lives only in the
-// SHEETS_SYNC_SECRET Worker secret (wrangler secret put SHEETS_SYNC_SECRET) —
-// it must be set to the exact same string as SHARED_SECRET in the .gs file.
-const SHEETS_SYNC_URL = 'https://script.google.com/macros/s/AKfycbybEfWQtPTQhOkJ2q-tWL_VDYdPOIo5-CYP3VRVbQ8Hz7QzRW-4uB9-9Qr_BNaXrRea0A/exec';
+// Google Apps Script Web App URL — read from the SHEETS_SYNC_URL wrangler var
+// (set in wrangler.toml [vars]) so the URL can be changed without touching this
+// file. The matching SHEETS_SYNC_SECRET (what actually gates writes) is a
+// Cloudflare secret: wrangler secret put SHEETS_SYNC_SECRET.
+function getSheetsUrl(env) { return env.SHEETS_SYNC_URL; }
 
 // IMPORTANT: ADMIN_PASSWORD must be set as a Cloudflare Worker secret.
 // To set it: wrangler secret put ADMIN_PASSWORD (then paste a strong password)
@@ -1477,7 +1475,7 @@ async function syncDashboardToSheet(env) {
   };
 
   try {
-    const res = await fetch(SHEETS_SYNC_URL, {
+    const res = await fetch(getSheetsUrl(env), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
