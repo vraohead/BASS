@@ -237,13 +237,27 @@ function slackPermalink(ts) {
 // it must be set to the exact same string as SHARED_SECRET in the .gs file.
 const SHEETS_SYNC_URL = 'https://script.google.com/macros/s/AKfycbybEfWQtPTQhOkJ2q-tWL_VDYdPOIo5-CYP3VRVbQ8Hz7QzRW-4uB9-9Qr_BNaXrRea0A/exec';
 
-// Cloudflare Workers Builds (Git auto-deploy) has repeatedly wiped the
-// Dashboard-set ADMIN_PASSWORD secret on CI-triggered deploys, locking the
-// admin page out. This fallback keeps admin access working even if that
-// happens again — set ADMIN_PASSWORD in the Dashboard to override it, and
-// rotate this value periodically since it's stored in source.
-const FALLBACK_ADMIN_PASSWORD = 'Vivek124';
-function getAdminPassword(env) { return env.ADMIN_PASSWORD || FALLBACK_ADMIN_PASSWORD; }
+// IMPORTANT: ADMIN_PASSWORD must be set as a Cloudflare Worker secret.
+// To set it: wrangler secret put ADMIN_PASSWORD (then paste a strong password)
+// Or via Cloudflare Dashboard: Settings > Variables > Secrets > Add Variable
+//
+// NOTE: Previously a hardcoded fallback was used as a workaround for
+// Cloudflare Workers Builds wiping secrets during auto-deploy. This is now
+// removed for security/compliance. If secrets keep getting wiped:
+//   1. Disable git auto-deploy (use manual deployments instead), OR
+//   2. Configure wrangler.toml to preserve secrets during CI deployments
+function getAdminPassword(env) {
+  if (!env.ADMIN_PASSWORD) {
+    throw new Error(
+      'ADMIN_PASSWORD not configured. Set it in Cloudflare Dashboard:\n' +
+      '  Settings > Variables > Secrets > Add Variable\n' +
+      '  Name: ADMIN_PASSWORD\n' +
+      '  Value: (use a strong password)\n' +
+      'Or via CLI: wrangler secret put ADMIN_PASSWORD'
+    );
+  }
+  return env.ADMIN_PASSWORD;
+}
 
 export default {
   async fetch(request, env, ctx) {
@@ -270,7 +284,7 @@ export default {
         version: WORKER_VERSION,
         hasSlackToken: !!env.SLACK_BOT_TOKEN,
         hasOpenAiKey: !!env.OPENAI_API_KEY,
-        hasAdminPassword: true, // always true — falls back to a hardcoded value if the secret is unset
+        hasAdminPassword: !!env.ADMIN_PASSWORD,
         hasConfigKv: !!env.CONFIG,
         slackChannelId: SLACK_CHANNEL_ID,
         dailyCodeChannelId: DAILY_CODE_CHANNEL_ID,
