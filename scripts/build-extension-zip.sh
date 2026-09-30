@@ -19,5 +19,5 @@ OUT="${1:-booking-assistant-$VERSION.zip}"
 case "$OUT" in /*) ;; *) OUT="$START_DIR/$OUT" ;; esac
 rm -f "$OUT"
 ( cd extension && zip -r -X "$OUT" . \
-    -x "CHROME_STORE_COMPLIANCE.md" "docs/*" "content/*" "*.DS_Store" )
+    -x "CHROME_STORE_COMPLIANCE.md" "docs/*" "content/*" "icons/icon.svg" "*.DS_Store" )
 echo "Built $OUT ($(du -h "$OUT" | cut -f1)) — upload this in the Chrome Web Store dashboard."
