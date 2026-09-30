@@ -140,7 +140,7 @@ function writeSummary(ss, d) {
     [],
     ['Full match checks', d.fullMatchChecks || 0],
     ['Partial match checks', d.partialMatchChecks || 0],
-    ['Checks with field data', d.checksWithData || 0],
+    ['AI Verify calls (total OpenAI vision calls, incl. re-runs)', d.checksWithData || 0],
   ];
   sheet.getRange(1, 1, rows.length, 2).setValues(rows);
   sheet.getRange(1, 1, rows.length, 1).setFontWeight('bold');

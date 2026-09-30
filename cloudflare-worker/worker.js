@@ -2483,6 +2483,11 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
         <span class="kpi-value" id="kpi-top-vendor" style="font-size:22px;">—</span>
         <span class="kpi-sub" id="kpi-top-vendor-sub">&nbsp;</span>
       </div>
+      <div class="card kpi-tile">
+        <span class="kpi-label">AI Verify Calls</span>
+        <span class="kpi-value tabular" id="kpi-ai-calls">—</span>
+        <span class="kpi-sub" id="kpi-ai-calls-sub">Total OpenAI vision calls — each one costs money</span>
+      </div>
     </div>
 
     <div class="four-col">
@@ -2979,6 +2984,17 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
 
     document.getElementById('kpi-bookings').textContent = d.uniqueBookingCount;
     document.getElementById('kpi-bookings-sub').textContent = d.checksWithData + ' with field-level checks';
+
+    // checksWithData is every successful /verify call (each one an OpenAI
+    // vision API charge) — NOT deduplicated by booking, unlike
+    // uniqueBookingCount above. The gap between the two tiles is re-runs on
+    // the same booking (re-captured screenshot, retried check, etc.) — each
+    // one a separate bill, so it's worth seeing as its own number.
+    document.getElementById('kpi-ai-calls').textContent = d.checksWithData;
+    var reruns = Math.max(0, d.checksWithData - d.uniqueBookingCount);
+    document.getElementById('kpi-ai-calls-sub').textContent = reruns > 0
+      ? reruns + ' re-run(s) beyond one call per unique booking'
+      : 'Total OpenAI vision calls — each one costs money';
 
     var totalTagged = d.checkoutBookingCount + d.ticketBookingCount + d.otherPageBookingCount;
     document.getElementById('kpi-checkout-rate').textContent = pct(d.checkoutBookingCount, totalTagged);

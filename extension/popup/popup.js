@@ -911,8 +911,43 @@ function wireSkipBoxes(container, confirmRow) {
   return { totalMismatches };
 }
 
-function _setVerifyImage(sec, dataUrl) {
-  sec.querySelector('.verify-img').src = dataUrl;
+// AI Verify sends this at detail:'high', which tiles the image into 512x512
+// chunks and charges per tile — cost scales with pixel dimensions, not file
+// size. A full-resolution screenshot (especially on a Retina/high-DPI
+// display, where captureVisibleTab grabs at the device's actual pixel
+// density) tiles into far more chunks than the checkout page's actual text
+// needs to stay readable. Capping the width keeps 'high' detail's accuracy
+// (unlike dropping to detail:'low', which processes at a fixed low
+// resolution regardless of what's sent) while cutting tile count — this is
+// the "shrink before sending" lever, since the API itself has no
+// in-between detail level. Never upscales a smaller image, only shrinks.
+const VERIFY_IMAGE_MAX_WIDTH = 1280;
+async function resizeImageDataUrl(dataUrl, maxWidth = VERIFY_IMAGE_MAX_WIDTH) {
+  try {
+    const img = new Image();
+    const loaded = new Promise((resolve, reject) => {
+      img.onload = resolve;
+      img.onerror = () => reject(new Error('Image failed to load for resizing'));
+    });
+    img.src = dataUrl;
+    await loaded;
+
+    if (img.width <= maxWidth) return dataUrl; // already small enough — don't upscale
+
+    const scale = maxWidth / img.width;
+    const canvas = document.createElement('canvas');
+    canvas.width = maxWidth;
+    canvas.height = Math.round(img.height * scale);
+    canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL('image/png');
+  } catch (_) {
+    return dataUrl; // resizing is a cost optimization, not a correctness requirement — never block verification over it
+  }
+}
+
+async function _setVerifyImage(sec, dataUrl) {
+  const resized = await resizeImageDataUrl(dataUrl);
+  sec.querySelector('.verify-img').src = resized;
   sec.querySelector('.verify-img-wrap').hidden = false;
   sec.querySelector('.verify-ai-row').hidden = false;
   sec.querySelector('.verify-ai-results').hidden = true;
