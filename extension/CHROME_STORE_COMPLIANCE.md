@@ -73,7 +73,9 @@ Both routes also carry per-IP rate limiting (KV-based) — generous enough for n
    - Sent to: OpenAI API (gpt-4o-mini) with structured-outputs request
    - Processed by: Vision model (reads text from image, compares against expected booking values)
    - Retention: Not stored after analysis; OpenAI's own retention policy applies
-   - Not shared with Slack or Sheets
+   - Also captured at the same moment: the visible text of the vendor page (all frames) and the current values of its form fields (password, hidden and card-style fields are never read; capped at 30,000 characters). This text is also sent to OpenAI (text only) for a second verification pass used to compare against the screenshot result. The Confirm & Flag screenshot is additionally attached to the internal Slack alert.
+   - Disclose in the Web Store "Privacy practices" tab and the privacy policy: website content (screenshots and page text) is transmitted to a third-party AI service (OpenAI) solely to verify booking details.
+   - Page text is not shared with Slack or Sheets
 
 4. **Verification Results** (Extension-generated)
    - Match/mismatch/not-found status for each booking field
