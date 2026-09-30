@@ -792,6 +792,31 @@ function normalizeChecks(checks, expectedFields) {
   return { checks: [...kept.values()], notApplicable: [...notApplicable] };
 }
 
+// Product names never match word-for-word between the vendor's portal and our
+// record, so a model "mismatch" on Product is overridden when the two names
+// share enough of their distinctive words (accents/case ignored; generic words
+// like "tour"/"ticket" don't count). Only ever turns mismatch -> match.
+const PRODUCT_STOPWORDS = new Set(['the','and','with','without','tour','tours','ticket','tickets','entry','entrance','admission','guided','private','shared','small','group','pass','from','for','of','to','in','at','an','skip','line','combo','experience','visit','package','hotel','pickup','transfer','day','full','half','de','da','do','das','dos','la','le','les','el','los','las','y','e','et','und','der','die','das','del','di','du','des','um','uma','com','para','sem']);
+function productTokens(str) {
+  return new Set(
+    String(str || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
+      .split(/[^a-z0-9]+/).filter(t => t.length >= 3 && !PRODUCT_STOPWORDS.has(t))
+  );
+}
+function downgradeLooseProductMismatches(checks) {
+  for (const c of checks || []) {
+    if (c.status !== 'mismatch' || !/product/i.test(c.label || '')) continue;
+    const exp = productTokens(c.expected), seen = productTokens(c.seenValue);
+    if (!exp.size || !seen.size) continue;
+    let shared = 0;
+    for (const t of exp) if (seen.has(t)) shared++;
+    if (shared && Math.max(shared / exp.size, shared / seen.size) >= 0.6) {
+      c.status = 'match';
+      c.seenValue = '';
+    }
+  }
+}
+
 // The prompt asks for one check per field, but nothing in the schema forces
 // it — any field the model dropped gets a not_found placeholder, except
 // ones it explicitly called not_applicable.
@@ -901,7 +926,7 @@ Per-field tolerance rules (apply before deciding match vs. mismatch):
 2. Time: same principle — "3:00 PM", "15:00", and "3 PM" are the same time of day. Allow for a different timezone label as long as the underlying time is consistent with the booking; only mark mismatch if the actual time of day is genuinely different. Read the time carefully, digit by digit — do not round or guess; if there are multiple times visible on the page (e.g. a countdown timer, a "session expires at" notice, a current-time clock), use only the one labeled as the booking's own date/time slot.
 3. Total pax (guests): look for the TOTAL guest/pax/ticket count shown in the screenshot. If the screenshot breaks pax down by type (e.g. "2 Adults, 1 Child"), you must show the breakdown and the sum explicitly in your reasoning (e.g. "2 Adults + 1 Child = 3") before deciding — do not mark mismatch just because no single number matches if the breakdown sums to the expected total. Do NOT read the pax count from anything other than an explicit guest/pax/traveler count field or selector — a room number, inventory/stock count, quantity-available number, order/booking ID, or any other unrelated number on the page is NEVER the pax count, even if it happens to be near the booking details.
 4. Net price: ignore currency symbol formatting differences, and be careful with decimal vs. thousands separators, which vary by locale: "325.00" and "325,00" both mean three hundred twenty-five (period OR comma can be the decimal separator depending on the site's locale); "1,234.56" and "1.234,56" both mean one thousand two hundred thirty-four point five six (the OTHER symbol is then the thousands separator). Convert both the expected and seen price to a plain number before comparing, and only mark mismatch if the actual numeric amounts genuinely differ.
-5. Product / experience name: look across the WHOLE screenshot before deciding it is missing — the name can appear as a page heading, a cart or order-summary line item, a breadcrumb, a booking/confirmation banner, or a ticket-type title. Compare the tour/experience/product name shown in the screenshot against the expected name. Minor wording differences (abbreviations, punctuation, added suffixes like "- with hotel pickup", capitalization) still count as a match if it is clearly the same experience. The vendor site may show the name in a different language than the booking record (e.g. Portuguese, Spanish, French) — translate it mentally and treat it as a match if it clearly refers to the same experience, even though the words don't look alike. A genuinely different tour or activity is a mismatch, not a not_found.
+5. Product / experience name — this is a LOOSE check, never word-for-word. The vendor's portal almost always words the product differently from our own record (different language, extra or missing words like "tour", "ticket", "guided", "skip-the-line", "with hotel pickup", ticket-type or time-slot suffixes, abbreviations, reordered words, a brand/venue name only, or a translation). Look across the WHOLE screenshot (page heading, cart or order-summary line item, breadcrumb, booking banner, ticket-type title). Mark "match" if what is shown is plausibly the same attraction, venue, destination or experience family as the expected name — even if the wording differs a lot, and even if it is a different ticket variant, duration or add-on of the same experience. Mark "mismatch" ONLY when it clearly refers to a different attraction, destination or activity (e.g. expected a museum entry but the page shows a boat cruise somewhere else). If you can't tell either way, prefer "match" over "mismatch"; use "not_found" only when no product or experience name is visible anywhere.
 6. If a value looks like an implausible artifact rather than a real value — a pax count absurd for the visible tour type, a price or date that looks like placeholder/loading content, or anything that looks like a rendering glitch rather than actual booking data — say so in your reasoning and prefer "not_found" over confidently reporting it as a mismatch.
 
 Separately — always answer this regardless of the fields above:
@@ -1056,6 +1081,7 @@ Rules:
   result.notApplicableFields = normalized.notApplicable;
   downgradeFalseTimeMismatches(result.checks);
   downgradeFalseDateMismatches(result.checks);
+  downgradeLooseProductMismatches(result.checks);
   result.checks = fillMissingChecks(result.checks, expectedFields, normalized.notApplicable);
 
   // Fire-and-forget: logs one permanent usage event for the reports below

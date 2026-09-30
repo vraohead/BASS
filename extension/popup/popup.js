@@ -784,6 +784,21 @@ document.addEventListener('paste', e => {
 // Cheap, free, local substring-based matching against a captured tab's raw
 // text — no AI call needed. Used both by the standalone "Capture Response"
 // pane and to cross-check the AI Verify result when both were captured.
+// Loose product check for the page-text cross-check: our product name rarely
+// appears verbatim on the vendor page, so count it found when most of its
+// distinctive words (accents/case ignored, generic words like "tour" skipped)
+// appear in the text.
+function _productLooselyInText(product, text) {
+  const norm = v => String(v || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  const stop = new Set(['the','and','with','without','tour','tours','ticket','tickets','entry','entrance','admission','guided','private','shared','small','group','pass','from','for','of','to','in','at','an','skip','line','combo','experience','visit','package','hotel','pickup','transfer','day','full','half','de','da','do','das','dos','la','le','les','el','los','las','y','e','et','und','der','die','del','di','du','des','um','uma','com','para','sem']);
+  const hay = norm(text);
+  if (hay.includes(norm(product))) return true;
+  const toks = norm(product).split(/[^a-z0-9]+/).filter(t => t.length >= 3 && !stop.has(t));
+  if (!toks.length) return false;
+  const hits = toks.filter(t => hay.includes(t)).length;
+  return hits / toks.length >= 0.6;
+}
+
 function computeTextChecks(text, { date, time, pax, price, product }) {
   // A plain substring search can only tell us present-or-absent — it has no
   // way to know what WRONG value is shown, so it only ever produces 'match'
@@ -793,7 +808,7 @@ function computeTextChecks(text, { date, time, pax, price, product }) {
     { label: 'Time',      expected: time,    status: time    ? (text.includes(time.substring(0,5)) ? 'match' : 'not_found') : null },
     { label: 'Pax',       expected: pax,     status: pax     ? (new RegExp(`\\b${pax}\\b`).test(text) ? 'match' : 'not_found') : null },
     { label: 'Net Price', expected: price,   status: price   ? (text.includes(price) ? 'match' : 'not_found') : null },
-    { label: 'Product',   expected: product, status: product ? (text.toLowerCase().includes(product.toLowerCase()) ? 'match' : 'not_found') : null },
+    { label: 'Product',   expected: product, status: product ? (_productLooselyInText(product, text) ? 'match' : 'not_found') : null },
   ].filter(c => c.expected && c.status !== null).map(c => ({ ...c, seenValue: '' }));
 }
 
