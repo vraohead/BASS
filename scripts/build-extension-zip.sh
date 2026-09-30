@@ -3,6 +3,7 @@
 # ZIP root, dev-only files excluded. Refuses to build while the shared-secret
 # placeholder is still in the service worker (every AI Verify call would 401).
 set -euo pipefail
+START_DIR="$PWD"
 cd "$(dirname "$0")/.."
 
 if grep -q "REPLACE_WITH_THE_SAME_VALUE" extension/background/service-worker.js; then
@@ -13,7 +14,10 @@ fi
 
 VERSION=$(python3 -c "import json;print(json.load(open('extension/manifest.json'))['version'])")
 OUT="${1:-booking-assistant-$VERSION.zip}"
+# Resolve to an absolute path (relative paths are relative to where you ran the
+# script) so the output can be anywhere, e.g. ~/Desktop/booking-assistant.zip.
+case "$OUT" in /*) ;; *) OUT="$START_DIR/$OUT" ;; esac
 rm -f "$OUT"
-( cd extension && zip -r -X "../$OUT" . \
+( cd extension && zip -r -X "$OUT" . \
     -x "CHROME_STORE_COMPLIANCE.md" "docs/*" "content/*" "*.DS_Store" )
 echo "Built $OUT ($(du -h "$OUT" | cut -f1)) — upload this in the Chrome Web Store dashboard."
