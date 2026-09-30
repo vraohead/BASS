@@ -378,9 +378,39 @@ async function finishRenderBooking(id, flat, vendors, guestData, showAutomationM
       <p class="automation-lockout-title">Action Required</p>
       <p class="automation-lockout-body">This booking has an automation failure. Complete the automation failure modal in BMS before processing this booking.</p>
       <button class="btn btn-primary automation-lockout-btn" data-url="${escHtml(bmsLink)}">Open Booking in BMS ↗</button>
+      <button class="btn btn-secondary automation-recheck-btn" type="button">&#8635; Recheck</button>
+      <p class="automation-recheck-msg" hidden></p>
     `;
     lockout.querySelector('.automation-lockout-btn').addEventListener('click', () => {
       chrome.tabs.create({ url: bmsLink });
+    });
+    // The lockout is otherwise only evaluated at Fetch time, so completing the
+    // modal in BMS wouldn't unlock this panel. Recheck re-fetches the booking
+    // and re-reads the automation-failure flag; if it's cleared, the normal
+    // tabs render in place (skipping the past/due-soon prompts, which the
+    // agent already got through to reach this screen).
+    const recheckBtn = lockout.querySelector('.automation-recheck-btn');
+    const recheckMsg = lockout.querySelector('.automation-recheck-msg');
+    recheckBtn.addEventListener('click', async () => {
+      recheckBtn.disabled = true;
+      recheckBtn.textContent = 'Checking…';
+      recheckMsg.hidden = true;
+      const result = await sendMessage({ action: 'FETCH_BOOKING', bookingId: id });
+      if (!result?.ok) {
+        recheckMsg.textContent = `Couldn't recheck: ${result?.error || 'unexpected error'}. Try again.`;
+        recheckMsg.hidden = false;
+      } else if (result.showAutomationModal) {
+        recheckMsg.textContent = 'BMS still shows the automation failure modal for this booking. Complete it there, then recheck.';
+        recheckMsg.hidden = false;
+      } else {
+        const data = result.data;
+        const freshFlat = data.booking || data.fulfillmentDetails || data;
+        const freshVendors = data.vendorsInfo || freshFlat.vendorsInfo || [];
+        await finishRenderBooking(id, freshFlat, freshVendors, result.guestData, false, result.vendorTourData);
+        return;
+      }
+      recheckBtn.disabled = false;
+      recheckBtn.innerHTML = '&#8635; Recheck';
     });
     details.appendChild(lockout);
     return;
