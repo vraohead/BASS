@@ -762,6 +762,18 @@ function downgradeFalseDateMismatches(checks) {
 // agent's results (looking like it was never checked at all), this fills
 // in a "not_found" placeholder for any expected field the model's response
 // didn't cover — same treatment as a field it saw but couldn't read.
+// The model's response no longer includes `expected` (VERIFY_SCHEMA dropped
+// it — the Worker already knows it, so having the model re-type it back was
+// wasted output-token budget). This mutates each check in place, matching by
+// label, so downgradeFalseTimeMismatches/downgradeFalseDateMismatches and
+// everything downstream that reads c.expected keeps working unchanged.
+function mergeExpectedIntoChecks(checks, expectedFields) {
+  for (const c of checks || []) {
+    const f = expectedFields.find(f => f.label.toLowerCase() === (c.label || '').trim().toLowerCase());
+    c.expected = f ? f.value : '';
+  }
+}
+
 function fillMissingChecks(checks, expectedFields) {
   const list = checks || [];
   for (const f of expectedFields) {
@@ -856,23 +868,27 @@ How to judge each field — for every field, decide between three states:
 
 Per-field tolerance rules (apply before deciding match vs. mismatch):
 1. Date: dates are often written in completely different formats between the booking record and the screenshot (e.g. "14 Sep 2026", "2026-09-14", "Sep 14, 2026", "14/09/2026" can all be the SAME date). Parse both and compare the actual calendar date, not the text formatting. Only mark mismatch if the calendar date shown is genuinely a different date.
-2. Time: same principle — "3:00 PM", "15:00", and "3 PM" are the same time of day. Allow for a different timezone label as long as the underlying time is consistent with the booking; only mark mismatch if the actual time of day is genuinely different.
-3. Total pax (guests): look for the TOTAL guest/pax/ticket count shown in the screenshot. If the screenshot breaks pax down by type (e.g. "2 Adults, 1 Child"), add them up yourself and compare the sum to the expected total — do not mark mismatch just because no single number matches if the breakdown sums to the expected total.
-4. Net price: ignore currency symbol, comma, and decimal-formatting differences; compare the numeric amount itself.
-5. Product / experience name: compare the tour/experience/product name shown in the screenshot against the expected name. Minor wording differences (abbreviations, punctuation, added suffixes like "- with hotel pickup", capitalization) still count as a match if it is clearly the same experience. A genuinely different tour or activity is a mismatch, not a not_found.
+2. Time: same principle — "3:00 PM", "15:00", and "3 PM" are the same time of day. Allow for a different timezone label as long as the underlying time is consistent with the booking; only mark mismatch if the actual time of day is genuinely different. Read the time carefully, digit by digit — do not round or guess; if there are multiple times visible on the page (e.g. a countdown timer, a "session expires at" notice, a current-time clock), use only the one labeled as the booking's own date/time slot.
+3. Total pax (guests): look for the TOTAL guest/pax/ticket count shown in the screenshot. If the screenshot breaks pax down by type (e.g. "2 Adults, 1 Child"), you must show the breakdown and the sum explicitly in your reasoning (e.g. "2 Adults + 1 Child = 3") before deciding — do not mark mismatch just because no single number matches if the breakdown sums to the expected total. Do NOT read the pax count from anything other than an explicit guest/pax/traveler count field or selector — a room number, inventory/stock count, quantity-available number, order/booking ID, or any other unrelated number on the page is NEVER the pax count, even if it happens to be near the booking details.
+4. Net price: ignore currency symbol formatting differences, and be careful with decimal vs. thousands separators, which vary by locale: "325.00" and "325,00" both mean three hundred twenty-five (period OR comma can be the decimal separator depending on the site's locale); "1,234.56" and "1.234,56" both mean one thousand two hundred thirty-four point five six (the OTHER symbol is then the thousands separator). Convert both the expected and seen price to a plain number before comparing, and only mark mismatch if the actual numeric amounts genuinely differ.
+5. Product / experience name: compare the tour/experience/product name shown in the screenshot against the expected name. Minor wording differences (abbreviations, punctuation, added suffixes like "- with hotel pickup", capitalization) still count as a match if it is clearly the same experience. The vendor site may show the name in a different language than the booking record (e.g. Portuguese, Spanish, French) — translate it mentally and treat it as a match if it clearly refers to the same experience, even though the words don't look alike. A genuinely different tour or activity is a mismatch, not a not_found.
+6. If a value looks like an implausible artifact rather than a real value — a pax count absurd for the visible tour type, a price or date that looks like placeholder/loading content, or anything that looks like a rendering glitch rather than actual booking data — say so in your reasoning and prefer "not_found" over confidently reporting it as a mismatch.
 
 Separately — always answer this regardless of the fields above:
-6. Page type: classify what the screenshot actually shows, as exactly one of:
+7. Page type: classify what the screenshot actually shows, as exactly one of:
    - "checkout": the expected case — a CHECKOUT / CART / PAYMENT page on the vendor's site, showing the booking being entered and about to be confirmed (an editable cart, guest/date/time selection, a "Pay now" or "Proceed to payment" button, a price breakdown).
    - "ticket": an already-confirmed/issued ticket or booking confirmation instead (a booking/ticket/confirmation number, a QR/barcode, "Booking Confirmed", a voucher) — checking details only AFTER the booking is already placed defeats the entire purpose of catching mistakes before they happen, so this must be flagged whenever it happens.
    - "other": neither of the above — a blank/loading page, an error page, a login/session-expired screen, an unrelated page, or anything else that isn't a checkout page or a ticket. Use this rather than forcing a screenshot into "checkout" or "ticket" when it's genuinely neither.
 
+For each field, write your reasoning FIRST, then your conclusion — think in writing about exactly what you see (quote the relevant text/numbers from the screenshot), work through any conversion or summation the rules above call for, and only then decide the status. A rushed conclusion without this is how obvious values get misread.
+
 Reply ONLY with valid JSON in this exact shape — no markdown, no extra text:
-{"checks":[{"label":"Date","expected":"${date}","status":"match","seenValue":""},{"label":"Time","expected":"${time}","status":"mismatch","seenValue":"11:00 AM"}],"pageType":"checkout","pageTypeNote":""}
+{"checks":[{"label":"Date","reasoning":"Screenshot shows '14/09/2026' under the date field, which is 14 Sep 2026 in day/month/year order — same calendar date as expected.","status":"match","seenValue":""},{"label":"Time","reasoning":"Screenshot shows '09:30' next to the session time. Expected 11:00 AM (=11:00). 09:30 is a genuinely different time of day.","status":"mismatch","seenValue":"09:30"}],"pageType":"checkout","pageTypeNote":""}
 
 Rules:
 - Include exactly one check per field listed above — one for each of: ${labelList}. Do not omit any of them, even if you're unsure — use "not_found" rather than dropping a field entirely.
 - Use the label exactly as given above (e.g. "Net Price", not "Net price" or "Price") — this is how the results get matched back up on the agent's side.
+- reasoning is required for every check, 1-2 sentences, and must come from what's actually visible in the screenshot — never invent a value you didn't actually see.
 - status must be exactly one of "match", "mismatch", or "not_found" per the definitions above.
 - seenValue is required (non-empty) when status is "mismatch", and must be an empty string otherwise.
 - pageType must be exactly one of "checkout", "ticket", or "other" per the definitions above.
@@ -883,6 +899,17 @@ Rules:
   // model literally cannot return markdown, prose, or a differently-shaped
   // object. This is what makes the failure rate approach zero, rather than
   // just parsing defensively after the fact.
+  // `expected` is deliberately NOT part of what the model has to produce —
+  // the Worker already knows it (expectedFields below), so making the model
+  // re-type it back was pure wasted output-token budget. It's merged back
+  // onto each check server-side, right after parsing, before anything else
+  // reads c.expected (see mergeExpectedIntoChecks below).
+  // `reasoning` is required and — critically — declared BEFORE status/
+  // seenValue: Structured Outputs generates object properties in the order
+  // they're declared here, so requiring this field forces the model to
+  // actually write out what it sees (and any conversion/summation) before
+  // it's allowed to commit to a match/mismatch/not_found verdict, rather
+  // than jumping straight to a possibly-hasty answer.
   const VERIFY_SCHEMA = {
     name: 'verify_checks',
     strict: true,
@@ -895,11 +922,11 @@ Rules:
             type: 'object',
             properties: {
               label:     { type: 'string' },
-              expected:  { type: 'string' },
+              reasoning: { type: 'string' },
               status:    { type: 'string', enum: ['match', 'mismatch', 'not_found'] },
               seenValue: { type: 'string' },
             },
-            required: ['label', 'expected', 'status', 'seenValue'],
+            required: ['label', 'reasoning', 'status', 'seenValue'],
             additionalProperties: false,
           },
         },
@@ -927,7 +954,10 @@ Rules:
         },
         body: JSON.stringify({
           model: 'gpt-4o-mini',
-          max_tokens: 300,
+          // Raised from 300: the mandatory reasoning field (see VERIFY_SCHEMA
+          // above) adds real output per check, and getting truncated mid-
+          // response was itself a source of dropped/garbled fields.
+          max_tokens: 1000,
           response_format: { type: 'json_schema', json_schema: VERIFY_SCHEMA },
           messages: [
             {
@@ -989,6 +1019,9 @@ Rules:
     return cors(JSON.stringify({ error: lastError || 'AI Verify failed', raw: lastRaw, steps }), 502);
   }
 
+  // The model no longer outputs `expected` (see VERIFY_SCHEMA) — merge it
+  // back on by label before anything downstream reads c.expected.
+  mergeExpectedIntoChecks(result.checks, expectedFields);
   downgradeFalseTimeMismatches(result.checks);
   downgradeFalseDateMismatches(result.checks);
   result.checks = fillMissingChecks(result.checks, expectedFields);
