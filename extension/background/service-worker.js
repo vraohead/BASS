@@ -13,7 +13,7 @@ chrome.runtime.onInstalled.addListener(() => {
 // Worker's public URL (scripts that never looked at this code), not a
 // targeted attacker — the Worker's CORS restriction (ALLOWED_EXTENSION_ORIGIN)
 // and rate limiting are the other two independent layers on those routes.
-const EXTENSION_SHARED_SECRET = 'REPLACE_WITH_THE_SAME_VALUE_AS_CLOUDFLARE_EXTENSION_SHARED_SECRET';
+const EXTENSION_SHARED_SECRET = 'Vivek@567*98';
 
 // Direct fetch from the service worker — Chrome extensions bypass CORS for
 // host_permissions URLs and share the browser's cookie jar, so BMS session
