@@ -762,21 +762,43 @@ function downgradeFalseDateMismatches(checks) {
 // agent's results (looking like it was never checked at all), this fills
 // in a "not_found" placeholder for any expected field the model's response
 // didn't cover — same treatment as a field it saw but couldn't read.
-// The model's response no longer includes `expected` (VERIFY_SCHEMA dropped
-// it — the Worker already knows it, so having the model re-type it back was
-// wasted output-token budget). This mutates each check in place, matching by
-// label, so downgradeFalseTimeMismatches/downgradeFalseDateMismatches and
-// everything downstream that reads c.expected keeps working unchanged.
-function mergeExpectedIntoChecks(checks, expectedFields) {
+// Canonicalizes the model's checks against the booking record. Matching is
+// by the `field` key (an enum in VERIFY_SCHEMA), not free text, so a check can
+// never fail to line up with its expected field. Then:
+//  - `expected`/`label` are set from the booking record (the model no longer
+//    outputs `expected` — see VERIFY_SCHEMA),
+//  - duplicates for one field collapse to ONE check, keeping the first
+//    credible extraction (a real match/mismatch beats a not_found) so a
+//    parsed value is never overwritten by a later skip,
+//  - "not_applicable" checks are removed (returned separately) — they are
+//    not failures and must not show up as skippable rows.
+function normalizeChecks(checks, expectedFields) {
+  const byKey = new Map(expectedFields.map(f => [f.key, f]));
+  const kept = new Map();
+  const notApplicable = new Set();
   for (const c of checks || []) {
-    const f = expectedFields.find(f => f.label.toLowerCase() === (c.label || '').trim().toLowerCase());
-    c.expected = f ? f.value : '';
+    const f = byKey.get(c.field) || expectedFields.find(f => f.label.toLowerCase() === String(c.label || '').trim().toLowerCase());
+    if (!f) continue;
+    if (c.status === 'not_applicable') { notApplicable.add(f.key); continue; }
+    c.label = f.label;
+    c.expected = f.value;
+    const prev = kept.get(f.key);
+    const credible = c.status === 'match' || c.status === 'mismatch';
+    if (!prev || (prev.status === 'not_found' && credible)) kept.set(f.key, c);
   }
+  // A field judged not_applicable by one check but given a real read by
+  // another keeps the real read.
+  for (const k of kept.keys()) notApplicable.delete(k);
+  return { checks: [...kept.values()], notApplicable: [...notApplicable] };
 }
 
-function fillMissingChecks(checks, expectedFields) {
+// The prompt asks for one check per field, but nothing in the schema forces
+// it — any field the model dropped gets a not_found placeholder, except
+// ones it explicitly called not_applicable.
+function fillMissingChecks(checks, expectedFields, skipKeys = []) {
   const list = checks || [];
   for (const f of expectedFields) {
+    if (skipKeys.includes(f.key)) continue;
     const already = list.some(c => (c.label || '').trim().toLowerCase() === f.label.toLowerCase());
     if (!already) list.push({ label: f.label, expected: f.value, status: 'not_found', seenValue: '' });
   }
@@ -837,21 +859,29 @@ async function handleVerify(request, env, ctx) {
 
   const { date = '', time = '', pax = '', price = '', product = '' } = facts;
 
-  // label is the exact string the model must use for that field's check —
-  // spelling it out per-field (rather than leaving it to infer one from the
-  // description) is what the "one check per field" rule below can actually
-  // be verified against, both by the model and by the fallback further down
-  // that fills in any field the model still drops.
+  // A booking record value of "N/A" (or similar) means the field doesn't
+  // apply to this booking — not something the screenshot must show. Treated
+  // the same as an empty value: no check is requested, so it can never turn
+  // into a "not found" skip.
+  const presentValue = v => {
+    const t = String(v ?? '').trim();
+    return /^(n\/?a|na|none|null|undefined|nil|-+|—+)$/i.test(t) ? '' : t;
+  };
+
+  // `key` is what the model must return for each check (an enum in
+  // VERIFY_SCHEMA below) — NOT a free-text label. Matching on free text is
+  // what used to let "Total pax (guests)" fail to satisfy "Pax" and produce
+  // both a match AND a skipped duplicate for the same field.
   const expectedFields = [
-    { key: 'date',    label: 'Date',       value: date,    desc: `Date: ${date}` },
-    { key: 'time',    label: 'Time',       value: time,    desc: `Time: ${time}` },
-    { key: 'pax',     label: 'Pax',        value: pax,     desc: `Total pax (guests): ${pax}` },
-    { key: 'price',   label: 'Net Price',  value: price,   desc: `Net price: ${price}` },
-    { key: 'product', label: 'Product',    value: product, desc: `Product / experience name: ${product}` },
+    { key: 'date',    label: 'Date',       value: presentValue(date),    desc: `Date: ${presentValue(date)}` },
+    { key: 'time',    label: 'Time',       value: presentValue(time),    desc: `Time: ${presentValue(time)}` },
+    { key: 'pax',     label: 'Pax',        value: presentValue(pax),     desc: `Total pax (guests): ${presentValue(pax)}` },
+    { key: 'price',   label: 'Net Price',  value: presentValue(price),   desc: `Net price: ${presentValue(price)}` },
+    { key: 'product', label: 'Product',    value: presentValue(product), desc: `Product / experience name: ${presentValue(product)}` },
   ].filter(f => f.value);
 
   const factLines = expectedFields.map(f => f.desc).join('\n');
-  const labelList = expectedFields.map(f => `"${f.label}"`).join(', ');
+  const keyList = expectedFields.map(f => `"${f.key}"`).join(', ');
 
   // Deliberately verbose and explicit — the aim is to eliminate manual
   // re-checking entirely, not just catch the easy cases. Every rule below
@@ -861,7 +891,7 @@ async function handleVerify(request, env, ctx) {
 Booking record to match against the screenshot:
 ${factLines}
 
-How to judge each field — for every field, decide between three states:
+How to judge each field — for every field, decide between these states:
 - "match": the value shown is unambiguously the same as expected (after the format-tolerance rules below).
 - "mismatch": the field IS visible and readable in the screenshot, but shows a DIFFERENT value than expected — a genuine contradiction, not just a formatting difference. When you report this, you must also give seenValue: the actual value you read from the screenshot.
 - "not_found": the field is missing, blank, cropped off, or too illegible to read at all — there is nothing to compare, so this is not a contradiction, just an absence. seenValue should be an empty string.
@@ -871,7 +901,7 @@ Per-field tolerance rules (apply before deciding match vs. mismatch):
 2. Time: same principle — "3:00 PM", "15:00", and "3 PM" are the same time of day. Allow for a different timezone label as long as the underlying time is consistent with the booking; only mark mismatch if the actual time of day is genuinely different. Read the time carefully, digit by digit — do not round or guess; if there are multiple times visible on the page (e.g. a countdown timer, a "session expires at" notice, a current-time clock), use only the one labeled as the booking's own date/time slot.
 3. Total pax (guests): look for the TOTAL guest/pax/ticket count shown in the screenshot. If the screenshot breaks pax down by type (e.g. "2 Adults, 1 Child"), you must show the breakdown and the sum explicitly in your reasoning (e.g. "2 Adults + 1 Child = 3") before deciding — do not mark mismatch just because no single number matches if the breakdown sums to the expected total. Do NOT read the pax count from anything other than an explicit guest/pax/traveler count field or selector — a room number, inventory/stock count, quantity-available number, order/booking ID, or any other unrelated number on the page is NEVER the pax count, even if it happens to be near the booking details.
 4. Net price: ignore currency symbol formatting differences, and be careful with decimal vs. thousands separators, which vary by locale: "325.00" and "325,00" both mean three hundred twenty-five (period OR comma can be the decimal separator depending on the site's locale); "1,234.56" and "1.234,56" both mean one thousand two hundred thirty-four point five six (the OTHER symbol is then the thousands separator). Convert both the expected and seen price to a plain number before comparing, and only mark mismatch if the actual numeric amounts genuinely differ.
-5. Product / experience name: compare the tour/experience/product name shown in the screenshot against the expected name. Minor wording differences (abbreviations, punctuation, added suffixes like "- with hotel pickup", capitalization) still count as a match if it is clearly the same experience. The vendor site may show the name in a different language than the booking record (e.g. Portuguese, Spanish, French) — translate it mentally and treat it as a match if it clearly refers to the same experience, even though the words don't look alike. A genuinely different tour or activity is a mismatch, not a not_found.
+5. Product / experience name: look across the WHOLE screenshot before deciding it is missing — the name can appear as a page heading, a cart or order-summary line item, a breadcrumb, a booking/confirmation banner, or a ticket-type title. Compare the tour/experience/product name shown in the screenshot against the expected name. Minor wording differences (abbreviations, punctuation, added suffixes like "- with hotel pickup", capitalization) still count as a match if it is clearly the same experience. The vendor site may show the name in a different language than the booking record (e.g. Portuguese, Spanish, French) — translate it mentally and treat it as a match if it clearly refers to the same experience, even though the words don't look alike. A genuinely different tour or activity is a mismatch, not a not_found.
 6. If a value looks like an implausible artifact rather than a real value — a pax count absurd for the visible tour type, a price or date that looks like placeholder/loading content, or anything that looks like a rendering glitch rather than actual booking data — say so in your reasoning and prefer "not_found" over confidently reporting it as a mismatch.
 
 Separately — always answer this regardless of the fields above:
@@ -883,11 +913,12 @@ Separately — always answer this regardless of the fields above:
 For each field, write your reasoning FIRST, then your conclusion — think in writing about exactly what you see (quote the relevant text/numbers from the screenshot), work through any conversion or summation the rules above call for, and only then decide the status. A rushed conclusion without this is how obvious values get misread.
 
 Reply ONLY with valid JSON in this exact shape — no markdown, no extra text:
-{"checks":[{"label":"Date","reasoning":"Screenshot shows '14/09/2026' under the date field, which is 14 Sep 2026 in day/month/year order — same calendar date as expected.","status":"match","seenValue":""},{"label":"Time","reasoning":"Screenshot shows '09:30' next to the session time. Expected 11:00 AM (=11:00). 09:30 is a genuinely different time of day.","status":"mismatch","seenValue":"09:30"}],"pageType":"checkout","pageTypeNote":""}
+{"checks":[{"field":"date","reasoning":"Screenshot shows '14/09/2026' under the date field, which is 14 Sep 2026 in day/month/year order — same calendar date as expected.","status":"match","seenValue":""},{"field":"time","reasoning":"Screenshot shows '09:30' next to the session time. Expected 11:00 AM (=11:00). 09:30 is a genuinely different time of day.","status":"mismatch","seenValue":"09:30"}],"pageType":"checkout","pageTypeNote":""}
 
 Rules:
-- Include exactly one check per field listed above — one for each of: ${labelList}. Do not omit any of them, even if you're unsure — use "not_found" rather than dropping a field entirely.
-- Use the label exactly as given above (e.g. "Net Price", not "Net price" or "Price") — this is how the results get matched back up on the agent's side.
+- Include exactly one check per field listed above — one for each of these field keys: ${keyList}. Never return two checks for the same field. Do not omit any of them, even if you're unsure — use "not_found" rather than dropping a field entirely.
+- Set "field" to the key exactly as given (lowercase, e.g. "pax", "price") — never a descriptive label like "Total pax (guests)". This is how results get matched back to the booking record.
+- Use "not_applicable" (instead of "not_found") only when the vendor's page clearly has no such concept at all for this product — e.g. a multi-day travel pass or open-date ticket that has no start time or guest-count selector anywhere. If the field could simply be off-screen, cropped, or hard to read, that is "not_found", not "not_applicable".
 - reasoning is required for every check, 1-2 sentences, and must come from what's actually visible in the screenshot — never invent a value you didn't actually see.
 - status must be exactly one of "match", "mismatch", or "not_found" per the definitions above.
 - seenValue is required (non-empty) when status is "mismatch", and must be an empty string otherwise.
@@ -903,7 +934,7 @@ Rules:
   // the Worker already knows it (expectedFields below), so making the model
   // re-type it back was pure wasted output-token budget. It's merged back
   // onto each check server-side, right after parsing, before anything else
-  // reads c.expected (see mergeExpectedIntoChecks below).
+  // reads c.expected (see normalizeChecks).
   // `reasoning` is required and — critically — declared BEFORE status/
   // seenValue: Structured Outputs generates object properties in the order
   // they're declared here, so requiring this field forces the model to
@@ -921,12 +952,12 @@ Rules:
           items: {
             type: 'object',
             properties: {
-              label:     { type: 'string' },
+              field:     { type: 'string', enum: (expectedFields.length ? expectedFields : [{ key: 'date' }, { key: 'time' }, { key: 'pax' }, { key: 'price' }, { key: 'product' }]).map(f => f.key) },
               reasoning: { type: 'string' },
-              status:    { type: 'string', enum: ['match', 'mismatch', 'not_found'] },
+              status:    { type: 'string', enum: ['match', 'mismatch', 'not_found', 'not_applicable'] },
               seenValue: { type: 'string' },
             },
-            required: ['label', 'reasoning', 'status', 'seenValue'],
+            required: ['field', 'reasoning', 'status', 'seenValue'],
             additionalProperties: false,
           },
         },
@@ -1019,12 +1050,13 @@ Rules:
     return cors(JSON.stringify({ error: lastError || 'AI Verify failed', raw: lastRaw, steps }), 502);
   }
 
-  // The model no longer outputs `expected` (see VERIFY_SCHEMA) — merge it
-  // back on by label before anything downstream reads c.expected.
-  mergeExpectedIntoChecks(result.checks, expectedFields);
+  // Canonicalize first — everything downstream reads c.label/c.expected.
+  const normalized = normalizeChecks(result.checks, expectedFields);
+  result.checks = normalized.checks;
+  result.notApplicableFields = normalized.notApplicable;
   downgradeFalseTimeMismatches(result.checks);
   downgradeFalseDateMismatches(result.checks);
-  result.checks = fillMissingChecks(result.checks, expectedFields);
+  result.checks = fillMissingChecks(result.checks, expectedFields, normalized.notApplicable);
 
   // Fire-and-forget: logs one permanent usage event for the reports below
   // (booking-uniqueness, page-type tag distribution, match-rate/field-skip

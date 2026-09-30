@@ -981,7 +981,10 @@ function _getVerifyFacts(flat, guestData) {
     const t = (flat.guestNumbers || []).reduce((s, g) => s + (g.persons || 0), 0);
     if (t) pax = String(t);
   }
-  return { date, time, pax: pax || '', price, product };
+  // "N/A"-style booking values mean the field doesn't apply — same as empty,
+  // so no expected value is requested and nothing can turn into a skip.
+  const clean = v => (/^(n\/?a|na|none|null|undefined|nil|-+|—+)$/i.test(String(v ?? '').trim()) ? '' : v);
+  return { date: clean(date), time: clean(time), pax: clean(pax || ''), price: clean(price), product: clean(product) };
 }
 
 function buildVerifySection(flat, guestData) {
@@ -1229,10 +1232,18 @@ function buildVerifySection(flat, guestData) {
       ? `<p class="verify-checkout-flag">❓ This doesn't look like a checkout page or an issued ticket${result.pageTypeNote ? ` — ${escHtml(result.pageTypeNote)}` : ''}. Make sure you're capturing the vendor's checkout/cart page.</p>`
       : '';
 
+    // Most fields unreadable at once usually means the screenshot doesn't
+    // show the booking details at all (captureVisibleTab only grabs what's
+    // on screen), not that each value is independently missing.
+    const notFoundCount = checks.filter(c => c.status === 'not_found').length;
+    const coverageBanner = (checks.length >= 3 && notFoundCount >= Math.ceil(checks.length * 0.6) && !checkoutBanner)
+      ? '<p class="verify-checkout-flag">🔎 Most fields could not be read from this screenshot — the booking summary is probably scrolled off-screen or hidden. Scroll so the booking details are visible and capture again before skipping anything.</p>'
+      : '';
+
     if (!checks.length) {
       resultsEl.innerHTML = checkoutBanner || '<p class="verify-result-error">No results returned from AI.</p>';
     } else {
-      resultsEl.innerHTML = checkoutBanner + crossCheckedNote + checks.map((c, i) => renderVerifyRow(c, i)).join('');
+      resultsEl.innerHTML = checkoutBanner + coverageBanner + crossCheckedNote + checks.map((c, i) => renderVerifyRow(c, i)).join('');
       const { totalMismatches } = wireSkipBoxes(resultsEl, confirmRow);
       // Perfect match, nothing to skip — confirm automatically instead of
       // waiting on a click that has nothing left to gate. Never auto-confirm
