@@ -857,7 +857,7 @@ async function handleVerify(request, env, ctx) {
     return cors(JSON.stringify({ error: 'Invalid JSON body', steps }), 400);
   }
 
-  const { imageBase64, mimeType = 'image/png', facts = {}, bookingId = '', agentEmail = '', vendor = '' } = body;
+  const { imageBase64, mimeType = 'image/png', facts = {}, bookingId = '', agentEmail = '', vendor = '', pageText = '' } = body;
 
   if (!imageBase64) {
     logStep('validate_input', false, 'imageBase64 missing');
@@ -1121,7 +1121,147 @@ Rules:
     }));
   }
 
+  // Shadow mode: when the extension also captured the page's text, run the
+  // same check on text alone AFTER responding and log how it compares to the
+  // screenshot verdict. Never affects this response or its latency.
+  if (typeof pageText === 'string' && pageText.trim().length >= 50 && bookingId) {
+    const screenshotStatuses = {};
+    for (const c of result.checks || []) screenshotStatuses[c.label] = c.status;
+    for (const key of result.notApplicableFields || []) {
+      const f = expectedFields.find(f => f.key === key);
+      if (f) screenshotStatuses[f.label] = 'not_applicable';
+    }
+    ctx.waitUntil(runShadowTextVerify(env, {
+      prompt, schema: VERIFY_SCHEMA, expectedFields, pageText,
+      screenshotStatuses, screenshotPageType: result.pageType || null,
+      bookingId, agentEmail, vendor,
+    }));
+  }
+
   return cors(JSON.stringify({ ...result, steps }), 200);
+}
+
+// ── Shadow mode: page text vs screenshot ─────────────────────────────────────
+// Runs the same verification on the captured page TEXT (no image — a fraction
+// of the cost) and stores how its per-field verdicts compare to the
+// screenshot's, under its own KV prefix so it can never be mistaken for a real
+// verification event. Purely for the admin dashboard; agents never see it.
+const SHADOW_LOG_PREFIX = 'shadowlog:';
+
+async function runShadowTextVerify(env, { prompt, schema, expectedFields, pageText, screenshotStatuses, screenshotPageType, bookingId, agentEmail, vendor }) {
+  try {
+    if (!env.CONFIG || !env.OPENAI_API_KEY) return;
+    const textPrompt =
+      'IMPORTANT: for this request you are NOT given a screenshot. Instead you are given the page\'s text content at the end (visible text from every frame, then the current values of form inputs/selects). Wherever the instructions below say "screenshot", read that page text instead. The text can include hidden or unrelated content (other products, stale panels, inventory counts), so only accept a value when it is in the booking details / selection / order-summary area — not merely somewhere on the page. Judge the page type from the wording.\n\n' +
+      prompt + '\n\nPAGE TEXT:\n' + pageText.slice(0, 30000);
+
+    const res = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        max_tokens: 1000,
+        response_format: { type: 'json_schema', json_schema: schema },
+        messages: [{ role: 'user', content: textPrompt }],
+      }),
+    });
+    if (!res.ok) return;
+    const data = await res.json();
+    const content = data.choices?.[0]?.message?.content?.trim();
+    if (!content) return;
+    const parsed = JSON.parse(content);
+
+    const normalized = normalizeChecks(parsed.checks, expectedFields);
+    let checks = normalized.checks;
+    downgradeFalseTimeMismatches(checks);
+    downgradeFalseDateMismatches(checks);
+    downgradeLooseProductMismatches(checks);
+    checks = fillMissingChecks(checks, expectedFields, normalized.notApplicable);
+
+    const textStatuses = {};
+    for (const c of checks) textStatuses[c.label] = c.status;
+    for (const key of normalized.notApplicable) {
+      const f = expectedFields.find(f => f.key === key);
+      if (f) textStatuses[f.label] = 'not_applicable';
+    }
+
+    let compared = 0;
+    const diffs = [];
+    for (const f of expectedFields) {
+      const t = textStatuses[f.label], sct = screenshotStatuses[f.label];
+      if (!t || !sct) continue;
+      compared++;
+      if (t !== sct) diffs.push(`${f.key}:${t}/${sct}`); // text/screenshot
+    }
+
+    await env.CONFIG.put(`${SHADOW_LOG_PREFIX}${crypto.randomUUID()}`, '1', {
+      metadata: {
+        bookingId, email: agentEmail || null, vendor: vendor || null,
+        compared, diffs: diffs.slice(0, 5),
+        pageTypeText: parsed.pageType || null,
+        pageTypeScreenshot: screenshotPageType,
+        at: new Date().toISOString(),
+      },
+    });
+  } catch (_) {
+    // Shadow mode must never surface an error anywhere.
+  }
+}
+
+async function listShadowEvents(env, { start, end } = {}) {
+  const startMs = start ? new Date(start).getTime() : -Infinity;
+  const endMs = end ? new Date(end).getTime() : Infinity;
+  const out = [];
+  let cursor;
+  do {
+    const page = await env.CONFIG.list({ prefix: SHADOW_LOG_PREFIX, cursor });
+    for (const k of page.keys) {
+      const m = k.metadata;
+      const atMs = m?.at ? Date.parse(m.at) : NaN;
+      if (Number.isNaN(atMs) || atMs < startMs || atMs > endMs) continue;
+      out.push(m);
+    }
+    cursor = page.list_complete ? undefined : page.cursor;
+  } while (cursor);
+  return out;
+}
+
+function summarizeShadow(events) {
+  let fieldsCompared = 0, fieldsDisagreed = 0, fullyAgree = 0;
+  let textLenient = 0, textStricter = 0, pageTypeDisagree = 0;
+  const perField = new Map();
+  for (const e of events) {
+    fieldsCompared += e.compared || 0;
+    const diffs = e.diffs || [];
+    if (!diffs.length) fullyAgree++;
+    fieldsDisagreed += diffs.length;
+    for (const d of diffs) {
+      const [key, pair] = d.split(':');
+      const [t, sct] = (pair || '').split('/');
+      perField.set(key, (perField.get(key) || 0) + 1);
+      // "Lenient" = text called it a match where the screenshot didn't — the
+      // dangerous direction, since it would let a real mistake through.
+      if (t === 'match' && sct !== 'match') textLenient++;
+      else if (t !== 'match' && sct === 'match') textStricter++;
+    }
+    if (e.pageTypeText && e.pageTypeScreenshot && e.pageTypeText !== e.pageTypeScreenshot) pageTypeDisagree++;
+  }
+  const recent = events
+    .filter(e => (e.diffs || []).length)
+    .sort((a, b) => Date.parse(b.at) - Date.parse(a.at))
+    .slice(0, 15)
+    .map(e => ({ bookingId: e.bookingId, email: e.email, diffs: e.diffs, at: e.at }));
+  return {
+    compared: events.length,
+    fullyAgree,
+    fieldsCompared,
+    fieldsDisagreed,
+    textLenient,
+    textStricter,
+    pageTypeDisagree,
+    perField: [...perField.entries()].sort((a, b) => b[1] - a[1]),
+    recentDisagreements: recent,
+  };
 }
 
 // Posted the moment AI Verify itself catches a genuine mismatch — before
@@ -1833,6 +1973,7 @@ async function handleAdminUsageReportRange(request, env, url) {
   }
   const summary = summarizeEvents(events);
   const { bookings, bookingsTruncated } = eventsToBookingsList(events);
+  const shadow = summarizeShadow(await listShadowEvents(env, { start, end }));
 
   return cors(JSON.stringify({
     ok: true,
@@ -1840,6 +1981,7 @@ async function handleAdminUsageReportRange(request, env, url) {
     start, end, filter,
     totalEvents: events.length,
     ...summary,
+    shadow,
     bookings,
     bookingsTruncated,
   }), 200);
@@ -2633,6 +2775,17 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
     </div>
 
     <div class="card" style="margin-bottom:20px;">
+      <h2 style="font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);font-weight:600;margin:0 0 6px;">Text vs screenshot check (shadow mode)</h2>
+      <p class="kpi-sub" id="shadow-summary" style="margin:0 0 12px;">Loading...</p>
+      <div class="table-wrap" style="max-height:300px; overflow-y:auto;">
+        <table class="an-table">
+          <thead><tr><th>Booking ID</th><th>Agent</th><th>Field: text / screenshot</th><th>At</th></tr></thead>
+          <tbody id="shadow-table-body"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:20px;">
       <h2 style="font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);font-weight:600;margin:0 0 14px;">Flagged booking IDs</h2>
       <div class="table-wrap" style="max-height:340px; overflow-y:auto;">
         <table class="an-table">
@@ -3053,6 +3206,28 @@ const ADMIN_PAGE_HTML = `<!DOCTYPE html>
     document.getElementById('kpi-ai-calls-sub').textContent = reruns > 0
       ? reruns + ' re-run(s) beyond one call per unique booking'
       : 'Total OpenAI vision calls — each one costs money';
+
+    // Shadow mode: how a text-only check compares to the screenshot verdict.
+    // Only the Dashboard (usage log) source carries this data.
+    var sh = d.shadow;
+    var shSummary = document.getElementById('shadow-summary');
+    var shBody = document.getElementById('shadow-table-body');
+    if (!sh) {
+      shSummary.textContent = 'Only tracked in the Dashboard source - switch the Source toggle to Dashboard to see it.';
+      shBody.innerHTML = '';
+    } else if (!sh.compared) {
+      shSummary.textContent = 'No comparisons yet - they appear after an agent captures a tab (not a pasted/uploaded image) and runs AI Verify.';
+      shBody.innerHTML = '';
+    } else {
+      shSummary.textContent = sh.compared + ' verification(s) compared - ' + pct(sh.fullyAgree, sh.compared) + ' fully agree - ' +
+        pct(sh.fieldsCompared - sh.fieldsDisagreed, sh.fieldsCompared) + ' of individual fields agree. ' +
+        'Text more lenient than screenshot (risky direction): ' + sh.textLenient + ' - text stricter: ' + sh.textStricter +
+        ' - page type differs: ' + sh.pageTypeDisagree + '.';
+      shBody.innerHTML = (sh.recentDisagreements || []).map(function (r) {
+        return '<tr><td class="tabular">' + escHtml(r.bookingId || '') + '</td><td>' + escHtml(r.email || '') + '</td><td>' +
+          escHtml((r.diffs || []).join(', ')) + '</td><td>' + escHtml(new Date(r.at).toLocaleString()) + '</td></tr>';
+      }).join('') || '<tr><td colspan="4">No disagreements.</td></tr>';
+    }
 
     var totalTagged = d.checkoutBookingCount + d.ticketBookingCount + d.otherPageBookingCount;
     document.getElementById('kpi-checkout-rate').textContent = pct(d.checkoutBookingCount, totalTagged);

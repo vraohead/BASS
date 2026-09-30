@@ -94,11 +94,38 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
     chrome.tabs.query({ active: true, lastFocusedWindow: true }, async tabs => {
       if (!tabs[0]) { sendResponse({ ok: false, error: 'No active tab' }); return; }
       try {
+        // Every frame, not just the top one (checkout widgets often live in
+        // iframes), plus the current values of inputs/selects — those are
+        // not part of innerText, and a chosen date or guest count is often
+        // only there. Password/card-style fields are never read.
         const results = await chrome.scripting.executeScript({
-          target: { tabId: tabs[0].id },
-          func: () => document.body.innerText,
+          target: { tabId: tabs[0].id, allFrames: true },
+          func: () => {
+            const text = document.body ? document.body.innerText : '';
+            const fields = [];
+            document.querySelectorAll('input, select, textarea').forEach(el => {
+              const type = (el.type || '').toLowerCase();
+              if (['password', 'hidden', 'file', 'button', 'submit', 'reset', 'image'].includes(type)) return;
+              const ac = (el.getAttribute('autocomplete') || '').toLowerCase();
+              if (ac.startsWith('cc-') || /card|cvv|cvc|iban|ssn|passw/i.test((el.name || '') + ' ' + (el.id || ''))) return;
+              let value = '';
+              if (el.tagName === 'SELECT') value = el.options[el.selectedIndex]?.text || '';
+              else if (type === 'checkbox' || type === 'radio') { if (!el.checked) return; value = el.value || 'checked'; }
+              else value = el.value || '';
+              value = String(value).trim();
+              if (!value) return;
+              const label = (el.labels && el.labels[0] && el.labels[0].innerText) || el.getAttribute('aria-label') || el.name || el.id || el.placeholder || type;
+              fields.push(String(label).trim().slice(0, 60) + ': ' + value.slice(0, 120));
+            });
+            return { text, fields };
+          },
         });
-        sendResponse({ ok: true, text: results[0]?.result || '' });
+        const frames = results.map(r => r?.result).filter(Boolean);
+        const texts = frames.map(f => (f.text || '').trim()).filter(Boolean);
+        const fields = frames.flatMap(f => f.fields || []);
+        let text = texts.join('\n\n--- another frame ---\n\n');
+        if (fields.length) text += '\n\n--- Form values (currently selected/typed) ---\n' + fields.join('\n');
+        sendResponse({ ok: true, text: text.slice(0, 30000) });
       } catch (err) {
         sendResponse({ ok: false, error: err.message });
       }
@@ -131,13 +158,13 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
   }
 
   if (request.action === 'VERIFY_IMAGE') {
-    const { imageBase64, mimeType, facts, bookingId, agentEmail, vendor, workerUrl } = request;
+    const { imageBase64, mimeType, facts, bookingId, agentEmail, vendor, workerUrl, pageText } = request;
     (async () => {
       try {
         const res = await fetch(`${workerUrl.replace(/\/$/, '')}/verify`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'X-Extension-Secret': EXTENSION_SHARED_SECRET },
-          body: JSON.stringify({ imageBase64, mimeType, facts, bookingId, agentEmail, vendor }),
+          body: JSON.stringify({ imageBase64, mimeType, facts, bookingId, agentEmail, vendor, pageText }),
         });
         const data = await res.json();
         sendResponse(res.ok

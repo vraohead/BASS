@@ -1180,6 +1180,9 @@ function buildVerifySection(flat, guestData) {
       agentEmail,
       vendor: vendorName,
       workerUrl,
+      // Sent only so the Worker can run a background text-vs-screenshot
+      // comparison for the admin dashboard — it never changes what the agent sees.
+      pageText: sec._capturedResponseText || '',
     });
 
     aiBtn.disabled = false;
